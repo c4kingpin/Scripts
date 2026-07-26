@@ -1,16 +1,19 @@
 #!/usr/bin/env bash
 # Codex Dev Box - Proxmox VE LXC installer
-# Ubuntu 24.04 LTS, SSH key access, Node.js, Codex CLI and Remote Control
+# Ubuntu 24.04 LTS, SSH, Node.js, Elixir/Phoenix, GitHub and Codex
 # License: MIT
 
 set -Eeuo pipefail
 shopt -s inherit_errexit 2>/dev/null || true
 
 readonly APP="Codex Dev Box"
-readonly VERSION="1.3.1"
+readonly VERSION="1.4.0"
 readonly UBUNTU_VERSION="24.04"
 readonly NODE_MAJOR="${NODE_MAJOR:-24}"
 readonly CODEX_RELEASE="${CODEX_RELEASE:-latest}"
+readonly ERLANG_VERSION="${ERLANG_VERSION:-28.4}"
+readonly ELIXIR_VERSION="${ELIXIR_VERSION:-1.20.2}"
+readonly PHOENIX_VERSION="${PHOENIX_VERSION:-1.8.9}"
 readonly MIN_CODEX_REMOTE_CONTROL_VERSION="0.143.0"
 readonly NODESOURCE_KEY_FINGERPRINT="6F71F525282841EEDAF851B42F59B5F99B1BE0B4"
 
@@ -97,6 +100,10 @@ Optionale Umgebungsvariablen:
   NODE_MAJOR     Node.js-Hauptversion (22 oder 24; Standard: ${NODE_MAJOR})
   CODEX_RELEASE  Codex-Version ab ${MIN_CODEX_REMOTE_CONTROL_VERSION} oder
                  "latest" (Standard: ${CODEX_RELEASE})
+  ERLANG_VERSION Erlang/OTP-Version (Standard: ${ERLANG_VERSION})
+  ELIXIR_VERSION Elixir-Version (Standard: ${ELIXIR_VERSION})
+  PHOENIX_VERSION
+                 Phoenix-Generator-Version (Standard: ${PHOENIX_VERSION})
 EOF
 }
 
@@ -147,7 +154,7 @@ header() {
 / /___/ /_/ / /_/ / /_/ />  <  / /_/ /  __/| |/ / /_/ / /_/ />  <
 \____/\____/\__,_/\____/_/|_| /_____/\___/ |___/_____/\____/_/|_|
 BANNER
-  printf '%b\n' "${BOLD}Proxmox VE LXC Installer – Ubuntu ${UBUNTU_VERSION}, SSH, Codex CLI und Remote Control${CL}"
+  printf '%b\n' "${BOLD}Proxmox VE LXC Installer – Ubuntu ${UBUNTU_VERSION}, Phoenix, GitHub und Codex${CL}"
   printf 'Version %s\n\n' "$VERSION"
 }
 
@@ -218,6 +225,13 @@ require_pve() {
 
   [[ "$NODE_MAJOR" =~ ^(22|24)$ ]] ||
     fatal "NODE_MAJOR muss 22 oder 24 sein."
+
+  [[ "$ERLANG_VERSION" =~ ^[0-9]+(\.[0-9]+){1,2}$ ]] ||
+    fatal "ERLANG_VERSION muss eine numerische Version wie 28.4 sein."
+  [[ "$ELIXIR_VERSION" =~ ^[0-9]+(\.[0-9]+){1,2}$ ]] ||
+    fatal "ELIXIR_VERSION muss eine numerische Version wie 1.20.2 sein."
+  [[ "$PHOENIX_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] ||
+    fatal "PHOENIX_VERSION muss eine stabile Version wie 1.8.9 sein."
 
   [[ "$CODEX_RELEASE" == "latest" ||
     "$CODEX_RELEASE" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-(alpha|beta)(\.[0-9]+)?)?$ ]] ||
@@ -658,8 +672,11 @@ Benutzer:          ${DEV_USER}
 SSH-Key:           ${SSH_KEY_FINGERPRINT}
 Agent-Forwarding:  ${ALLOW_AGENT_FORWARDING}
 Node.js:           ${NODE_MAJOR}.x
+Erlang/OTP:        ${ERLANG_VERSION}
+Elixir:            ${ELIXIR_VERSION}
+Phoenix:           ${PHOENIX_VERSION}
 Codex:             ${CODEX_RELEASE}" \
-    27 82
+    30 82
 }
 
 latest_ubuntu_template() {
@@ -758,8 +775,14 @@ wait_for_network() {
 
   local required_hosts=(
     archive.ubuntu.com
+    builds.hex.pm
     chatgpt.com
     deb.nodesource.com
+    github.com
+    mise-versions.jdx.dev
+    mise.jdx.dev
+    mise.run
+    repo.hex.pm
     security.ubuntu.com
   )
   local missing_hosts=()
@@ -796,10 +819,13 @@ install_devbox() {
     CODEX_RELEASE="$CODEX_RELEASE" \
     CT_HOSTNAME="$CT_HOSTNAME" \
     DEV_USER="$DEV_USER" \
+    ELIXIR_VERSION="$ELIXIR_VERSION" \
+    ERLANG_VERSION="$ERLANG_VERSION" \
     LANG=C.UTF-8 \
     LC_ALL=C.UTF-8 \
     NODESOURCE_KEY_FINGERPRINT="$NODESOURCE_KEY_FINGERPRINT" \
     NODE_MAJOR="$NODE_MAJOR" \
+    PHOENIX_VERSION="$PHOENIX_VERSION" \
     SSH_PUBLIC_KEY="$SSH_PUBLIC_KEY" \
     bash -s <<'INNER'
 set -Eeuo pipefail
@@ -816,12 +842,16 @@ codex_version_output=""
 dev_uid=""
 fd_binary=""
 gpg_home=""
+mise_bin=""
+mise_installer=""
+phoenix_version_output=""
 sshd_effective=""
 
 cleanup() {
   [[ -z "$nodesource_key" ]] || rm -f "$nodesource_key"
   [[ -z "$codex_installer" ]] || rm -f "$codex_installer"
   [[ -z "$gpg_home" ]] || rm -rf -- "$gpg_home"
+  [[ -z "$mise_installer" ]] || rm -f "$mise_installer"
 }
 trap cleanup EXIT
 
@@ -928,6 +958,21 @@ download() {
     printf 'Nicht unterstützte Node.js-Hauptversion.\n' >&2
     exit 1
   }
+[[ "$ERLANG_VERSION" =~ ^[0-9]+(\.[0-9]+){1,2}$ ]] ||
+  {
+    printf 'Ungültige Erlang/OTP-Version.\n' >&2
+    exit 1
+  }
+[[ "$ELIXIR_VERSION" =~ ^[0-9]+(\.[0-9]+){1,2}$ ]] ||
+  {
+    printf 'Ungültige Elixir-Version.\n' >&2
+    exit 1
+  }
+[[ "$PHOENIX_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] ||
+  {
+    printf 'Ungültige Phoenix-Version.\n' >&2
+    exit 1
+  }
 [[ "$CODEX_RELEASE" == "latest" ||
   "$CODEX_RELEASE" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-(alpha|beta)(\.[0-9]+)?)?$ ]] ||
   {
@@ -950,7 +995,9 @@ apt_get install -y --no-install-recommends \
   fd-find \
   git \
   git-lfs \
+  gh \
   gnupg \
+  inotify-tools \
   jq \
   less \
   nano \
@@ -959,6 +1006,8 @@ apt_get install -y --no-install-recommends \
   python3 \
   python3-pip \
   python3-venv \
+  postgresql \
+  postgresql-client \
   ripgrep \
   rsync \
   shellcheck \
@@ -968,6 +1017,7 @@ apt_get install -y --no-install-recommends \
   unzip \
   vim \
   wget \
+  xz-utils \
   zip
 
 log "Node.js ${NODE_MAJOR} installieren"
@@ -1073,6 +1123,66 @@ chown "$DEV_USER:$DEV_USER" "${DEV_HOME}/.ssh/authorized_keys"
 chmod 0600 "${DEV_HOME}/.ssh/authorized_keys"
 
 install -d -m 0755 -o "$DEV_USER" -g "$DEV_USER" "${DEV_HOME}/workspace"
+install -d -m 0700 -o "$DEV_USER" -g "$DEV_USER" "${DEV_HOME}/.codex"
+cat >"${DEV_HOME}/.codex/AGENTS.md" <<'AGENTS'
+# Devbox working agreements
+
+- Follow repository-specific `AGENTS.md` files and project conventions.
+- Work on a task branch; never push directly to the default branch.
+- Run the relevant tests and inspect the diff before publishing changes.
+- For completed work in a GitHub repository, create a focused commit, push the
+  task branch, and create or update a draft pull request when `gh` is
+  authenticated, unless the user requested local-only work.
+- Never commit credentials, tokens, `.env` files, or generated secrets.
+- Never force-push unless the user explicitly requests it.
+AGENTS
+chown "$DEV_USER:$DEV_USER" "${DEV_HOME}/.codex/AGENTS.md"
+chmod 0644 "${DEV_HOME}/.codex/AGENTS.md"
+
+log "Erlang/OTP ${ERLANG_VERSION}, Elixir ${ELIXIR_VERSION} und Phoenix ${PHOENIX_VERSION} installieren"
+mise_installer="$(mktemp)"
+download "https://mise.run" "$mise_installer"
+chmod 0755 "$mise_installer"
+mise_bin="${DEV_HOME}/.local/bin/mise"
+run_as_dev env \
+  MISE_INSTALL_PATH="$mise_bin" \
+  sh "$mise_installer"
+[[ -x "$mise_bin" ]] ||
+  {
+    printf 'mise wurde nicht unter %s installiert.\n' "$mise_bin" >&2
+    exit 1
+  }
+
+run_as_dev env MISE_ERLANG_COMPILE=false \
+  "$mise_bin" use --global "erlang@${ERLANG_VERSION}"
+run_as_dev "$mise_bin" use --global "elixir@${ELIXIR_VERSION}"
+run_as_dev "$mise_bin" reshim
+run_as_dev "$mise_bin" exec -- mix local.hex --force
+run_as_dev "$mise_bin" exec -- mix local.rebar --force
+run_as_dev "$mise_bin" exec -- \
+  mix archive.install hex phx_new "$PHOENIX_VERSION" --force
+
+log "Lokales PostgreSQL für Phoenix einrichten"
+systemctl enable --now postgresql.service
+sudo -u postgres -H psql \
+  --set ON_ERROR_STOP=on \
+  --command "ALTER ROLE postgres WITH PASSWORD 'postgres';"
+sudo -u postgres -H psql \
+  --set ON_ERROR_STOP=on \
+  --command "ALTER SYSTEM SET listen_addresses TO 'localhost';"
+systemctl restart postgresql.service
+cat >"${DEV_HOME}/.pgpass" <<'PGPASS'
+127.0.0.1:5432:*:postgres:postgres
+localhost:5432:*:postgres:postgres
+PGPASS
+chown "$DEV_USER:$DEV_USER" "${DEV_HOME}/.pgpass"
+chmod 0600 "${DEV_HOME}/.pgpass"
+run_as_dev psql \
+  --host 127.0.0.1 \
+  --username postgres \
+  --dbname postgres \
+  --no-password \
+  --command 'SELECT 1;' >/dev/null
 
 log "Codex CLI ${CODEX_RELEASE} installieren"
 codex_installer="$(mktemp)"
@@ -1472,14 +1582,17 @@ systemctl restart ssh.service
 
 log "Shell und Workspace konfigurieren"
 cat >/etc/profile.d/codex-devbox.sh <<'PROFILE'
-export PATH="/usr/local/bin:$HOME/.local/bin:$PATH"
+export PATH="$HOME/.local/share/mise/shims:/usr/local/bin:$HOME/.local/bin:$PATH"
 PROFILE
 chmod 0644 /etc/profile.d/codex-devbox.sh
 
 cat >>"${DEV_HOME}/.bashrc" <<'BASHRC'
 
 # Codex Dev Box
-export PATH="/usr/local/bin:$HOME/.local/bin:$PATH"
+export PATH="$HOME/.local/share/mise/shims:/usr/local/bin:$HOME/.local/bin:$PATH"
+if [[ $- == *i* ]] && command -v mise >/dev/null 2>&1; then
+  eval "$(mise activate bash)"
+fi
 if [[ $- == *i* ]] && [[ -d "$HOME/workspace" ]]; then
   cd "$HOME/workspace"
 fi
@@ -1492,8 +1605,11 @@ BASHRC
 
 chown "$DEV_USER:$DEV_USER" "${DEV_HOME}/.bashrc"
 
-log "Git LFS und automatische Sicherheitsupdates aktivieren"
+log "Git-Werkzeuge und automatische Sicherheitsupdates aktivieren"
 run_as_dev git lfs install --skip-repo
+run_as_dev git config --global init.defaultBranch main
+run_as_dev git config --global pull.ff only
+run_as_dev git config --global push.autoSetupRemote true
 cat >/etc/apt/apt.conf.d/20auto-upgrades <<'AUTO_UPGRADES'
 APT::Periodic::Update-Package-Lists "1";
 APT::Periodic::Unattended-Upgrade "1";
@@ -1504,15 +1620,34 @@ log "Installation prüfen"
 command -v node
 command -v npm
 command -v git
+command -v gh
 command -v python3
 command -v rg
 command -v fd
+command -v inotifywait
+command -v psql
 node --version
 npm --version
 git lfs version
+gh --version
 python3 --version
 rg --version
 fd --version
+run_as_dev "$mise_bin" --version
+run_as_dev "$mise_bin" exec -- erl -noshell -eval \
+  'io:format("Erlang/OTP ~s~n", [erlang:system_info(otp_release)]), halt().'
+run_as_dev "$mise_bin" exec -- elixir --version
+run_as_dev "$mise_bin" exec -- mix --version
+phoenix_version_output="$(
+  run_as_dev "$mise_bin" exec -- mix phx.new --version
+)"
+printf '%s\n' "$phoenix_version_output"
+[[ "$phoenix_version_output" == *"$PHOENIX_VERSION"* ]] ||
+  {
+    printf 'Installierte Phoenix-Version entspricht nicht %s: %s\n' \
+      "$PHOENIX_VERSION" "$phoenix_version_output" >&2
+    exit 1
+  }
 codex_version_output="$(
   run_as_dev "${DEV_HOME}/.local/bin/codex" --version
 )"
@@ -1536,6 +1671,18 @@ systemctl is-active --quiet "user@${dev_uid}.service"
 test -S "/run/user/${dev_uid}/bus"
 run_as_dev test -w "${DEV_HOME}/workspace"
 run_as_dev sudo -n true
+[[ "$(stat -c '%U:%G:%a' "${DEV_HOME}/.codex/AGENTS.md")" == \
+  "${DEV_USER}:${DEV_USER}:644" ]]
+[[ "$(stat -c '%U:%G:%a' "${DEV_HOME}/.pgpass")" == \
+  "${DEV_USER}:${DEV_USER}:600" ]]
+systemctl is-active --quiet postgresql.service
+pg_isready --host 127.0.0.1 --port 5432
+[[ "$(
+  sudo -u postgres -H psql \
+    --tuples-only \
+    --no-align \
+    --command 'SHOW listen_addresses;'
+)" == "localhost" ]]
 [[ "$(stat -c '%U:%G:%a' "${DEV_HOME}/.ssh")" == \
   "${DEV_USER}:${DEV_USER}:700" ]]
 [[ "$(stat -c '%U:%G:%a' "${DEV_HOME}/.ssh/authorized_keys")" == \
@@ -1596,6 +1743,13 @@ Beim ersten interaktiven SSH-Login startet die Remote-Control-Einrichtung.
 Es koppelt Codex per Gerätecode mit dem ChatGPT-Konto, aktiviert den
 persistenten Benutzerdienst und zeigt einen kurzlebigen Pairing-Code an.
 
+Einmalige GitHub-Einrichtung:
+
+  git config --global user.name "DEIN NAME"
+  git config --global user.email "DEINE GITHUB-ADRESSE"
+  gh auth login
+  gh auth setup-git
+
 Spätere Verwaltung:
 
   codex-devbox-remote-control --status
@@ -1606,6 +1760,14 @@ Danach kann Codex wie gewohnt im Workspace gestartet werden:
 
   cd ~/workspace
   codex
+
+Elixir/Phoenix:
+
+  elixir --version
+  mix phx.new meine_app
+
+PostgreSQL läuft nur lokal. Neue Phoenix-Projekte können die Standardwerte
+Benutzer "postgres" und Passwort "postgres" verwenden.
 
 Hinweis: Der Benutzer darf über sudo weitere benötigte Werkzeuge installieren.
 EOF

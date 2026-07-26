@@ -2,8 +2,8 @@
 
 Interaktiver Installer für eine unprivilegierte Ubuntu-24.04-LXC-Devbox auf
 Proxmox VE. Das Skript richtet SSH-Public-Key-Zugriff, Node.js, Python,
-Git-Werkzeuge, die Codex CLI und optionales Remote Control mit persistentem
-Autostart ein.
+Erlang/Elixir mit Phoenix, lokales PostgreSQL, GitHub-Werkzeuge, die Codex CLI
+und optionales Remote Control mit persistentem Autostart ein.
 
 ## Voraussetzungen
 
@@ -30,12 +30,17 @@ manuelle Werte gelten mindestens 2 GiB RAM und 16 GiB Disk. Statische
 IPv4-Konfigurationen benötigen eine nutzbare Host-Adresse und ein Gateway im
 selben `/1`- bis `/30`-Subnetz.
 
-Für reproduzierbare Installationen kann eine konkrete Codex-Version gesetzt
-werden. Standard ist die aktuelle LTS-Linie Node.js 24; Node.js 22 bleibt als
-Maintenance-LTS-Option verfügbar:
+Für reproduzierbare Installationen können konkrete Codex-, Erlang-, Elixir- und
+Phoenix-Versionen gesetzt werden. Standard ist die aktuelle LTS-Linie Node.js
+24; Node.js 22 bleibt als Maintenance-LTS-Option verfügbar:
 
 ```bash
-CODEX_RELEASE=0.145.0 NODE_MAJOR=24 bash ./codex-devbox.sh
+CODEX_RELEASE=0.145.0 \
+ERLANG_VERSION=28.4 \
+ELIXIR_VERSION=1.20.2 \
+PHOENIX_VERSION=1.8.9 \
+NODE_MAJOR=24 \
+bash ./codex-devbox.sh
 ```
 
 Remote Control einschließlich manuellem Pairing benötigt mindestens Codex
@@ -50,6 +55,58 @@ Weitere Optionen:
 bash ./codex-devbox.sh --help
 bash ./codex-devbox.sh --version
 ```
+
+## Elixir und Phoenix
+
+`mise` verwaltet Erlang/OTP und Elixir im Benutzerkontext. Dadurch kann ein
+Repository mit `mise.toml` oder `.tool-versions` eigene Laufzeitversionen
+festlegen, ohne das Basissystem umzubauen. Hex, Rebar und der gepinnte
+`phx_new`-Generator sind bereits eingerichtet:
+
+```bash
+elixir --version
+mix phx.new meine_app
+cd meine_app
+mix setup
+mix phx.server
+```
+
+PostgreSQL läuft als lokaler Systemdienst und lauscht ausschließlich auf
+`localhost`. Für die von Phoenix erzeugte Entwicklungskonfiguration stehen
+Benutzer `postgres` und Passwort `postgres` bereit. Die Zugangsdaten liegen
+zusätzlich in `~/.pgpass` mit Modus `0600`. `inotify-tools` ermöglicht Phoenix
+Live Reload unter Linux.
+
+## GitHub-Workflow
+
+Die GitHub CLI `gh` ist installiert. Anmeldung und persönliche Git-Identität
+werden absichtlich erst im Benutzerterminal eingerichtet, damit keine
+Zugangsdaten im Proxmox-Installationslog landen:
+
+```bash
+git config --global user.name "DEIN NAME"
+git config --global user.email "DEINE GITHUB-ADRESSE"
+gh auth login
+gh auth setup-git
+```
+
+Der vorgesehene Ablauf arbeitet auf einem Task-Branch, prüft die Änderungen und
+pusht anschließend zu GitHub:
+
+```bash
+git switch -c feature/meine-aenderung
+# entwickeln und projektspezifische Tests ausführen
+git diff --check
+git add -A
+git commit -m "Beschreibung"
+git push --set-upstream origin HEAD
+gh pr create --draft --fill
+```
+
+Die Devbox hinterlegt denselben Ablauf als kurze globale Arbeitsvereinbarung in
+`~/.codex/AGENTS.md`. Repository-spezifische `AGENTS.md`-Dateien können ihn für
+das jeweilige Projekt präzisieren. Ohne abgeschlossene `gh`-Anmeldung oder bei
+ausdrücklich lokaler Arbeit führt Codex keine GitHub-Veröffentlichung aus.
 
 ## Remote Control
 
@@ -145,6 +202,8 @@ Offizielle Details:
 - SSH-Agent-Forwarding standardmäßig deaktiviert
 - effektive SSH-Konfiguration wird vor dem Dienststart mit `sshd -T` geprüft
 - automatische Sicherheitsupdates aktiviert
+- PostgreSQL ist auf Loopback-Zugriff beschränkt; die lokale
+  Entwicklungsanmeldung liegt mit Modus `0600` in `~/.pgpass`
 - NodeSource-Schlüssel wird vor der Verwendung gegen seinen Fingerprint
   geprüft
 - Codex wird über den offiziellen Standalone-Installer installiert; dieser
@@ -169,13 +228,15 @@ Vor der Erstellung prüft das Skript unter anderem:
 - Cluster-weite Verfügbarkeit der VMID, erneut unmittelbar vor `pct create`
 - Bridge, Storage-Fähigkeiten und freien Speicherplatz
 - Ressourcenuntergrenzen und vollständige Netzparameter
-- DNS-Auflösung aller benötigten Ubuntu-, NodeSource- und Codex-Endpunkte
+- DNS-Auflösung aller benötigten Ubuntu-, NodeSource-, Hex-, mise- und
+  Codex-Endpunkte
 - Template-Architektur und Auswahl des neuesten Ubuntu-24.04-Templates
 
-Nach der Provisionierung werden Node.js, npm, Git LFS, Python, ripgrep, `fd`,
-Codex, Remote-Control-Verwaltung und User-Service, User-Linger,
-passwortloses `sudo`, Workspace-Schreibzugriff, SSH-Dateirechte, SSH-Dienst und
-APT-Timer verifiziert. Erst danach meldet der Installer Erfolg.
+Nach der Provisionierung werden Node.js, npm, Git LFS, GitHub CLI, Python,
+Erlang/OTP, Elixir, Mix, Phoenix, PostgreSQL, ripgrep, `fd`, Codex,
+Remote-Control-Verwaltung und User-Service, User-Linger, passwortloses `sudo`,
+Workspace-Schreibzugriff, SSH-Dateirechte, SSH-Dienst und APT-Timer verifiziert.
+Erst danach meldet der Installer Erfolg.
 
 ## Fehlerbehandlung
 
@@ -216,3 +277,7 @@ Container-, Storage- und Netzwerkoperationen nicht lokal simuliert werden.
 - [Proxmox `pvesm`](https://pve.proxmox.com/pve-docs/pvesm.1.html)
 - [Node.js Release-Status](https://nodejs.org/en/about/previous-releases)
 - [NodeSource Distributions](https://github.com/nodesource/distributions)
+- [Elixir installieren](https://elixir-lang.org/install/)
+- [Phoenix installieren](https://hexdocs.pm/phoenix/installation.html)
+- [mise](https://mise.jdx.dev/)
+- [Codex-Anweisungen mit `AGENTS.md`](https://learn.chatgpt.com/docs/agent-configuration/agents-md)

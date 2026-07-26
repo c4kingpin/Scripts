@@ -255,8 +255,14 @@ rejects_unknown_option() {
 
 reports_current_version_and_lts_default() {
   [[ "$(bash "${SCRIPT_DIR}/codex-devbox.sh" --version)" == \
-    "Codex Dev Box 1.3.1" ]] &&
+    "Codex Dev Box 1.4.0" ]] &&
     grep -Fq "readonly NODE_MAJOR=\"\${NODE_MAJOR:-24}\"" \
+      "${SCRIPT_DIR}/codex-devbox.sh" &&
+    grep -Fq "readonly ERLANG_VERSION=\"\${ERLANG_VERSION:-28.4}\"" \
+      "${SCRIPT_DIR}/codex-devbox.sh" &&
+    grep -Fq "readonly ELIXIR_VERSION=\"\${ELIXIR_VERSION:-1.20.2}\"" \
+      "${SCRIPT_DIR}/codex-devbox.sh" &&
+    grep -Fq "readonly PHOENIX_VERSION=\"\${PHOENIX_VERSION:-1.8.9}\"" \
       "${SCRIPT_DIR}/codex-devbox.sh" &&
     grep -Fq 'readonly MIN_CODEX_REMOTE_CONTROL_VERSION="0.143.0"' \
       "${SCRIPT_DIR}/codex-devbox.sh"
@@ -526,7 +532,41 @@ provisioner_checks_critical_endpoints() {
   grep -Fq 'archive.ubuntu.com' "${SCRIPT_DIR}/codex-devbox.sh" &&
     grep -Fq 'security.ubuntu.com' "${SCRIPT_DIR}/codex-devbox.sh" &&
     grep -Fq 'deb.nodesource.com' "${SCRIPT_DIR}/codex-devbox.sh" &&
-    grep -Fq 'chatgpt.com' "${SCRIPT_DIR}/codex-devbox.sh"
+    grep -Fq 'chatgpt.com' "${SCRIPT_DIR}/codex-devbox.sh" &&
+    grep -Fq 'mise.run' "${SCRIPT_DIR}/codex-devbox.sh" &&
+    grep -Fq 'mise.jdx.dev' "${SCRIPT_DIR}/codex-devbox.sh" &&
+    grep -Fq 'repo.hex.pm' "${SCRIPT_DIR}/codex-devbox.sh"
+}
+
+provisioner_configures_elixir_phoenix_and_github() {
+  local provisioner
+
+  provisioner="$(embedded_provisioner)"
+
+  grep -Eq '^[[:space:]]+gh \\' <<<"$provisioner" &&
+    grep -Eq '^[[:space:]]+inotify-tools \\' <<<"$provisioner" &&
+    grep -Eq '^[[:space:]]+postgresql \\' <<<"$provisioner" &&
+    grep -Fq "download \"https://mise.run\" \"\$mise_installer\"" \
+      <<<"$provisioner" &&
+    grep -Fq "\"\$mise_bin\" use --global \"erlang@\${ERLANG_VERSION}\"" \
+      <<<"$provisioner" &&
+    grep -Fq "\"\$mise_bin\" use --global \"elixir@\${ELIXIR_VERSION}\"" \
+      <<<"$provisioner" &&
+    grep -Fq 'mix local.hex --force' <<<"$provisioner" &&
+    grep -Fq 'mix local.rebar --force' <<<"$provisioner" &&
+    grep -Fq "mix archive.install hex phx_new \"\$PHOENIX_VERSION\" --force" \
+      <<<"$provisioner" &&
+    grep -Fq "ALTER SYSTEM SET listen_addresses TO 'localhost';" \
+      <<<"$provisioner" &&
+    grep -Fq 'systemctl is-active --quiet postgresql.service' \
+      <<<"$provisioner" &&
+    grep -Fq 'gh --version' <<<"$provisioner" &&
+    grep -Fq "cat >\"\${DEV_HOME}/.codex/AGENTS.md\"" <<<"$provisioner" &&
+    grep -Fq 'create or update a draft pull request' <<<"$provisioner" &&
+    grep -Fq 'git config --global push.autoSetupRemote true' \
+      <<<"$provisioner" &&
+    grep -Fq 'mix phx.new --version' <<<"$provisioner" &&
+    grep -Fq "\$HOME/.local/share/mise/shims" <<<"$provisioner"
 }
 
 provisioner_configures_remote_control() {
@@ -600,6 +640,7 @@ run_test "provisioner configures fd for non-login shells" provisioner_configures
 run_test "provisioner prepares sshd runtime" provisioner_prepares_sshd_runtime
 run_test "provisioner verifies SSH security" provisioner_verifies_effective_ssh_security
 run_test "provisioner checks critical endpoints" provisioner_checks_critical_endpoints
+run_test "provisioner configures Elixir, Phoenix and GitHub" provisioner_configures_elixir_phoenix_and_github
 run_test "provisioner configures Remote Control" provisioner_configures_remote_control
 
 printf '\n%d passed, %d failed\n' "$PASSED" "$FAILED"
