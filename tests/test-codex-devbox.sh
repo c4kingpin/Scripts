@@ -158,26 +158,22 @@ rejects_unknown_option() {
   [[ "$status" -eq 2 ]]
 }
 
+embedded_provisioner() {
+  awk '
+    /^    bash -s <<'\''INNER'\''$/ { inside=1; next }
+    /^INNER$/ { inside=0 }
+    inside
+  ' "${SCRIPT_DIR}/codex-devbox.sh"
+}
+
 validates_embedded_provisioner_syntax() {
-  bash -n <(
-    awk '
-      /^    bash -s <<'\''INNER'\''$/ { inside=1; next }
-      /^INNER$/ { inside=0 }
-      inside
-    ' "${SCRIPT_DIR}/codex-devbox.sh"
-  )
+  bash -n <(embedded_provisioner)
 }
 
 provisioner_uses_safe_user_context() {
   local provisioner
 
-  provisioner="$(
-    awk '
-      /^    bash -s <<'\''INNER'\''$/ { inside=1; next }
-      /^INNER$/ { inside=0 }
-      inside
-    ' "${SCRIPT_DIR}/codex-devbox.sh"
-  )"
+  provisioner="$(embedded_provisioner)"
 
   grep -Fq 'run_as_dev() {' <<<"$provisioner" &&
     grep -Fq 'cd "$HOME"' <<<"$provisioner" &&
@@ -193,6 +189,25 @@ provisioner_uses_portable_locale() {
     grep -Fq 'LC_ALL=C.UTF-8 \' "${SCRIPT_DIR}/codex-devbox.sh"
 }
 
+provisioner_prepares_sshd_runtime() {
+  local provisioner runtime_line validation_line
+
+  provisioner="$(embedded_provisioner)"
+  runtime_line="$(
+    grep -nF 'install -d -m 0755 /run/sshd' <<<"$provisioner" |
+      cut -d: -f1
+  )"
+  validation_line="$(
+    grep -nF '/usr/sbin/sshd -t' <<<"$provisioner" |
+      head -n 1 |
+      cut -d: -f1
+  )"
+
+  [[ "$runtime_line" =~ ^[0-9]+$ ]] &&
+    [[ "$validation_line" =~ ^[0-9]+$ ]] &&
+    ((runtime_line < validation_line))
+}
+
 run_test "valid IPv4 addresses" accepts_valid_ipv4
 run_test "invalid IPv4 addresses" rejects_invalid_ipv4
 run_test "IPv4 CIDR validation" validates_ipv4_cidr
@@ -206,6 +221,7 @@ run_test "unknown CLI option returns exit code 2" rejects_unknown_option
 run_test "embedded provisioner syntax" validates_embedded_provisioner_syntax
 run_test "provisioner uses safe user context" provisioner_uses_safe_user_context
 run_test "provisioner uses portable locale" provisioner_uses_portable_locale
+run_test "provisioner prepares sshd runtime" provisioner_prepares_sshd_runtime
 
 printf '\n%d passed, %d failed\n' "$PASSED" "$FAILED"
 ((FAILED == 0))

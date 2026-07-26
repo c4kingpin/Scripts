@@ -891,6 +891,9 @@ ClientAliveInterval 60
 ClientAliveCountMax 3
 SSHD
 
+# In einem frisch gestarteten Container existiert das flüchtige Runtime-
+# Verzeichnis möglicherweise noch nicht, wenn sshd erstmals geprüft wird.
+install -d -m 0755 /run/sshd
 /usr/sbin/sshd -t
 systemctl enable ssh
 systemctl restart ssh
