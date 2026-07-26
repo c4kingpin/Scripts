@@ -543,9 +543,9 @@ provisioner_configures_elixir_phoenix_and_github() {
 
   provisioner="$(embedded_provisioner)"
 
-  grep -Eq '^[[:space:]]+gh \\' <<<"$provisioner" &&
-    grep -Eq '^[[:space:]]+inotify-tools \\' <<<"$provisioner" &&
-    grep -Eq '^[[:space:]]+postgresql \\' <<<"$provisioner" &&
+  grep -Eq '^[[:space:]]+gh[[:space:]]' <<<"$provisioner" &&
+    grep -Eq '^[[:space:]]+inotify-tools[[:space:]]' <<<"$provisioner" &&
+    grep -Eq '^[[:space:]]+postgresql[[:space:]]' <<<"$provisioner" &&
     grep -Fq "download \"https://mise.run\" \"\$mise_installer\"" \
       <<<"$provisioner" &&
     grep -Fq "\"\$mise_bin\" use --global \"erlang@\${ERLANG_VERSION}\"" \
