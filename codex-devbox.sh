@@ -639,6 +639,8 @@ install_devbox() {
     ALLOW_AGENT_FORWARDING="$ALLOW_AGENT_FORWARDING" \
     CODEX_RELEASE="$CODEX_RELEASE" \
     DEV_USER="$DEV_USER" \
+    LANG=C.UTF-8 \
+    LC_ALL=C.UTF-8 \
     NODESOURCE_KEY_FINGERPRINT="$NODESOURCE_KEY_FINGERPRINT" \
     NODE_MAJOR="$NODE_MAJOR" \
     SSH_PUBLIC_KEY="$SSH_PUBLIC_KEY" \
@@ -669,6 +671,13 @@ apt_get() {
     -o Acquire::Retries=5 \
     -o DPkg::Lock::Timeout=120 \
     "$@"
+}
+
+run_as_dev() {
+  sudo -u "$DEV_USER" -H sh -c '
+    cd "$HOME"
+    exec "$@"
+  ' sh "$@"
 }
 
 download() {
@@ -849,7 +858,7 @@ log "Codex CLI ${CODEX_RELEASE} installieren"
 codex_installer="$(mktemp)"
 download "https://chatgpt.com/codex/install.sh" "$codex_installer"
 chmod 0755 "$codex_installer"
-sudo -u "$DEV_USER" -H env \
+run_as_dev env \
   CODEX_INSTALL_DIR="${DEV_HOME}/.local/bin" \
   CODEX_NON_INTERACTIVE=true \
   CODEX_RELEASE="$CODEX_RELEASE" \
@@ -904,7 +913,7 @@ BASHRC
 chown "$DEV_USER:$DEV_USER" "${DEV_HOME}/.bashrc"
 
 log "Git LFS und automatische Sicherheitsupdates aktivieren"
-sudo -u "$DEV_USER" -H git lfs install --skip-repo
+run_as_dev git lfs install --skip-repo
 cat >/etc/apt/apt.conf.d/20auto-upgrades <<'AUTO_UPGRADES'
 APT::Periodic::Update-Package-Lists "1";
 APT::Periodic::Unattended-Upgrade "1";
@@ -918,7 +927,7 @@ command -v git
 command -v python3
 command -v rg
 command -v fd
-sudo -u "$DEV_USER" -H "${DEV_HOME}/.local/bin/codex" --version
+run_as_dev "${DEV_HOME}/.local/bin/codex" --version
 /usr/sbin/sshd -t
 systemctl is-active --quiet ssh
 systemctl is-enabled --quiet apt-daily-upgrade.timer

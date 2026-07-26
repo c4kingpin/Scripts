@@ -168,6 +168,31 @@ validates_embedded_provisioner_syntax() {
   )
 }
 
+provisioner_uses_safe_user_context() {
+  local provisioner
+
+  provisioner="$(
+    awk '
+      /^    bash -s <<'\''INNER'\''$/ { inside=1; next }
+      /^INNER$/ { inside=0 }
+      inside
+    ' "${SCRIPT_DIR}/codex-devbox.sh"
+  )"
+
+  grep -Fq 'run_as_dev() {' <<<"$provisioner" &&
+    grep -Fq 'cd "$HOME"' <<<"$provisioner" &&
+    [[ "$(grep -Fc 'sudo -u "$DEV_USER"' <<<"$provisioner")" -eq 1 ]] &&
+    grep -Fq 'run_as_dev env \' <<<"$provisioner" &&
+    grep -Fq 'run_as_dev git lfs install --skip-repo' <<<"$provisioner" &&
+    grep -Fq 'run_as_dev "${DEV_HOME}/.local/bin/codex" --version' \
+      <<<"$provisioner"
+}
+
+provisioner_uses_portable_locale() {
+  grep -Fq 'LANG=C.UTF-8 \' "${SCRIPT_DIR}/codex-devbox.sh" &&
+    grep -Fq 'LC_ALL=C.UTF-8 \' "${SCRIPT_DIR}/codex-devbox.sh"
+}
+
 run_test "valid IPv4 addresses" accepts_valid_ipv4
 run_test "invalid IPv4 addresses" rejects_invalid_ipv4
 run_test "IPv4 CIDR validation" validates_ipv4_cidr
@@ -179,6 +204,8 @@ run_test "invalid static network is rejected" rejects_invalid_static_network
 run_test "insufficient storage is rejected" rejects_missing_storage_capacity
 run_test "unknown CLI option returns exit code 2" rejects_unknown_option
 run_test "embedded provisioner syntax" validates_embedded_provisioner_syntax
+run_test "provisioner uses safe user context" provisioner_uses_safe_user_context
+run_test "provisioner uses portable locale" provisioner_uses_portable_locale
 
 printf '\n%d passed, %d failed\n' "$PASSED" "$FAILED"
 ((FAILED == 0))
