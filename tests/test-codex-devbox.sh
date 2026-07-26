@@ -247,7 +247,7 @@ rejects_unknown_option() {
 
 reports_current_version_and_lts_default() {
   [[ "$(bash "${SCRIPT_DIR}/codex-devbox.sh" --version)" == \
-    "Codex Dev Box 1.2.0" ]] &&
+    "Codex Dev Box 1.2.1" ]] &&
     grep -Fq "readonly NODE_MAJOR=\"\${NODE_MAJOR:-24}\"" \
       "${SCRIPT_DIR}/codex-devbox.sh"
 }
@@ -314,6 +314,32 @@ provisioner_reports_inner_failures() {
 provisioner_uses_portable_locale() {
   grep -Fq 'LANG=C.UTF-8 ' "${SCRIPT_DIR}/codex-devbox.sh" &&
     grep -Fq 'LC_ALL=C.UTF-8 ' "${SCRIPT_DIR}/codex-devbox.sh"
+}
+
+provisioner_configures_fd_for_non_login_shells() {
+  local provisioner path_line fd_check_line
+
+  provisioner="$(embedded_provisioner)"
+  path_line="$(
+    grep -nF \
+      'export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"' \
+      <<<"$provisioner" |
+      cut -d: -f1
+  )"
+  fd_check_line="$(
+    grep -nFx 'command -v fd' <<<"$provisioner" |
+      cut -d: -f1
+  )"
+
+  [[ "$path_line" =~ ^[0-9]+$ ]] &&
+    [[ "$fd_check_line" =~ ^[0-9]+$ ]] &&
+    ((path_line < fd_check_line)) &&
+    grep -Fq 'fd_binary="$(command -v fdfind || true)"' <<<"$provisioner" &&
+    grep -Fq '[[ -z "$fd_binary" && -x /usr/lib/cargo/bin/fd ]]' \
+      <<<"$provisioner" &&
+    grep -Fq 'ln -sfn -- "$fd_binary" /usr/local/bin/fd' \
+      <<<"$provisioner" &&
+    grep -Fq '[[ -x /usr/local/bin/fd ]]' <<<"$provisioner"
 }
 
 provisioner_prepares_sshd_runtime() {
@@ -383,6 +409,7 @@ run_test "embedded provisioner syntax" validates_embedded_provisioner_syntax
 run_test "provisioner uses safe user context" provisioner_uses_safe_user_context
 run_test "provisioner reports inner failures" provisioner_reports_inner_failures
 run_test "provisioner uses portable locale" provisioner_uses_portable_locale
+run_test "provisioner configures fd for non-login shells" provisioner_configures_fd_for_non_login_shells
 run_test "provisioner prepares sshd runtime" provisioner_prepares_sshd_runtime
 run_test "provisioner verifies SSH security" provisioner_verifies_effective_ssh_security
 run_test "provisioner checks critical endpoints" provisioner_checks_critical_endpoints

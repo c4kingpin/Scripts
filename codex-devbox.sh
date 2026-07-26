@@ -7,7 +7,7 @@ set -Eeuo pipefail
 shopt -s inherit_errexit 2>/dev/null || true
 
 readonly APP="Codex Dev Box"
-readonly VERSION="1.2.0"
+readonly VERSION="1.2.1"
 readonly UBUNTU_VERSION="24.04"
 readonly NODE_MAJOR="${NODE_MAJOR:-24}"
 readonly CODEX_RELEASE="${CODEX_RELEASE:-latest}"
@@ -771,11 +771,13 @@ umask 022
 
 export DEBIAN_FRONTEND=noninteractive
 export NEEDRESTART_MODE=a
+export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
 INNER_STEP="Provisionierung initialisieren"
 nodesource_key=""
 codex_installer=""
 codex_version_output=""
+fd_binary=""
 gpg_home=""
 sshd_effective=""
 
@@ -1040,9 +1042,17 @@ run_as_dev env \
   PATH="${DEV_HOME}/.local/bin:/usr/local/bin:/usr/bin:/bin" \
   sh "$codex_installer"
 
-if [[ -x /usr/bin/fdfind ]]; then
-  ln -sfn /usr/bin/fdfind /usr/local/bin/fd
+fd_binary="$(command -v fdfind || true)"
+if [[ -z "$fd_binary" && -x /usr/lib/cargo/bin/fd ]]; then
+  fd_binary="/usr/lib/cargo/bin/fd"
 fi
+[[ -n "$fd_binary" && -x "$fd_binary" ]] ||
+  {
+    printf 'Das Paket fd-find enthält keine ausführbare fd-Binärdatei.\n' >&2
+    exit 1
+  }
+ln -sfn -- "$fd_binary" /usr/local/bin/fd
+[[ -x /usr/local/bin/fd ]]
 
 log "SSH absichern"
 install -d -m 0755 /etc/ssh/sshd_config.d
