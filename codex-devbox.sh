@@ -7,9 +7,9 @@ set -Eeuo pipefail
 shopt -s inherit_errexit 2>/dev/null || true
 
 readonly APP="Codex Dev Box"
-readonly VERSION="1.1.0"
+readonly VERSION="1.2.0"
 readonly UBUNTU_VERSION="24.04"
-readonly NODE_MAJOR="${NODE_MAJOR:-22}"
+readonly NODE_MAJOR="${NODE_MAJOR:-24}"
 readonly CODEX_RELEASE="${CODEX_RELEASE:-latest}"
 readonly NODESOURCE_KEY_FINGERPRINT="6F71F525282841EEDAF851B42F59B5F99B1BE0B4"
 
@@ -41,10 +41,22 @@ msg_info() { printf '%b\n' "${INFO} ${YW}$*${CL}"; }
 msg_ok()   { printf '%b\n' "${CHECK} ${GN}$*${CL}"; }
 fatal()    { printf '%b\n' "${CROSS} ${RD}$*${CL}" >&2; exit 1; }
 
+summarize_command() {
+  local command="${1%%$'\n'*}"
+  local max_length=240
+
+  if ((${#command} > max_length)); then
+    printf '%s...\n' "${command:0:max_length - 3}"
+  else
+    printf '%s\n' "$command"
+  fi
+}
+
 on_error() {
   local code=$?
   local line="${BASH_LINENO[0]:-${LINENO}}"
-  local command="${BASH_COMMAND:-unbekannt}"
+  local command
+  command="$(summarize_command "${BASH_COMMAND:-unbekannt}")"
 
   trap - ERR
   printf '\n' >&2
@@ -137,16 +149,39 @@ BANNER
   printf 'Version %s\n\n' "$VERSION"
 }
 
+pve_major_version() {
+  local version="$1"
+
+  [[ "$version" =~ ^pve-manager/([0-9]+)\. ]] || return 1
+  printf '%s\n' "${BASH_REMATCH[1]}"
+}
+
 require_pve() {
   [[ "${EUID}" -eq 0 ]] || fatal "Dieses Skript muss als root ausgeführt werden."
   [[ -t 0 ]] ||
     fatal "Für die interaktive Installation wird ein Terminal benötigt."
 
   local cmd
-  for cmd in flock install mktemp pct pveam pvesm pvesh ssh-keygen tee; do
+  local host_arch
+  local pve_major
+  local pve_version
+  for cmd in \
+    apt-get awk chmod date dpkg flock grep install mktemp pct pveam pvesh \
+    pvesm pveversion sort ssh-keygen tail tee; do
     command -v "$cmd" >/dev/null 2>&1 ||
       fatal "${cmd} fehlt. Das Skript muss auf einem Proxmox-VE-Host laufen."
   done
+
+  host_arch="$(dpkg --print-architecture)"
+  [[ "$host_arch" == "amd64" ]] ||
+    fatal "Diese Version unterstützt ausschließlich amd64-Proxmox-Hosts."
+
+  pve_version="$(pveversion)"
+  if ! pve_major="$(pve_major_version "$pve_version")"; then
+    fatal "Die Proxmox-VE-Version konnte nicht ermittelt werden."
+  fi
+  ((10#${pve_major} >= 8)) ||
+    fatal "Proxmox VE 8 oder neuer ist erforderlich."
 
   [[ "$NODE_MAJOR" =~ ^(22|24)$ ]] ||
     fatal "NODE_MAJOR muss 22 oder 24 sein."
@@ -161,10 +196,15 @@ install_dialog() {
     msg_info "Installiere whiptail"
     DEBIAN_FRONTEND=noninteractive apt-get \
       -o Acquire::Retries=5 \
+      -o Acquire::http::Timeout=30 \
+      -o Acquire::https::Timeout=30 \
+      -o APT::Update::Error-Mode=any \
       -o DPkg::Lock::Timeout=120 \
       update
     DEBIAN_FRONTEND=noninteractive apt-get \
       -o Acquire::Retries=5 \
+      -o Acquire::http::Timeout=30 \
+      -o Acquire::https::Timeout=30 \
       -o DPkg::Lock::Timeout=120 \
       install -y --no-install-recommends whiptail
   fi
@@ -172,6 +212,12 @@ install_dialog() {
 
 next_ctid() {
   pvesh get /cluster/nextid
+}
+
+vmid_is_available() {
+  local vmid="$1"
+
+  pvesh get /cluster/nextid --vmid "$vmid" >/dev/null 2>&1
 }
 
 rootfs_storages() {
@@ -229,6 +275,47 @@ is_ipv4_cidr() {
 
   is_ipv4 "$address" &&
     [[ "$prefix" =~ ^([0-9]|[12][0-9]|3[0-2])$ ]]
+}
+
+ipv4_to_int() {
+  local address="$1"
+  local octet1 octet2 octet3 octet4
+  local result
+
+  is_ipv4 "$address" || return 1
+  IFS='.' read -r octet1 octet2 octet3 octet4 <<<"$address"
+  result=$((
+    (10#${octet1} << 24) |
+    (10#${octet2} << 16) |
+    (10#${octet3} << 8) |
+    10#${octet4}
+  ))
+  printf '%u\n' "$result"
+}
+
+static_network_is_usable() {
+  local value="$1"
+  local gateway="$2"
+  local address prefix
+  local address_int gateway_int mask network broadcast
+
+  is_ipv4_cidr "$value" && is_ipv4 "$gateway" || return 1
+  address="${value%/*}"
+  prefix="${value##*/}"
+
+  # Normale LXC-LAN-Konfigurationen benötigen ein Netz mit Host-Adressen.
+  ((10#${prefix} >= 1 && 10#${prefix} <= 30)) || return 1
+
+  address_int="$(ipv4_to_int "$address")"
+  gateway_int="$(ipv4_to_int "$gateway")"
+  mask=$(((0xffffffff << (32 - 10#${prefix})) & 0xffffffff))
+  network=$((address_int & mask))
+  broadcast=$((network | (0xffffffff ^ mask)))
+
+  ((address_int != network && address_int != broadcast)) &&
+    ((gateway_int != network && gateway_int != broadcast)) &&
+    ((address_int != gateway_int)) &&
+    (((gateway_int & mask) == network))
 }
 
 ssh_public_key_fingerprint() {
@@ -394,6 +481,7 @@ advanced_settings() {
 read_ssh_key() {
   local key=""
   local key_file
+  local key_status
 
   for key_file in /root/.ssh/id_ed25519.pub /root/.ssh/id_ecdsa.pub /root/.ssh/id_rsa.pub; do
     if [[ -s "$key_file" ]]; then
@@ -404,6 +492,9 @@ read_ssh_key() {
         11 72; then
         key="$(<"$key_file")"
         break
+      else
+        key_status=$?
+        [[ "$key_status" -eq 1 ]] || return 1
       fi
     fi
   done
@@ -439,8 +530,8 @@ validate_settings() {
   fi
 
   if ! [[ "$MEMORY" =~ ^[1-9][0-9]*$ && ${#MEMORY} -le 7 ]] ||
-    ! ((10#${MEMORY} <= 1048576)); then
-    fatal "Die RAM-Angabe ist ungültig."
+    ! ((10#${MEMORY} >= 2048 && 10#${MEMORY} <= 1048576)); then
+    fatal "Die RAM-Angabe ist ungültig (mindestens 2048 MiB)."
   fi
 
   if ! [[ "$SWAP" =~ ^(0|[1-9][0-9]*)$ && ${#SWAP} -le 7 ]] ||
@@ -449,8 +540,8 @@ validate_settings() {
   fi
 
   if ! [[ "$DISK" =~ ^[1-9][0-9]*$ && ${#DISK} -le 7 ]] ||
-    ! ((10#${DISK} >= 8 && 10#${DISK} <= 1048576)); then
-    fatal "Die Disk-Angabe ist ungültig (mindestens 8 GiB)."
+    ! ((10#${DISK} >= 16 && 10#${DISK} <= 1048576)); then
+    fatal "Die Disk-Angabe ist ungültig (mindestens 16 GiB)."
   fi
 
   [[ "$CT_HOSTNAME" =~ ^[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?$ ]] ||
@@ -481,10 +572,13 @@ validate_settings() {
     [[ "$IPV4_GATEWAY" != "0.0.0.0" &&
       "$IPV4_GATEWAY" != "255.255.255.255" ]] ||
       fatal "Das IPv4-Gateway ist keine verwendbare Host-Adresse."
+
+    static_network_is_usable "$IPV4_ADDRESS" "$IPV4_GATEWAY" ||
+      fatal "IPv4-Adresse und Gateway müssen nutzbare Hosts im selben /1- bis /30-Subnetz sein."
   fi
 
-  if pct config "$CTID" >/dev/null 2>&1; then
-    fatal "Die Container-ID ${CTID} ist bereits belegt."
+  if ! vmid_is_available "$CTID"; then
+    fatal "Die Container-ID ${CTID} konnte clusterweit nicht als frei bestätigt werden."
   fi
 
   storage_is_active "$STORAGE" ||
@@ -532,6 +626,16 @@ Docker wird nicht installiert." \
     28 82
 }
 
+latest_ubuntu_template() {
+  awk -v version="ubuntu-${UBUNTU_VERSION}-standard" '
+    index($2, version "_") == 1 && $2 ~ /_amd64\.tar\.(gz|xz|zst)$/ {
+      print $2
+    }
+  ' |
+    sort -V |
+    tail -n 1
+}
+
 find_template() {
   CURRENT_STEP="Ubuntu-LXC-Template vorbereiten"
   msg_info "$CURRENT_STEP"
@@ -540,13 +644,7 @@ find_template() {
 
   TEMPLATE="$(
     pveam available --section system |
-      awk -v version="ubuntu-${UBUNTU_VERSION}-standard" '
-        index($2, version "_") == 1 {
-          print $2
-        }
-      ' |
-      sort -V |
-      tail -n 1
+      latest_ubuntu_template
   )"
 
   [[ -n "$TEMPLATE" ]] ||
@@ -568,6 +666,9 @@ create_container() {
   msg_info "$CURRENT_STEP"
 
   local net_config
+  vmid_is_available "$CTID" ||
+    fatal "Die Container-ID ${CTID} ist nicht mehr clusterweit verfügbar."
+
   if [[ "$IPV4_MODE" == "dhcp" ]]; then
     net_config="name=eth0,bridge=${BRIDGE},ip=dhcp,type=veth"
   else
@@ -619,16 +720,35 @@ wait_for_network() {
   CURRENT_STEP="Netzwerk und DNS prüfen"
   msg_info "$CURRENT_STEP"
 
+  local required_hosts=(
+    archive.ubuntu.com
+    chatgpt.com
+    deb.nodesource.com
+    security.ubuntu.com
+  )
+  local missing_hosts=()
   local _attempt
   for _attempt in {1..60}; do
-    if pct exec "$CTID" -- getent ahostsv4 archive.ubuntu.com >/dev/null 2>&1; then
+    # shellcheck disable=SC2016 # Expansion erfolgt absichtlich im Container.
+    if pct exec "$CTID" -- sh -c '
+      for host do
+        getent ahostsv4 "$host" >/dev/null || exit 1
+      done
+    ' sh "${required_hosts[@]}" >/dev/null 2>&1; then
       msg_ok "Netzwerk und DNS sind verfügbar"
       return 0
     fi
     sleep 2
   done
 
-  fatal "Im Container ist nach 120 Sekunden keine Netzwerk-/DNS-Verbindung verfügbar."
+  local host
+  for host in "${required_hosts[@]}"; do
+    if ! pct exec "$CTID" -- getent ahostsv4 "$host" >/dev/null 2>&1; then
+      missing_hosts+=("$host")
+    fi
+  done
+
+  fatal "DNS-Auflösung im Container fehlgeschlagen: ${missing_hosts[*]:-unbekannter Netzwerkfehler}."
 }
 
 install_devbox() {
@@ -638,6 +758,7 @@ install_devbox() {
   pct exec "$CTID" -- env \
     ALLOW_AGENT_FORWARDING="$ALLOW_AGENT_FORWARDING" \
     CODEX_RELEASE="$CODEX_RELEASE" \
+    CT_HOSTNAME="$CT_HOSTNAME" \
     DEV_USER="$DEV_USER" \
     LANG=C.UTF-8 \
     LC_ALL=C.UTF-8 \
@@ -651,9 +772,12 @@ umask 022
 export DEBIAN_FRONTEND=noninteractive
 export NEEDRESTART_MODE=a
 
+INNER_STEP="Provisionierung initialisieren"
 nodesource_key=""
 codex_installer=""
+codex_version_output=""
 gpg_home=""
+sshd_effective=""
 
 cleanup() {
   [[ -z "$nodesource_key" ]] || rm -f "$nodesource_key"
@@ -662,13 +786,36 @@ cleanup() {
 }
 trap cleanup EXIT
 
+on_inner_error() {
+  local code=$?
+  local line="${BASH_LINENO[0]:-${LINENO}}"
+  local command="${BASH_COMMAND:-unbekannt}"
+
+  trap - ERR
+  command="${command%%$'\n'*}"
+  if ((${#command} > 200)); then
+    command="${command:0:197}..."
+  fi
+
+  printf '\nProvisionierung im Container fehlgeschlagen.\n' >&2
+  printf 'Teilschritt: %s\n' "$INNER_STEP" >&2
+  printf 'Innere Zeile: %s\n' "$line" >&2
+  printf 'Kommando: %s\n' "$command" >&2
+  exit "$code"
+}
+trap on_inner_error ERR
+
 log() {
+  INNER_STEP="$*"
   printf '\n==> %s\n' "$*"
 }
 
 apt_get() {
   apt-get \
     -o Acquire::Retries=5 \
+    -o Acquire::http::Timeout=30 \
+    -o Acquire::https::Timeout=30 \
+    -o APT::Update::Error-Mode=any \
     -o DPkg::Lock::Timeout=120 \
     "$@"
 }
@@ -678,6 +825,29 @@ run_as_dev() {
     cd "$HOME"
     exec "$@"
   ' sh "$@"
+}
+
+assert_sshd_setting() {
+  local key="$1"
+  local expected="$2"
+  local actual
+
+  actual="$(
+    awk -v key="$key" '
+      $1 == key {
+        $1=""
+        sub(/^[[:space:]]+/, "")
+        print
+        exit
+      }
+    ' <<<"$sshd_effective"
+  )"
+  [[ "$actual" == "$expected" ]] ||
+    {
+      printf 'Unerwartete effektive SSH-Einstellung %s: %s\n' \
+        "$key" "${actual:-<fehlt>}" >&2
+      exit 1
+    }
 }
 
 download() {
@@ -702,6 +872,11 @@ download() {
 [[ "$DEV_USER" =~ ^[a-z_][a-z0-9_-]{0,31}$ && "$DEV_USER" != "root" ]] ||
   {
     printf 'Ungültiger Entwickler-Benutzer.\n' >&2
+    exit 1
+  }
+[[ "$CT_HOSTNAME" =~ ^[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?$ ]] ||
+  {
+    printf 'Ungültiger Container-Hostname.\n' >&2
     exit 1
   }
 [[ "$ALLOW_AGENT_FORWARDING" =~ ^(yes|no)$ ]] ||
@@ -828,7 +1003,7 @@ if id "$DEV_USER" >/dev/null 2>&1; then
   exit 1
 fi
 
-useradd --create-home --shell /bin/bash "$DEV_USER"
+useradd --create-home --user-group --shell /bin/bash "$DEV_USER"
 DEV_HOME="$(getent passwd "$DEV_USER" | cut -d: -f6)"
 [[ "$DEV_HOME" == "/home/${DEV_USER}" ]] ||
   {
@@ -870,7 +1045,9 @@ if [[ -x /usr/bin/fdfind ]]; then
 fi
 
 log "SSH absichern"
-cat >/etc/ssh/sshd_config.d/60-codex-devbox.conf <<SSHD
+install -d -m 0755 /etc/ssh/sshd_config.d
+rm -f /etc/ssh/sshd_config.d/60-codex-devbox.conf
+cat >/etc/ssh/sshd_config.d/00-codex-devbox.conf <<SSHD
 PermitRootLogin no
 PasswordAuthentication no
 PermitEmptyPasswords no
@@ -885,18 +1062,41 @@ X11Forwarding no
 PermitTunnel no
 PermitUserEnvironment no
 GatewayPorts no
+UseDNS no
+LogLevel VERBOSE
 LoginGraceTime 30
 MaxAuthTries 3
 ClientAliveInterval 60
 ClientAliveCountMax 3
 SSHD
+chmod 0644 /etc/ssh/sshd_config.d/00-codex-devbox.conf
 
 # In einem frisch gestarteten Container existiert das flüchtige Runtime-
 # Verzeichnis möglicherweise noch nicht, wenn sshd erstmals geprüft wird.
 install -d -m 0755 /run/sshd
 /usr/sbin/sshd -t
-systemctl enable ssh
-systemctl restart ssh
+sshd_effective="$(
+  /usr/sbin/sshd -T \
+    -C "user=${DEV_USER},host=${CT_HOSTNAME},addr=127.0.0.1,laddr=127.0.0.1,lport=22"
+)"
+assert_sshd_setting permitrootlogin no
+assert_sshd_setting passwordauthentication no
+assert_sshd_setting permitemptypasswords no
+assert_sshd_setting kbdinteractiveauthentication no
+assert_sshd_setting pubkeyauthentication yes
+assert_sshd_setting authenticationmethods publickey
+assert_sshd_setting allowusers "$DEV_USER"
+assert_sshd_setting allowagentforwarding "$ALLOW_AGENT_FORWARDING"
+assert_sshd_setting allowtcpforwarding no
+assert_sshd_setting allowstreamlocalforwarding no
+assert_sshd_setting x11forwarding no
+assert_sshd_setting permittunnel no
+assert_sshd_setting permituserenvironment no
+assert_sshd_setting gatewayports no
+assert_sshd_setting usedns no
+assert_sshd_setting loglevel VERBOSE
+systemctl enable ssh.service
+systemctl restart ssh.service
 
 log "Shell und Workspace konfigurieren"
 cat >/etc/profile.d/codex-devbox.sh <<'PROFILE'
@@ -930,9 +1130,32 @@ command -v git
 command -v python3
 command -v rg
 command -v fd
-run_as_dev "${DEV_HOME}/.local/bin/codex" --version
+node --version
+npm --version
+git lfs version
+python3 --version
+rg --version
+fd --version
+codex_version_output="$(
+  run_as_dev "${DEV_HOME}/.local/bin/codex" --version
+)"
+printf '%s\n' "$codex_version_output"
+if [[ "$CODEX_RELEASE" != "latest" &&
+  "$codex_version_output" != *"$CODEX_RELEASE"* ]]; then
+  printf 'Installierte Codex-Version entspricht nicht %s: %s\n' \
+    "$CODEX_RELEASE" "$codex_version_output" >&2
+  exit 1
+fi
+run_as_dev test -w "${DEV_HOME}/workspace"
+run_as_dev sudo -n true
+[[ "$(stat -c '%U:%G:%a' "${DEV_HOME}/.ssh")" == \
+  "${DEV_USER}:${DEV_USER}:700" ]]
+[[ "$(stat -c '%U:%G:%a' "${DEV_HOME}/.ssh/authorized_keys")" == \
+  "${DEV_USER}:${DEV_USER}:600" ]]
 /usr/sbin/sshd -t
-systemctl is-active --quiet ssh
+systemctl is-active --quiet ssh.service
+systemctl is-enabled --quiet ssh.service
+systemctl is-enabled --quiet apt-daily.timer
 systemctl is-enabled --quiet apt-daily-upgrade.timer
 
 apt-get clean
