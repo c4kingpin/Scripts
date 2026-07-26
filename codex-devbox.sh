@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 # Codex Dev Box - Proxmox VE LXC installer
-# Ubuntu 24.04 LTS, SSH key access, Codex CLI, no Docker
+# Ubuntu 24.04 LTS, SSH key access, Node.js and Codex CLI
 # License: MIT
 
 set -Eeuo pipefail
 shopt -s inherit_errexit 2>/dev/null || true
 
 readonly APP="Codex Dev Box"
-readonly VERSION="1.2.1"
+readonly VERSION="1.2.2"
 readonly UBUNTU_VERSION="24.04"
 readonly NODE_MAJOR="${NODE_MAJOR:-24}"
 readonly CODEX_RELEASE="${CODEX_RELEASE:-latest}"
@@ -620,10 +620,8 @@ Benutzer:          ${DEV_USER}
 SSH-Key:           ${SSH_KEY_FINGERPRINT}
 Agent-Forwarding:  ${ALLOW_AGENT_FORWARDING}
 Node.js:           ${NODE_MAJOR}.x
-Codex:             ${CODEX_RELEASE}
-
-Docker wird nicht installiert." \
-    28 82
+Codex:             ${CODEX_RELEASE}" \
+    27 82
 }
 
 latest_ubuntu_template() {

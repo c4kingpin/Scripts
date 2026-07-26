@@ -2,7 +2,7 @@
 
 Interaktiver Installer für eine unprivilegierte Ubuntu-24.04-LXC-Devbox auf
 Proxmox VE. Das Skript richtet SSH-Public-Key-Zugriff, Node.js, Python,
-Git-Werkzeuge und die Codex CLI ein. Docker wird bewusst nicht installiert.
+Git-Werkzeuge und die Codex CLI ein.
 
 ## Voraussetzungen
 
@@ -89,13 +89,11 @@ Host-Lock verhindert.
 Ein fehlgeschlagener Container wird nicht fortgesetzt. Entferne ihn nach der
 Diagnose mit den angezeigten `pct`-Befehlen und starte eine frische Installation.
 
-## Bewusste Grenzen
+## Betriebsintegration
 
-- keine automatische Proxmox-Firewallregel, da das erlaubte Managementnetz
-  installationsspezifisch ist
-- kein HA-, Backup- oder Monitoring-Setup
-- kein Docker und keine privilegierten LXC-Features
-- vollständige End-to-End-Validierung benötigt einen Proxmox-Testhost
+Die Devbox lässt sich in vorhandene Proxmox-Firewall-, HA-, Backup- und
+Monitoring-Konzepte integrieren. Eine vollständige End-to-End-Validierung
+erfolgt auf einem Proxmox-Testhost.
 
 ## Tests
 

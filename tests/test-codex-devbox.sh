@@ -247,7 +247,7 @@ rejects_unknown_option() {
 
 reports_current_version_and_lts_default() {
   [[ "$(bash "${SCRIPT_DIR}/codex-devbox.sh" --version)" == \
-    "Codex Dev Box 1.2.1" ]] &&
+    "Codex Dev Box 1.2.2" ]] &&
     grep -Fq "readonly NODE_MAJOR=\"\${NODE_MAJOR:-24}\"" \
       "${SCRIPT_DIR}/codex-devbox.sh"
 }
