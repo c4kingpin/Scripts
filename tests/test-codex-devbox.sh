@@ -334,10 +334,11 @@ provisioner_configures_fd_for_non_login_shells() {
   [[ "$path_line" =~ ^[0-9]+$ ]] &&
     [[ "$fd_check_line" =~ ^[0-9]+$ ]] &&
     ((path_line < fd_check_line)) &&
-    grep -Fq 'fd_binary="$(command -v fdfind || true)"' <<<"$provisioner" &&
-    grep -Fq '[[ -z "$fd_binary" && -x /usr/lib/cargo/bin/fd ]]' \
+    grep -Fq "fd_binary=\"\$(command -v fdfind || true)\"" \
       <<<"$provisioner" &&
-    grep -Fq 'ln -sfn -- "$fd_binary" /usr/local/bin/fd' \
+    grep -Fq "[[ -z \"\$fd_binary\" && -x /usr/lib/cargo/bin/fd ]]" \
+      <<<"$provisioner" &&
+    grep -Fq "ln -sfn -- \"\$fd_binary\" /usr/local/bin/fd" \
       <<<"$provisioner" &&
     grep -Fq '[[ -x /usr/local/bin/fd ]]' <<<"$provisioner"
 }
