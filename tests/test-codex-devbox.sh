@@ -520,18 +520,18 @@ provisioner_configures_remote_control() {
     'cat >/etc/systemd/user/codex-remote-control.service <<UNIT' \
     <<<"$provisioner" &&
     grep -Fq \
-      'ExecStart=${DEV_HOME}/.local/bin/codex remote-control' \
+      "ExecStart=\${DEV_HOME}/.local/bin/codex remote-control" \
       <<<"$provisioner" &&
     grep -Fq 'WantedBy=default.target' <<<"$provisioner" &&
-    grep -Fq 'loginctl enable-linger "$DEV_USER"' <<<"$provisioner" &&
+    grep -Fq "loginctl enable-linger \"\$DEV_USER\"" <<<"$provisioner" &&
     grep -Fq \
-      'run_as_dev "${DEV_HOME}/.local/bin/codex" remote-control --help' \
+      "run_as_dev \"\${DEV_HOME}/.local/bin/codex\" remote-control --help" \
       <<<"$provisioner" &&
-    grep -Fq '"$CODEX_BIN" login --device-auth' <<<"$onboarding" &&
+    grep -Fq "\"\$CODEX_BIN\" login --device-auth" <<<"$onboarding" &&
     grep -Fq \
-      'systemctl --user enable --now "$SERVICE_NAME"' \
+      "systemctl --user enable --now \"\$SERVICE_NAME\"" \
       <<<"$onboarding" &&
-    grep -Fq '"$CODEX_BIN" remote-control pair' <<<"$onboarding" &&
+    grep -Fq "\"\$CODEX_BIN\" remote-control pair" <<<"$onboarding" &&
     grep -Fq 'codex-devbox-onboarding --first-login' <<<"$provisioner"
 }
 
