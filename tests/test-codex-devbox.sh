@@ -83,6 +83,14 @@ parses_supported_pve_versions() {
     ! pve_major_version "proxmox-ve: unknown"
 }
 
+validates_remote_control_versions() {
+  stable_release_at_least "0.143.0" "0.143.0" &&
+    stable_release_at_least "0.144.0" "0.143.0" &&
+    stable_release_at_least "1.0.0" "0.143.0" &&
+    ! stable_release_at_least "0.142.9" "0.143.0" &&
+    ! stable_release_at_least "0.143.0-alpha.1" "0.143.0"
+}
+
 validates_real_ssh_key() {
   local public_key
 
@@ -247,8 +255,10 @@ rejects_unknown_option() {
 
 reports_current_version_and_lts_default() {
   [[ "$(bash "${SCRIPT_DIR}/codex-devbox.sh" --version)" == \
-    "Codex Dev Box 1.2.2" ]] &&
+    "Codex Dev Box 1.3.0" ]] &&
     grep -Fq "readonly NODE_MAJOR=\"\${NODE_MAJOR:-24}\"" \
+      "${SCRIPT_DIR}/codex-devbox.sh" &&
+    grep -Fq 'readonly MIN_CODEX_REMOTE_CONTROL_VERSION="0.143.0"' \
       "${SCRIPT_DIR}/codex-devbox.sh"
 }
 
@@ -282,8 +292,122 @@ embedded_provisioner() {
   ' "${SCRIPT_DIR}/codex-devbox.sh"
 }
 
+embedded_onboarding() {
+  embedded_provisioner |
+    awk '
+      /^cat >\/usr\/local\/bin\/codex-devbox-onboarding <<'\''ONBOARDING'\''$/ {
+        inside=1
+        next
+      }
+      /^ONBOARDING$/ { inside=0 }
+      inside
+    '
+}
+
 validates_embedded_provisioner_syntax() {
   bash -n <(embedded_provisioner)
+}
+
+validates_embedded_onboarding_syntax() {
+  bash -n <(embedded_onboarding)
+}
+
+onboarding_runs_login_service_and_pairing() {
+  if [[ "${EUID}" -eq 0 ]]; then
+    return 0
+  fi
+
+  local fixture="${TEST_TMP}/onboarding-fixture"
+  local fixture_home="${fixture}/home"
+  local fixture_state="${fixture}/systemctl-state"
+  local onboarding="${fixture}/codex-devbox-onboarding"
+  local output="${fixture}/output"
+
+  mkdir -p \
+    "${fixture}/bin" \
+    "${fixture_home}/.local/bin" \
+    "${fixture_home}/workspace" \
+    "$fixture_state"
+  embedded_onboarding >"$onboarding"
+  chmod 0755 "$onboarding"
+
+  cat >"${fixture_home}/.local/bin/codex" <<'MOCK_CODEX'
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+case "$*" in
+  "remote-control --help")
+    ;;
+  "login status")
+    [[ -f "$HOME/.codex/auth.json" ]]
+    ;;
+  "login --device-auth")
+    install -d -m 0700 "$HOME/.codex"
+    : >"$HOME/.codex/auth.json"
+    ;;
+  "remote-control pair")
+    printf 'Pairing-Code: TEST-CODE\n'
+    ;;
+  *)
+    printf 'Unerwarteter Codex-Aufruf: %s\n' "$*" >&2
+    exit 2
+    ;;
+esac
+MOCK_CODEX
+  chmod 0755 "${fixture_home}/.local/bin/codex"
+
+  cat >"${fixture}/bin/systemctl" <<'MOCK_SYSTEMCTL'
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+state="${MOCK_SYSTEMCTL_STATE:?}"
+case "$*" in
+  "--user daemon-reload"|"--user reset-failed codex-remote-control.service")
+    ;;
+  "--user enable --now codex-remote-control.service")
+    : >"${state}/enabled"
+    : >"${state}/active"
+    ;;
+  "--user is-enabled --quiet codex-remote-control.service")
+    [[ -f "${state}/enabled" ]]
+    ;;
+  "--user is-active --quiet codex-remote-control.service")
+    [[ -f "${state}/active" ]]
+    ;;
+  "--user is-failed --quiet codex-remote-control.service")
+    exit 1
+    ;;
+  "--user disable --now codex-remote-control.service")
+    rm -f "${state}/enabled" "${state}/active"
+    ;;
+  *)
+    printf 'Unerwarteter systemctl-Aufruf: %s\n' "$*" >&2
+    exit 2
+    ;;
+esac
+MOCK_SYSTEMCTL
+  chmod 0755 "${fixture}/bin/systemctl"
+
+  HOME="$fixture_home" \
+    MOCK_SYSTEMCTL_STATE="$fixture_state" \
+    PATH="${fixture}/bin:/usr/bin:/bin" \
+    "$onboarding" --pair >"$output" &&
+    grep -Fq 'Pairing-Code: TEST-CODE' "$output" &&
+    [[ -f "${fixture_home}/.codex/auth.json" ]] &&
+    [[ "$(stat -c '%a' "${fixture_home}/.codex/auth.json")" == "600" ]] &&
+    [[ -f "${fixture_home}/.config/codex-devbox/remote-control-configured" ]] &&
+    [[ -f "${fixture_state}/enabled" ]] &&
+    [[ -f "${fixture_state}/active" ]] &&
+    HOME="$fixture_home" \
+      MOCK_SYSTEMCTL_STATE="$fixture_state" \
+      PATH="${fixture}/bin:/usr/bin:/bin" \
+      "$onboarding" --status >/dev/null &&
+    HOME="$fixture_home" \
+      MOCK_SYSTEMCTL_STATE="$fixture_state" \
+      PATH="${fixture}/bin:/usr/bin:/bin" \
+      "$onboarding" --disable >/dev/null &&
+    [[ ! -e "${fixture_state}/enabled" ]] &&
+    [[ ! -e "${fixture_state}/active" ]]
 }
 
 provisioner_uses_safe_user_context() {
@@ -385,12 +509,39 @@ provisioner_checks_critical_endpoints() {
     grep -Fq 'chatgpt.com' "${SCRIPT_DIR}/codex-devbox.sh"
 }
 
+provisioner_configures_remote_control() {
+  local onboarding
+  local provisioner
+
+  onboarding="$(embedded_onboarding)"
+  provisioner="$(embedded_provisioner)"
+
+  grep -Fq \
+    'cat >/etc/systemd/user/codex-remote-control.service <<UNIT' \
+    <<<"$provisioner" &&
+    grep -Fq \
+      'ExecStart=${DEV_HOME}/.local/bin/codex remote-control' \
+      <<<"$provisioner" &&
+    grep -Fq 'WantedBy=default.target' <<<"$provisioner" &&
+    grep -Fq 'loginctl enable-linger "$DEV_USER"' <<<"$provisioner" &&
+    grep -Fq \
+      'run_as_dev "${DEV_HOME}/.local/bin/codex" remote-control --help' \
+      <<<"$provisioner" &&
+    grep -Fq '"$CODEX_BIN" login --device-auth' <<<"$onboarding" &&
+    grep -Fq \
+      'systemctl --user enable --now "$SERVICE_NAME"' \
+      <<<"$onboarding" &&
+    grep -Fq '"$CODEX_BIN" remote-control pair' <<<"$onboarding" &&
+    grep -Fq 'codex-devbox-onboarding --first-login' <<<"$provisioner"
+}
+
 run_test "valid IPv4 addresses" accepts_valid_ipv4
 run_test "invalid IPv4 addresses" rejects_invalid_ipv4
 run_test "IPv4 CIDR validation" validates_ipv4_cidr
 run_test "static IPv4 network semantics" validates_static_network_semantics
 run_test "IPv4 integer conversion" converts_ipv4_to_integer
 run_test "Proxmox versions are parsed" parses_supported_pve_versions
+run_test "Remote Control versions are validated" validates_remote_control_versions
 run_test "real SSH public key" validates_real_ssh_key
 run_test "malformed SSH public keys" rejects_malformed_ssh_keys
 run_test "valid installation settings" accepts_valid_settings
@@ -407,6 +558,8 @@ run_test "version and LTS default are current" reports_current_version_and_lts_d
 run_test "failed commands are summarized" summarizes_failed_commands
 run_test "latest amd64 template is selected" selects_latest_amd64_template
 run_test "embedded provisioner syntax" validates_embedded_provisioner_syntax
+run_test "embedded onboarding syntax" validates_embedded_onboarding_syntax
+run_test "onboarding login, service and pairing" onboarding_runs_login_service_and_pairing
 run_test "provisioner uses safe user context" provisioner_uses_safe_user_context
 run_test "provisioner reports inner failures" provisioner_reports_inner_failures
 run_test "provisioner uses portable locale" provisioner_uses_portable_locale
@@ -414,6 +567,7 @@ run_test "provisioner configures fd for non-login shells" provisioner_configures
 run_test "provisioner prepares sshd runtime" provisioner_prepares_sshd_runtime
 run_test "provisioner verifies SSH security" provisioner_verifies_effective_ssh_security
 run_test "provisioner checks critical endpoints" provisioner_checks_critical_endpoints
+run_test "provisioner configures Remote Control" provisioner_configures_remote_control
 
 printf '\n%d passed, %d failed\n' "$PASSED" "$FAILED"
 ((FAILED == 0))

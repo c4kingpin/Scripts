@@ -1,16 +1,17 @@
 #!/usr/bin/env bash
 # Codex Dev Box - Proxmox VE LXC installer
-# Ubuntu 24.04 LTS, SSH key access, Node.js and Codex CLI
+# Ubuntu 24.04 LTS, SSH key access, Node.js, Codex CLI and Remote Control
 # License: MIT
 
 set -Eeuo pipefail
 shopt -s inherit_errexit 2>/dev/null || true
 
 readonly APP="Codex Dev Box"
-readonly VERSION="1.2.2"
+readonly VERSION="1.3.0"
 readonly UBUNTU_VERSION="24.04"
 readonly NODE_MAJOR="${NODE_MAJOR:-24}"
 readonly CODEX_RELEASE="${CODEX_RELEASE:-latest}"
+readonly MIN_CODEX_REMOTE_CONTROL_VERSION="0.143.0"
 readonly NODESOURCE_KEY_FINGERPRINT="6F71F525282841EEDAF851B42F59B5F99B1BE0B4"
 
 readonly DEFAULT_CT_HOSTNAME="codex-devbox"
@@ -94,7 +95,8 @@ auf einem Proxmox-VE-Host und installiert eine Codex-Entwicklungsumgebung.
 
 Optionale Umgebungsvariablen:
   NODE_MAJOR     Node.js-Hauptversion (22 oder 24; Standard: ${NODE_MAJOR})
-  CODEX_RELEASE  Codex-Version oder "latest" (Standard: ${CODEX_RELEASE})
+  CODEX_RELEASE  Codex-Version ab ${MIN_CODEX_REMOTE_CONTROL_VERSION} oder
+                 "latest" (Standard: ${CODEX_RELEASE})
 EOF
 }
 
@@ -145,7 +147,7 @@ header() {
 / /___/ /_/ / /_/ / /_/ />  <  / /_/ /  __/| |/ / /_/ / /_/ />  <
 \____/\____/\__,_/\____/_/|_| /_____/\___/ |___/_____/\____/_/|_|
 BANNER
-  printf '%b\n' "${BOLD}Proxmox VE LXC Installer – Ubuntu ${UBUNTU_VERSION}, SSH und Codex CLI${CL}"
+  printf '%b\n' "${BOLD}Proxmox VE LXC Installer – Ubuntu ${UBUNTU_VERSION}, SSH, Codex CLI und Remote Control${CL}"
   printf 'Version %s\n\n' "$VERSION"
 }
 
@@ -154,6 +156,37 @@ pve_major_version() {
 
   [[ "$version" =~ ^pve-manager/([0-9]+)\. ]] || return 1
   printf '%s\n' "${BASH_REMATCH[1]}"
+}
+
+stable_release_at_least() {
+  local candidate="$1"
+  local minimum="$2"
+  local candidate_base="${candidate%%-*}"
+  local candidate_major
+  local candidate_minor
+  local candidate_patch
+  local minimum_major
+  local minimum_minor
+  local minimum_patch
+
+  IFS=. read -r candidate_major candidate_minor candidate_patch \
+    <<<"$candidate_base"
+  IFS=. read -r minimum_major minimum_minor minimum_patch <<<"$minimum"
+
+  if ((10#${candidate_major} != 10#${minimum_major})); then
+    ((10#${candidate_major} > 10#${minimum_major}))
+    return
+  fi
+  if ((10#${candidate_minor} != 10#${minimum_minor})); then
+    ((10#${candidate_minor} > 10#${minimum_minor}))
+    return
+  fi
+  if ((10#${candidate_patch} != 10#${minimum_patch})); then
+    ((10#${candidate_patch} > 10#${minimum_patch}))
+    return
+  fi
+
+  [[ "$candidate" != *-* ]]
 }
 
 require_pve() {
@@ -189,6 +222,11 @@ require_pve() {
   [[ "$CODEX_RELEASE" == "latest" ||
     "$CODEX_RELEASE" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-(alpha|beta)(\.[0-9]+)?)?$ ]] ||
     fatal "CODEX_RELEASE muss 'latest' oder eine Version wie 1.2.3 sein."
+  if [[ "$CODEX_RELEASE" != "latest" ]] &&
+    ! stable_release_at_least \
+      "$CODEX_RELEASE" "$MIN_CODEX_REMOTE_CONTROL_VERSION"; then
+    fatal "Remote Control benötigt Codex ${MIN_CODEX_REMOTE_CONTROL_VERSION} oder neuer."
+  fi
 }
 
 install_dialog() {
@@ -1052,6 +1090,296 @@ fi
 ln -sfn -- "$fd_binary" /usr/local/bin/fd
 [[ -x /usr/local/bin/fd ]]
 
+log "Remote-Control-Onboarding vorbereiten"
+install -d -m 0755 /etc/systemd/user
+cat >/etc/systemd/user/codex-remote-control.service <<UNIT
+[Unit]
+Description=Codex Remote Control
+Documentation=https://learn.chatgpt.com/docs/developer-commands#codex-remote-control
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=simple
+Environment=HOME=${DEV_HOME}
+Environment=PATH=${DEV_HOME}/.local/bin:/usr/local/bin:/usr/bin:/bin
+WorkingDirectory=${DEV_HOME}/workspace
+ExecStart=${DEV_HOME}/.local/bin/codex remote-control
+Restart=on-failure
+RestartSec=5s
+TimeoutStopSec=30s
+KillMode=mixed
+UMask=0077
+
+[Install]
+WantedBy=default.target
+UNIT
+chmod 0644 /etc/systemd/user/codex-remote-control.service
+
+cat >/usr/local/bin/codex-devbox-onboarding <<'ONBOARDING'
+#!/usr/bin/env bash
+
+set -Euo pipefail
+umask 077
+
+readonly SERVICE_NAME="codex-remote-control.service"
+readonly CODEX_BIN="${HOME}/.local/bin/codex"
+readonly STATE_DIR="${HOME}/.config/codex-devbox"
+readonly FIRST_LOGIN_MARKER="${STATE_DIR}/first-login-handled"
+readonly COMPLETE_MARKER="${STATE_DIR}/remote-control-configured"
+
+usage() {
+  cat <<'EOF'
+Verwendung: codex-devbox-onboarding [OPTION]
+
+Ohne Option werden ChatGPT-Anmeldung, Remote-Control-Dienst und Pairing
+eingerichtet.
+
+Optionen:
+  --status       Anmeldung, Autostart und Dienststatus anzeigen
+  --pair         Remote Control einrichten oder einen neuen Pairing-Code erzeugen
+  --disable      Remote-Control-Dienst stoppen und Autostart deaktivieren
+  --first-login  Onboarding nur beim ersten interaktiven SSH-Login anbieten
+  -h, --help     Diese Hilfe anzeigen
+EOF
+}
+
+prepare_state() {
+  install -d -m 0700 "$STATE_DIR"
+}
+
+mark_file() {
+  local path="$1"
+
+  : >"$path"
+  chmod 0600 "$path"
+}
+
+require_user_manager() {
+  if [[ "${EUID}" -eq 0 ]]; then
+    printf 'Bitte als Entwickler-Benutzer, nicht als root, ausführen.\n' >&2
+    return 1
+  fi
+  if ! systemctl --user daemon-reload; then
+    printf 'Der systemd-Benutzerdienst ist nicht erreichbar.\n' >&2
+    printf 'Neu anmelden und erneut versuchen.\n' >&2
+    return 1
+  fi
+}
+
+require_runtime() {
+  require_user_manager || return 1
+  if [[ ! -x "$CODEX_BIN" ]]; then
+    printf 'Codex wurde unter %s nicht gefunden.\n' "$CODEX_BIN" >&2
+    return 1
+  fi
+  if ! "$CODEX_BIN" remote-control --help >/dev/null 2>&1; then
+    printf 'Diese Codex-Version unterstützt Remote Control nicht.\n' >&2
+    printf 'Aktualisieren: codex update\n' >&2
+    return 1
+  fi
+}
+
+show_status() {
+  local auth="nein"
+  local enabled="nein"
+  local active="nein"
+  local configured="nein"
+  local status=0
+
+  prepare_state
+  if [[ -x "$CODEX_BIN" ]] &&
+    "$CODEX_BIN" login status >/dev/null 2>&1; then
+    auth="ja"
+  else
+    status=1
+  fi
+  if systemctl --user is-enabled --quiet "$SERVICE_NAME"; then
+    enabled="ja"
+  else
+    status=1
+  fi
+  if systemctl --user is-active --quiet "$SERVICE_NAME"; then
+    active="ja"
+  else
+    status=1
+  fi
+  if [[ -f "$COMPLETE_MARKER" ]]; then
+    configured="ja"
+  else
+    status=1
+  fi
+
+  printf 'ChatGPT-Anmeldung:   %s\n' "$auth"
+  printf 'Autostart:           %s\n' "$enabled"
+  printf 'Remote-Control-Dienst: %s\n' "$active"
+  printf 'Onboarding:          %s\n' "$configured"
+  return "$status"
+}
+
+wait_for_service() {
+  local _attempt
+
+  for _attempt in {1..15}; do
+    if systemctl --user is-active --quiet "$SERVICE_NAME"; then
+      return 0
+    fi
+    if systemctl --user is-failed --quiet "$SERVICE_NAME"; then
+      return 1
+    fi
+    sleep 1
+  done
+  return 1
+}
+
+start_and_pair() {
+  local _attempt
+  local pair_output=""
+
+  prepare_state
+  require_runtime || return 1
+
+  if ! "$CODEX_BIN" login status >/dev/null 2>&1; then
+    cat <<'EOF'
+
+Codex wird jetzt mit deinem ChatGPT-Konto gekoppelt.
+Verwende dasselbe Konto und denselben Workspace wie in ChatGPT Remote.
+Für diese headless Devbox wird der OAuth-Gerätecode-Flow verwendet.
+
+EOF
+    "$CODEX_BIN" login --device-auth || {
+      printf 'Die ChatGPT-Anmeldung wurde nicht abgeschlossen.\n' >&2
+      return 1
+    }
+  fi
+
+  if ! "$CODEX_BIN" login status >/dev/null 2>&1; then
+    printf 'Codex meldet nach dem Login keine aktive Anmeldung.\n' >&2
+    return 1
+  fi
+
+  if [[ -f "${HOME}/.codex/auth.json" ]]; then
+    chmod 0600 "${HOME}/.codex/auth.json"
+  fi
+
+  systemctl --user reset-failed "$SERVICE_NAME" >/dev/null 2>&1 || true
+  if ! systemctl --user enable --now "$SERVICE_NAME"; then
+    printf 'Remote Control konnte nicht gestartet werden.\n' >&2
+    return 1
+  fi
+  if ! wait_for_service; then
+    printf 'Der Remote-Control-Dienst ist nicht stabil gestartet.\n' >&2
+    printf 'Diagnose: journalctl --user -u %s -n 100\n' "$SERVICE_NAME" >&2
+    systemctl --user disable --now "$SERVICE_NAME" >/dev/null 2>&1 || true
+    return 1
+  fi
+
+  for _attempt in {1..10}; do
+    if pair_output="$("$CODEX_BIN" remote-control pair 2>&1)"; then
+      printf '\n%s\n' "$pair_output"
+      mark_file "$COMPLETE_MARKER"
+      mark_file "$FIRST_LOGIN_MARKER"
+      cat <<'EOF'
+
+Remote Control läuft jetzt dauerhaft und startet beim Container-Boot.
+Der Pairing-Code ist nur kurz gültig. Bei Bedarf erzeugt
+`codex-devbox-onboarding --pair` einen neuen Code.
+EOF
+      return 0
+    fi
+    sleep 1
+  done
+
+  printf 'Es konnte kein Pairing-Code erzeugt werden:\n%s\n' \
+    "$pair_output" >&2
+  printf '\nRemote Control benötigt eine ChatGPT-Anmeldung mit Codex-Zugriff.\n' >&2
+  printf 'Bei API-Key-Anmeldung zuerst `codex logout` ausführen.\n' >&2
+  printf 'Auch Workspace-Richtlinien können Remote Control blockieren.\n' >&2
+  systemctl --user disable --now "$SERVICE_NAME" >/dev/null 2>&1 || true
+  return 1
+}
+
+disable_remote_control() {
+  prepare_state
+  require_user_manager || return 1
+  systemctl --user disable --now "$SERVICE_NAME"
+  rm -f "$COMPLETE_MARKER"
+  mark_file "$FIRST_LOGIN_MARKER"
+  printf 'Remote Control und dessen Autostart wurden deaktiviert.\n'
+}
+
+first_login() {
+  local answer=""
+
+  prepare_state
+  if [[ -f "$FIRST_LOGIN_MARKER" || -f "$COMPLETE_MARKER" ]]; then
+    return 0
+  fi
+  if [[ ! -t 0 || ! -t 1 ]]; then
+    return 0
+  fi
+
+  cat <<'EOF'
+
+Codex Dev Box – Ersteinrichtung
+
+Remote Control kann diese Devbox über dein ChatGPT-Konto erreichbar machen.
+Dabei gelten weiterhin die Codex-Berechtigungen und Freigabeabfragen.
+Die Einrichtung benötigt eine Anmeldung und anschließend einen Pairing-Code.
+EOF
+  read -r -p "Remote Control jetzt einrichten? [J/n] " answer || answer="n"
+  case "${answer,,}" in
+    ""|j|ja|y|yes)
+      if start_and_pair; then
+        return 0
+      fi
+      mark_file "$FIRST_LOGIN_MARKER"
+      printf '\nEinrichtung unvollständig. Erneut starten mit:\n'
+      printf '  codex-devbox-onboarding --pair\n'
+      return 1
+      ;;
+    *)
+      mark_file "$FIRST_LOGIN_MARKER"
+      printf 'Zurückgestellt. Später starten mit:\n'
+      printf '  codex-devbox-onboarding --pair\n'
+      ;;
+  esac
+}
+
+main() {
+  case "${1:-}" in
+    "")
+      start_and_pair
+      ;;
+    --pair)
+      start_and_pair
+      ;;
+    --status)
+      require_user_manager && show_status
+      ;;
+    --disable)
+      disable_remote_control
+      ;;
+    --first-login)
+      first_login
+      ;;
+    -h|--help)
+      usage
+      ;;
+    *)
+      printf 'Unbekannte Option: %s\n\n' "$1" >&2
+      usage >&2
+      return 2
+      ;;
+  esac
+}
+
+main "$@"
+ONBOARDING
+chmod 0755 /usr/local/bin/codex-devbox-onboarding
+
+loginctl enable-linger "$DEV_USER"
+
 log "SSH absichern"
 install -d -m 0755 /etc/ssh/sshd_config.d
 rm -f /etc/ssh/sshd_config.d/60-codex-devbox.conf
@@ -1119,6 +1447,11 @@ export PATH="/usr/local/bin:$HOME/.local/bin:$PATH"
 if [[ $- == *i* ]] && [[ -d "$HOME/workspace" ]]; then
   cd "$HOME/workspace"
 fi
+if [[ $- == *i* ]] && [[ -t 0 ]] && [[ -t 1 ]] &&
+  [[ ! -e "$HOME/.config/codex-devbox/first-login-handled" ]] &&
+  command -v codex-devbox-onboarding >/dev/null 2>&1; then
+  codex-devbox-onboarding --first-login || true
+fi
 BASHRC
 
 chown "$DEV_USER:$DEV_USER" "${DEV_HOME}/.bashrc"
@@ -1154,6 +1487,13 @@ if [[ "$CODEX_RELEASE" != "latest" &&
     "$CODEX_RELEASE" "$codex_version_output" >&2
   exit 1
 fi
+run_as_dev "${DEV_HOME}/.local/bin/codex" remote-control --help >/dev/null
+test -x /usr/local/bin/codex-devbox-onboarding
+test -f /etc/systemd/user/codex-remote-control.service
+grep -Fxq \
+  "ExecStart=${DEV_HOME}/.local/bin/codex remote-control" \
+  /etc/systemd/user/codex-remote-control.service
+[[ "$(loginctl show-user "$DEV_USER" -p Linger --value)" == "yes" ]]
 run_as_dev test -w "${DEV_HOME}/workspace"
 run_as_dev sudo -n true
 [[ "$(stat -c '%U:%G:%a' "${DEV_HOME}/.ssh")" == \
@@ -1211,10 +1551,22 @@ Host ${CT_HOSTNAME}
 Anschließend:
 
   ssh ${CT_HOSTNAME}
+
+Beim ersten interaktiven SSH-Login startet das Remote-Control-Onboarding.
+Es koppelt Codex per Gerätecode mit dem ChatGPT-Konto, aktiviert den
+persistenten Benutzerdienst und zeigt einen kurzlebigen Pairing-Code an.
+
+Spätere Verwaltung:
+
+  codex-devbox-onboarding --status
+  codex-devbox-onboarding --pair
+  codex-devbox-onboarding --disable
+
+Danach kann Codex wie gewohnt im Workspace gestartet werden:
+
   cd ~/workspace
   codex
 
-Beim ersten Start bietet Codex die Anmeldung an.
 Hinweis: Der Benutzer darf über sudo weitere benötigte Werkzeuge installieren.
 EOF
 }
