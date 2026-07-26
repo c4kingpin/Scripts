@@ -95,12 +95,13 @@ bereits konfigurierte passwortlose `sudo`. Zur Diagnose:
 sudo systemctl status "user@$(id -u).service"
 ```
 
-Der Dienst läuft als Entwickler-Benutzer im Vordergrund unter Kontrolle von
-`systemd --user`. User-Linger hält den Benutzerdienst auch ohne aktive
-SSH-Sitzung verfügbar; zusammen mit dem bereits gesetzten Proxmox-Parameter
-`onboot=1` startet Remote Control nach einem Host- oder Container-Neustart
-automatisch. Vor der ersten erfolgreichen Anmeldung und Einrichtung bleibt der
-Dienst deaktiviert.
+Der systemd-Benutzerdienst startet und stoppt den Codex App-Server-Daemon als
+Entwickler-Benutzer. Die Einrichtung wartet auf dessen lokalen Control-Socket,
+bevor sie den Pairing-Code anfordert. User-Linger hält den Benutzerdienst auch
+ohne aktive SSH-Sitzung verfügbar; zusammen mit dem bereits gesetzten Proxmox-
+Parameter `onboot=1` startet Remote Control nach einem Host- oder Container-
+Neustart automatisch. Vor der ersten erfolgreichen Anmeldung und Einrichtung
+bleibt der Dienst deaktiviert.
 
 Remote Control benötigt eine ChatGPT-Anmeldung mit Codex-Zugriff. Eine
 vorhandene API-Key-Anmeldung kann lokale Codex-Aufgaben ausführen, erfüllt aber
@@ -134,7 +135,7 @@ Offizielle Details:
 
 - [Remote connections](https://learn.chatgpt.com/docs/remote-connections)
 - [Authentication](https://learn.chatgpt.com/docs/auth)
-- [`codex remote-control`](https://learn.chatgpt.com/docs/developer-commands#codex-remote-control)
+- [Codex CLI changelog](https://learn.chatgpt.com/docs/changelog)
 
 ## Sicherheitsprofil
 

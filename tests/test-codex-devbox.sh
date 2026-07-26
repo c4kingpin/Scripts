@@ -255,7 +255,7 @@ rejects_unknown_option() {
 
 reports_current_version_and_lts_default() {
   [[ "$(bash "${SCRIPT_DIR}/codex-devbox.sh" --version)" == \
-    "Codex Dev Box 1.3.0" ]] &&
+    "Codex Dev Box 1.3.1" ]] &&
     grep -Fq "readonly NODE_MAJOR=\"\${NODE_MAJOR:-24}\"" \
       "${SCRIPT_DIR}/codex-devbox.sh" &&
     grep -Fq 'readonly MIN_CODEX_REMOTE_CONTROL_VERSION="0.143.0"' \
@@ -317,14 +317,18 @@ remote_control_helper_runs_login_service_and_pairing() {
     return 0
   fi
 
-  local fixture="${TEST_TMP}/remote-control-fixture"
+  local fixture="${TEST_TMP}/rc"
   local fixture_home="${fixture}/home"
   local fixture_state="${fixture}/systemctl-state"
   local helper="${fixture}/codex-devbox-remote-control"
   local output="${fixture}/output"
+  local socket_path="${fixture_home}/.codex/app-server-control/app-server-control.sock"
+  local system_socket
+  local status=0
 
   mkdir -p \
     "${fixture}/bin" \
+    "$(dirname "$socket_path")" \
     "${fixture_home}/.local/bin" \
     "${fixture_home}/workspace" \
     "$fixture_state"
@@ -336,7 +340,7 @@ remote_control_helper_runs_login_service_and_pairing() {
 set -Eeuo pipefail
 
 case "$*" in
-  "remote-control --help")
+  "remote-control start --help"|"remote-control stop --help"|"remote-control pair --help")
     ;;
   "login status")
     [[ -f "$HOME/.codex/auth.json" ]]
@@ -394,26 +398,36 @@ esac
 MOCK_SYSTEMCTL
   chmod 0755 "${fixture}/bin/systemctl"
 
-  HOME="$fixture_home" \
-    MOCK_SYSTEMCTL_STATE="$fixture_state" \
-    PATH="${fixture}/bin:/usr/bin:/bin" \
-    "$helper" --pair >"$output" &&
-    grep -Fq 'Pairing-Code: TEST-CODE' "$output" &&
-    [[ -f "${fixture_home}/.codex/auth.json" ]] &&
-    [[ "$(stat -c '%a' "${fixture_home}/.codex/auth.json")" == "600" ]] &&
-    [[ -f "${fixture_home}/.config/codex-devbox/remote-control-configured" ]] &&
-    [[ -f "${fixture_state}/enabled" ]] &&
-    [[ -f "${fixture_state}/active" ]] &&
+  system_socket="$(find /run -type s -print -quit 2>/dev/null)"
+  [[ -n "$system_socket" && -S "$system_socket" ]] || return 0
+  ln -s -- "$system_socket" "$socket_path"
+
+  if ! (
     HOME="$fixture_home" \
       MOCK_SYSTEMCTL_STATE="$fixture_state" \
       PATH="${fixture}/bin:/usr/bin:/bin" \
-      "$helper" --status >/dev/null &&
-    HOME="$fixture_home" \
-      MOCK_SYSTEMCTL_STATE="$fixture_state" \
-      PATH="${fixture}/bin:/usr/bin:/bin" \
-      "$helper" --disable >/dev/null &&
-    [[ ! -e "${fixture_state}/enabled" ]] &&
-    [[ ! -e "${fixture_state}/active" ]]
+      "$helper" --pair >"$output" &&
+      grep -Fq 'Pairing-Code: TEST-CODE' "$output" &&
+      [[ -f "${fixture_home}/.codex/auth.json" ]] &&
+      [[ "$(stat -c '%a' "${fixture_home}/.codex/auth.json")" == "600" ]] &&
+      [[ -f "${fixture_home}/.config/codex-devbox/remote-control-configured" ]] &&
+      [[ -f "${fixture_state}/enabled" ]] &&
+      [[ -f "${fixture_state}/active" ]] &&
+      HOME="$fixture_home" \
+        MOCK_SYSTEMCTL_STATE="$fixture_state" \
+        PATH="${fixture}/bin:/usr/bin:/bin" \
+        "$helper" --status >/dev/null &&
+      HOME="$fixture_home" \
+        MOCK_SYSTEMCTL_STATE="$fixture_state" \
+        PATH="${fixture}/bin:/usr/bin:/bin" \
+        "$helper" --disable >/dev/null &&
+      [[ ! -e "${fixture_state}/enabled" ]] &&
+      [[ ! -e "${fixture_state}/active" ]]
+  ); then
+    status=1
+  fi
+
+  return "$status"
 }
 
 provisioner_uses_safe_user_context() {
@@ -526,8 +540,13 @@ provisioner_configures_remote_control() {
     'cat >/etc/systemd/user/codex-remote-control.service <<UNIT' \
     <<<"$provisioner" &&
     grep -Fq \
-      "ExecStart=\${DEV_HOME}/.local/bin/codex remote-control" \
+      "ExecStart=\${DEV_HOME}/.local/bin/codex remote-control start" \
       <<<"$provisioner" &&
+    grep -Fq \
+      "ExecStop=\${DEV_HOME}/.local/bin/codex remote-control stop" \
+      <<<"$provisioner" &&
+    grep -Fq 'Type=oneshot' <<<"$provisioner" &&
+    grep -Fq 'RemainAfterExit=yes' <<<"$provisioner" &&
     grep -Fq 'WantedBy=default.target' <<<"$provisioner" &&
     grep -Fq "loginctl enable-linger \"\$DEV_USER\"" <<<"$provisioner" &&
     grep -Fq "systemctl start \"user@\${dev_uid}.service\"" \
@@ -537,8 +556,9 @@ provisioner_configures_remote_control() {
       <<<"$provisioner" &&
     grep -Fq "export XDG_RUNTIME_DIR=\"\$USER_RUNTIME_DIR\"" \
       <<<"$helper" &&
+    grep -Fq "[[ -S \"\$CONTROL_SOCKET\" ]]" <<<"$helper" &&
     grep -Fq \
-      "run_as_dev \"\${DEV_HOME}/.local/bin/codex\" remote-control --help" \
+      "run_as_dev \"\${DEV_HOME}/.local/bin/codex\" remote-control start --help" \
       <<<"$provisioner" &&
     grep -Fq "\"\$CODEX_BIN\" login --device-auth" <<<"$helper" &&
     grep -Fq \

@@ -7,7 +7,7 @@ set -Eeuo pipefail
 shopt -s inherit_errexit 2>/dev/null || true
 
 readonly APP="Codex Dev Box"
-readonly VERSION="1.3.0"
+readonly VERSION="1.3.1"
 readonly UBUNTU_VERSION="24.04"
 readonly NODE_MAJOR="${NODE_MAJOR:-24}"
 readonly CODEX_RELEASE="${CODEX_RELEASE:-latest}"
@@ -1102,20 +1102,22 @@ install -d -m 0755 /etc/systemd/user
 cat >/etc/systemd/user/codex-remote-control.service <<UNIT
 [Unit]
 Description=Codex Remote Control
-Documentation=https://learn.chatgpt.com/docs/developer-commands#codex-remote-control
+Documentation=https://learn.chatgpt.com/docs/remote-connections
 StartLimitIntervalSec=300
 StartLimitBurst=5
 
 [Service]
-Type=simple
+Type=oneshot
 Environment=HOME=${DEV_HOME}
 Environment=PATH=${DEV_HOME}/.local/bin:/usr/local/bin:/usr/bin:/bin
 WorkingDirectory=${DEV_HOME}/workspace
-ExecStart=${DEV_HOME}/.local/bin/codex remote-control
+ExecStart=${DEV_HOME}/.local/bin/codex remote-control start
+ExecStop=${DEV_HOME}/.local/bin/codex remote-control stop
+RemainAfterExit=yes
 Restart=on-failure
 RestartSec=5s
+TimeoutStartSec=120s
 TimeoutStopSec=30s
-KillMode=mixed
 UMask=0077
 
 [Install]
@@ -1131,6 +1133,7 @@ umask 077
 
 readonly SERVICE_NAME="codex-remote-control.service"
 readonly CODEX_BIN="${HOME}/.local/bin/codex"
+readonly CONTROL_SOCKET="${HOME}/.codex/app-server-control/app-server-control.sock"
 readonly STATE_DIR="${HOME}/.config/codex-devbox"
 readonly FIRST_LOGIN_MARKER="${STATE_DIR}/first-login-handled"
 readonly COMPLETE_MARKER="${STATE_DIR}/remote-control-configured"
@@ -1197,8 +1200,10 @@ require_runtime() {
     printf 'Codex wurde unter %s nicht gefunden.\n' "$CODEX_BIN" >&2
     return 1
   fi
-  if ! "$CODEX_BIN" remote-control --help >/dev/null 2>&1; then
-    printf 'Diese Codex-Version unterstützt Remote Control nicht.\n' >&2
+  if ! "$CODEX_BIN" remote-control start --help >/dev/null 2>&1 ||
+    ! "$CODEX_BIN" remote-control stop --help >/dev/null 2>&1 ||
+    ! "$CODEX_BIN" remote-control pair --help >/dev/null 2>&1; then
+    printf 'Diese Codex-Version unterstützt die benötigten Remote-Control-Befehle nicht.\n' >&2
     printf 'Aktualisieren: codex update\n' >&2
     return 1
   fi
@@ -1244,8 +1249,9 @@ show_status() {
 wait_for_service() {
   local _attempt
 
-  for _attempt in {1..15}; do
-    if systemctl --user is-active --quiet "$SERVICE_NAME"; then
+  for _attempt in {1..60}; do
+    if systemctl --user is-active --quiet "$SERVICE_NAME" &&
+      [[ -S "$CONTROL_SOCKET" ]]; then
       return 0
     fi
     if systemctl --user is-failed --quiet "$SERVICE_NAME"; then
@@ -1292,7 +1298,8 @@ EOF
     return 1
   fi
   if ! wait_for_service; then
-    printf 'Der Remote-Control-Dienst ist nicht stabil gestartet.\n' >&2
+    printf 'Der Remote-Control-Dienst hat seinen Control-Socket nicht bereitgestellt.\n' >&2
+    printf 'Erwarteter Socket: %s\n' "$CONTROL_SOCKET" >&2
     printf 'Diagnose: journalctl --user -u %s -n 100\n' "$SERVICE_NAME" >&2
     systemctl --user disable --now "$SERVICE_NAME" >/dev/null 2>&1 || true
     return 1
@@ -1516,11 +1523,13 @@ if [[ "$CODEX_RELEASE" != "latest" &&
     "$CODEX_RELEASE" "$codex_version_output" >&2
   exit 1
 fi
-run_as_dev "${DEV_HOME}/.local/bin/codex" remote-control --help >/dev/null
+run_as_dev "${DEV_HOME}/.local/bin/codex" remote-control start --help >/dev/null
+run_as_dev "${DEV_HOME}/.local/bin/codex" remote-control stop --help >/dev/null
+run_as_dev "${DEV_HOME}/.local/bin/codex" remote-control pair --help >/dev/null
 test -x /usr/local/bin/codex-devbox-remote-control
 test -f /etc/systemd/user/codex-remote-control.service
 grep -Fxq \
-  "ExecStart=${DEV_HOME}/.local/bin/codex remote-control" \
+  "ExecStart=${DEV_HOME}/.local/bin/codex remote-control start" \
   /etc/systemd/user/codex-remote-control.service
 [[ "$(loginctl show-user "$DEV_USER" -p Linger --value)" == "yes" ]]
 systemctl is-active --quiet "user@${dev_uid}.service"
