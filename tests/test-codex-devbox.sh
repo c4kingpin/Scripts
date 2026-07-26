@@ -292,14 +292,14 @@ embedded_provisioner() {
   ' "${SCRIPT_DIR}/codex-devbox.sh"
 }
 
-embedded_onboarding() {
+embedded_remote_control_helper() {
   embedded_provisioner |
     awk '
-      /^cat >\/usr\/local\/bin\/codex-devbox-onboarding <<'\''ONBOARDING'\''$/ {
+      /^cat >\/usr\/local\/bin\/codex-devbox-remote-control <<'\''REMOTE_CONTROL_HELPER'\''$/ {
         inside=1
         next
       }
-      /^ONBOARDING$/ { inside=0 }
+      /^REMOTE_CONTROL_HELPER$/ { inside=0 }
       inside
     '
 }
@@ -308,19 +308,19 @@ validates_embedded_provisioner_syntax() {
   bash -n <(embedded_provisioner)
 }
 
-validates_embedded_onboarding_syntax() {
-  bash -n <(embedded_onboarding)
+validates_embedded_remote_control_helper_syntax() {
+  bash -n <(embedded_remote_control_helper)
 }
 
-onboarding_runs_login_service_and_pairing() {
+remote_control_helper_runs_login_service_and_pairing() {
   if [[ "${EUID}" -eq 0 ]]; then
     return 0
   fi
 
-  local fixture="${TEST_TMP}/onboarding-fixture"
+  local fixture="${TEST_TMP}/remote-control-fixture"
   local fixture_home="${fixture}/home"
   local fixture_state="${fixture}/systemctl-state"
-  local onboarding="${fixture}/codex-devbox-onboarding"
+  local helper="${fixture}/codex-devbox-remote-control"
   local output="${fixture}/output"
 
   mkdir -p \
@@ -328,8 +328,8 @@ onboarding_runs_login_service_and_pairing() {
     "${fixture_home}/.local/bin" \
     "${fixture_home}/workspace" \
     "$fixture_state"
-  embedded_onboarding >"$onboarding"
-  chmod 0755 "$onboarding"
+  embedded_remote_control_helper >"$helper"
+  chmod 0755 "$helper"
 
   cat >"${fixture_home}/.local/bin/codex" <<'MOCK_CODEX'
 #!/usr/bin/env bash
@@ -362,7 +362,13 @@ set -Eeuo pipefail
 
 state="${MOCK_SYSTEMCTL_STATE:?}"
 case "$*" in
-  "--user daemon-reload"|"--user reset-failed codex-remote-control.service")
+  "--user daemon-reload")
+    expected_runtime="/run/user/$(id -u)"
+    [[ "${XDG_RUNTIME_DIR:-}" == "$expected_runtime" ]]
+    [[ "${DBUS_SESSION_BUS_ADDRESS:-}" == \
+      "unix:path=${expected_runtime}/bus" ]]
+    ;;
+  "--user reset-failed codex-remote-control.service")
     ;;
   "--user enable --now codex-remote-control.service")
     : >"${state}/enabled"
@@ -391,7 +397,7 @@ MOCK_SYSTEMCTL
   HOME="$fixture_home" \
     MOCK_SYSTEMCTL_STATE="$fixture_state" \
     PATH="${fixture}/bin:/usr/bin:/bin" \
-    "$onboarding" --pair >"$output" &&
+    "$helper" --pair >"$output" &&
     grep -Fq 'Pairing-Code: TEST-CODE' "$output" &&
     [[ -f "${fixture_home}/.codex/auth.json" ]] &&
     [[ "$(stat -c '%a' "${fixture_home}/.codex/auth.json")" == "600" ]] &&
@@ -401,11 +407,11 @@ MOCK_SYSTEMCTL
     HOME="$fixture_home" \
       MOCK_SYSTEMCTL_STATE="$fixture_state" \
       PATH="${fixture}/bin:/usr/bin:/bin" \
-      "$onboarding" --status >/dev/null &&
+      "$helper" --status >/dev/null &&
     HOME="$fixture_home" \
       MOCK_SYSTEMCTL_STATE="$fixture_state" \
       PATH="${fixture}/bin:/usr/bin:/bin" \
-      "$onboarding" --disable >/dev/null &&
+      "$helper" --disable >/dev/null &&
     [[ ! -e "${fixture_state}/enabled" ]] &&
     [[ ! -e "${fixture_state}/active" ]]
 }
@@ -510,10 +516,10 @@ provisioner_checks_critical_endpoints() {
 }
 
 provisioner_configures_remote_control() {
-  local onboarding
+  local helper
   local provisioner
 
-  onboarding="$(embedded_onboarding)"
+  helper="$(embedded_remote_control_helper)"
   provisioner="$(embedded_provisioner)"
 
   grep -Fq \
@@ -524,15 +530,22 @@ provisioner_configures_remote_control() {
       <<<"$provisioner" &&
     grep -Fq 'WantedBy=default.target' <<<"$provisioner" &&
     grep -Fq "loginctl enable-linger \"\$DEV_USER\"" <<<"$provisioner" &&
+    grep -Fq "systemctl start \"user@\${dev_uid}.service\"" \
+      <<<"$provisioner" &&
+    grep -Fq \
+      "DBUS_SESSION_BUS_ADDRESS=\"unix:path=/run/user/\${dev_uid}/bus\"" \
+      <<<"$provisioner" &&
+    grep -Fq "export XDG_RUNTIME_DIR=\"\$USER_RUNTIME_DIR\"" \
+      <<<"$helper" &&
     grep -Fq \
       "run_as_dev \"\${DEV_HOME}/.local/bin/codex\" remote-control --help" \
       <<<"$provisioner" &&
-    grep -Fq "\"\$CODEX_BIN\" login --device-auth" <<<"$onboarding" &&
+    grep -Fq "\"\$CODEX_BIN\" login --device-auth" <<<"$helper" &&
     grep -Fq \
       "systemctl --user enable --now \"\$SERVICE_NAME\"" \
-      <<<"$onboarding" &&
-    grep -Fq "\"\$CODEX_BIN\" remote-control pair" <<<"$onboarding" &&
-    grep -Fq 'codex-devbox-onboarding --first-login' <<<"$provisioner"
+      <<<"$helper" &&
+    grep -Fq "\"\$CODEX_BIN\" remote-control pair" <<<"$helper" &&
+    grep -Fq 'codex-devbox-remote-control --first-login' <<<"$provisioner"
 }
 
 run_test "valid IPv4 addresses" accepts_valid_ipv4
@@ -558,8 +571,8 @@ run_test "version and LTS default are current" reports_current_version_and_lts_d
 run_test "failed commands are summarized" summarizes_failed_commands
 run_test "latest amd64 template is selected" selects_latest_amd64_template
 run_test "embedded provisioner syntax" validates_embedded_provisioner_syntax
-run_test "embedded onboarding syntax" validates_embedded_onboarding_syntax
-run_test "onboarding login, service and pairing" onboarding_runs_login_service_and_pairing
+run_test "embedded Remote Control helper syntax" validates_embedded_remote_control_helper_syntax
+run_test "Remote Control helper login, service and pairing" remote_control_helper_runs_login_service_and_pairing
 run_test "provisioner uses safe user context" provisioner_uses_safe_user_context
 run_test "provisioner reports inner failures" provisioner_reports_inner_failures
 run_test "provisioner uses portable locale" provisioner_uses_portable_locale

@@ -51,7 +51,7 @@ bash ./codex-devbox.sh --help
 bash ./codex-devbox.sh --version
 ```
 
-## Remote-Control-Onboarding
+## Remote Control
 
 Beim ersten interaktiven SSH-Login bietet die Devbox die Remote-Control-
 Einrichtung an. Sie wird bewusst erst nach der Provisionierung ausgeführt,
@@ -73,16 +73,26 @@ Die Einrichtung kann beim ersten Login zurückgestellt und jederzeit erneut
 gestartet werden:
 
 ```bash
-codex-devbox-onboarding --pair
+codex-devbox-remote-control --pair
 ```
 
 Verwaltung und Diagnose:
 
 ```bash
-codex-devbox-onboarding --status
-codex-devbox-onboarding --pair
-codex-devbox-onboarding --disable
+codex-devbox-remote-control --status
+codex-devbox-remote-control --pair
+codex-devbox-remote-control --disable
 journalctl --user -u codex-remote-control.service -n 100
+```
+
+Der Verwaltungsbefehl setzt `XDG_RUNTIME_DIR` und die Adresse des
+systemd-User-Bus selbst. Dadurch funktioniert `systemctl --user` auch in der
+Proxmox-LXC-Konsole, die diese Sitzungsvariablen nicht immer bereitstellt.
+Falls der User-Manager noch nicht läuft, startet der Befehl ihn über das
+bereits konfigurierte passwortlose `sudo`. Zur Diagnose:
+
+```bash
+sudo systemctl status "user@$(id -u).service"
 ```
 
 Der Dienst läuft als Entwickler-Benutzer im Vordergrund unter Kontrolle von
@@ -99,14 +109,14 @@ diesem Fall:
 
 ```bash
 codex logout
-codex-devbox-onboarding --pair
+codex-devbox-remote-control --pair
 ```
 
-Das Onboarding speichert selbst keine Tokens. Codex verwaltet die Anmeldung in
-seinem Auth-Cache; eine vorhandene `~/.codex/auth.json` wird auf Modus `0600`
-gesetzt. Diese Datei enthält Zugangsdaten und darf weder kopiert noch
-eingecheckt werden. Das Abmelden mit `codex logout` entfernt die Codex-
-Anmeldung. Anschließend sollte Remote Control deaktiviert oder das Onboarding
+Der Verwaltungsbefehl speichert selbst keine Tokens. Codex verwaltet die
+Anmeldung in seinem Auth-Cache; eine vorhandene `~/.codex/auth.json` wird auf
+Modus `0600` gesetzt. Diese Datei enthält Zugangsdaten und darf weder kopiert
+noch eingecheckt werden. Das Abmelden mit `codex logout` entfernt die Codex-
+Anmeldung. Anschließend sollte Remote Control deaktiviert oder die Einrichtung
 nach einer erneuten Anmeldung wiederholt werden.
 
 Workspace-Administratoren können Remote Control deaktivieren oder zusätzliche
@@ -118,7 +128,7 @@ Remote-Sitzungen übernehmen die lokalen Berechtigungen der Devbox. Da der
 Entwickler-Benutzer passwortloses `sudo` besitzt, dürfen ausschließlich
 vertrauenswürdige Geräte gekoppelt werden. Nicht mehr verwendete Verbindungen
 sollten im Remote-Client entfernt und der Dienst auf der Devbox mit
-`codex-devbox-onboarding --disable` abgeschaltet werden.
+`codex-devbox-remote-control --disable` abgeschaltet werden.
 
 Offizielle Details:
 
@@ -162,7 +172,7 @@ Vor der Erstellung prüft das Skript unter anderem:
 - Template-Architektur und Auswahl des neuesten Ubuntu-24.04-Templates
 
 Nach der Provisionierung werden Node.js, npm, Git LFS, Python, ripgrep, `fd`,
-Codex, die Remote-Control-CLI, Onboarding und User-Service, User-Linger,
+Codex, Remote-Control-Verwaltung und User-Service, User-Linger,
 passwortloses `sudo`, Workspace-Schreibzugriff, SSH-Dateirechte, SSH-Dienst und
 APT-Timer verifiziert. Erst danach meldet der Installer Erfolg.
 

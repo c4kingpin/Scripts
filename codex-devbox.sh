@@ -813,6 +813,7 @@ INNER_STEP="Provisionierung initialisieren"
 nodesource_key=""
 codex_installer=""
 codex_version_output=""
+dev_uid=""
 fd_binary=""
 gpg_home=""
 sshd_effective=""
@@ -1048,6 +1049,12 @@ DEV_HOME="$(getent passwd "$DEV_USER" | cut -d: -f6)"
     printf 'Unerwartetes Home-Verzeichnis für %s: %s\n' "$DEV_USER" "$DEV_HOME" >&2
     exit 1
   }
+dev_uid="$(id -u "$DEV_USER")"
+[[ "$dev_uid" =~ ^[1-9][0-9]*$ ]] ||
+  {
+    printf 'Ungültige Benutzer-ID für %s: %s\n' "$DEV_USER" "$dev_uid" >&2
+    exit 1
+  }
 
 # Der Account bleibt per SSH auf Public-Key-Authentifizierung beschränkt.
 # Ein leeres lokales Passwort verhindert, dass OpenSSH den Account als
@@ -1090,7 +1097,7 @@ fi
 ln -sfn -- "$fd_binary" /usr/local/bin/fd
 [[ -x /usr/local/bin/fd ]]
 
-log "Remote-Control-Onboarding vorbereiten"
+log "Remote-Control-Verwaltung vorbereiten"
 install -d -m 0755 /etc/systemd/user
 cat >/etc/systemd/user/codex-remote-control.service <<UNIT
 [Unit]
@@ -1116,7 +1123,7 @@ WantedBy=default.target
 UNIT
 chmod 0644 /etc/systemd/user/codex-remote-control.service
 
-cat >/usr/local/bin/codex-devbox-onboarding <<'ONBOARDING'
+cat >/usr/local/bin/codex-devbox-remote-control <<'REMOTE_CONTROL_HELPER'
 #!/usr/bin/env bash
 
 set -Euo pipefail
@@ -1127,10 +1134,12 @@ readonly CODEX_BIN="${HOME}/.local/bin/codex"
 readonly STATE_DIR="${HOME}/.config/codex-devbox"
 readonly FIRST_LOGIN_MARKER="${STATE_DIR}/first-login-handled"
 readonly COMPLETE_MARKER="${STATE_DIR}/remote-control-configured"
+readonly USER_ID="${EUID}"
+readonly USER_RUNTIME_DIR="/run/user/${USER_ID}"
 
 usage() {
   cat <<'EOF'
-Verwendung: codex-devbox-onboarding [OPTION]
+Verwendung: codex-devbox-remote-control [OPTION]
 
 Ohne Option werden ChatGPT-Anmeldung, Remote-Control-Dienst und Pairing
 eingerichtet.
@@ -1139,7 +1148,7 @@ Optionen:
   --status       Anmeldung, Autostart und Dienststatus anzeigen
   --pair         Remote Control einrichten oder einen neuen Pairing-Code erzeugen
   --disable      Remote-Control-Dienst stoppen und Autostart deaktivieren
-  --first-login  Onboarding nur beim ersten interaktiven SSH-Login anbieten
+  --first-login  Einrichtung nur beim ersten interaktiven SSH-Login anbieten
   -h, --help     Diese Hilfe anzeigen
 EOF
 }
@@ -1160,11 +1169,26 @@ require_user_manager() {
     printf 'Bitte als Entwickler-Benutzer, nicht als root, ausführen.\n' >&2
     return 1
   fi
-  if ! systemctl --user daemon-reload; then
-    printf 'Der systemd-Benutzerdienst ist nicht erreichbar.\n' >&2
-    printf 'Neu anmelden und erneut versuchen.\n' >&2
-    return 1
+
+  # Proxmox' LXC-Konsole setzt die systemd-User-Bus-Variablen nicht immer,
+  # obwohl der per Linger gestartete User-Manager bereits verfügbar ist.
+  export XDG_RUNTIME_DIR="$USER_RUNTIME_DIR"
+  export DBUS_SESSION_BUS_ADDRESS="unix:path=${USER_RUNTIME_DIR}/bus"
+
+  if systemctl --user daemon-reload >/dev/null 2>&1; then
+    return 0
   fi
+
+  # Falls Linger den Manager noch nicht gestartet hat, darf der Entwickler-
+  # Benutzer ihn über das ohnehin konfigurierte passwortlose sudo anstoßen.
+  sudo systemctl start "user@${USER_ID}.service" >/dev/null 2>&1 || true
+  if systemctl --user daemon-reload; then
+    return 0
+  fi
+
+  printf 'Der systemd-Benutzerdienst ist nicht erreichbar.\n' >&2
+  printf 'Diagnose: sudo systemctl status user@%s.service\n' "$USER_ID" >&2
+  return 1
 }
 
 require_runtime() {
@@ -1213,7 +1237,7 @@ show_status() {
   printf 'ChatGPT-Anmeldung:   %s\n' "$auth"
   printf 'Autostart:           %s\n' "$enabled"
   printf 'Remote-Control-Dienst: %s\n' "$active"
-  printf 'Onboarding:          %s\n' "$configured"
+  printf 'Einrichtung:         %s\n' "$configured"
   return "$status"
 }
 
@@ -1283,7 +1307,7 @@ EOF
 
 Remote Control läuft jetzt dauerhaft und startet beim Container-Boot.
 Der Pairing-Code ist nur kurz gültig. Bei Bedarf erzeugt
-`codex-devbox-onboarding --pair` einen neuen Code.
+`codex-devbox-remote-control --pair` einen neuen Code.
 EOF
       return 0
     fi
@@ -1335,13 +1359,13 @@ EOF
       fi
       mark_file "$FIRST_LOGIN_MARKER"
       printf '\nEinrichtung unvollständig. Erneut starten mit:\n'
-      printf '  codex-devbox-onboarding --pair\n'
+      printf '  codex-devbox-remote-control --pair\n'
       return 1
       ;;
     *)
       mark_file "$FIRST_LOGIN_MARKER"
       printf 'Zurückgestellt. Später starten mit:\n'
-      printf '  codex-devbox-onboarding --pair\n'
+      printf '  codex-devbox-remote-control --pair\n'
       ;;
   esac
 }
@@ -1375,10 +1399,15 @@ main() {
 }
 
 main "$@"
-ONBOARDING
-chmod 0755 /usr/local/bin/codex-devbox-onboarding
+REMOTE_CONTROL_HELPER
+chmod 0755 /usr/local/bin/codex-devbox-remote-control
 
 loginctl enable-linger "$DEV_USER"
+systemctl start "user@${dev_uid}.service"
+run_as_dev env \
+  DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/${dev_uid}/bus" \
+  XDG_RUNTIME_DIR="/run/user/${dev_uid}" \
+  systemctl --user daemon-reload
 
 log "SSH absichern"
 install -d -m 0755 /etc/ssh/sshd_config.d
@@ -1449,8 +1478,8 @@ if [[ $- == *i* ]] && [[ -d "$HOME/workspace" ]]; then
 fi
 if [[ $- == *i* ]] && [[ -t 0 ]] && [[ -t 1 ]] &&
   [[ ! -e "$HOME/.config/codex-devbox/first-login-handled" ]] &&
-  command -v codex-devbox-onboarding >/dev/null 2>&1; then
-  codex-devbox-onboarding --first-login || true
+  command -v codex-devbox-remote-control >/dev/null 2>&1; then
+  codex-devbox-remote-control --first-login || true
 fi
 BASHRC
 
@@ -1488,12 +1517,14 @@ if [[ "$CODEX_RELEASE" != "latest" &&
   exit 1
 fi
 run_as_dev "${DEV_HOME}/.local/bin/codex" remote-control --help >/dev/null
-test -x /usr/local/bin/codex-devbox-onboarding
+test -x /usr/local/bin/codex-devbox-remote-control
 test -f /etc/systemd/user/codex-remote-control.service
 grep -Fxq \
   "ExecStart=${DEV_HOME}/.local/bin/codex remote-control" \
   /etc/systemd/user/codex-remote-control.service
 [[ "$(loginctl show-user "$DEV_USER" -p Linger --value)" == "yes" ]]
+systemctl is-active --quiet "user@${dev_uid}.service"
+test -S "/run/user/${dev_uid}/bus"
 run_as_dev test -w "${DEV_HOME}/workspace"
 run_as_dev sudo -n true
 [[ "$(stat -c '%U:%G:%a' "${DEV_HOME}/.ssh")" == \
@@ -1552,15 +1583,15 @@ Anschließend:
 
   ssh ${CT_HOSTNAME}
 
-Beim ersten interaktiven SSH-Login startet das Remote-Control-Onboarding.
+Beim ersten interaktiven SSH-Login startet die Remote-Control-Einrichtung.
 Es koppelt Codex per Gerätecode mit dem ChatGPT-Konto, aktiviert den
 persistenten Benutzerdienst und zeigt einen kurzlebigen Pairing-Code an.
 
 Spätere Verwaltung:
 
-  codex-devbox-onboarding --status
-  codex-devbox-onboarding --pair
-  codex-devbox-onboarding --disable
+  codex-devbox-remote-control --status
+  codex-devbox-remote-control --pair
+  codex-devbox-remote-control --disable
 
 Danach kann Codex wie gewohnt im Workspace gestartet werden:
 
