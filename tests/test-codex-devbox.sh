@@ -760,6 +760,8 @@ provisioner_configures_optional_ssh_access() {
   helper="$(embedded_ssh_helper)"
   provisioner="$(embedded_provisioner)"
 
+  # Die geprüften Skriptfragmente enthalten absichtlich Variablenliterale.
+  # shellcheck disable=SC2016
   grep -Fq 'ssh-keygen -t ed25519 -a 100' <<<"$helper" &&
     grep -Fq 'Der private Schlüssel darf die Client-Maschine nicht verlassen.' \
       <<<"$helper" &&
@@ -822,7 +824,9 @@ provisioner_configures_github_onboarding() {
   helper="$(embedded_github_helper)"
   provisioner="$(embedded_provisioner)"
 
-  grep -Fq 'gh auth login \' <<<"$helper" &&
+  # Die geprüften Skriptfragmente enthalten absichtlich Variablenliterale.
+  # shellcheck disable=SC2016
+  grep -Fq "gh auth login \\" <<<"$helper" &&
     grep -Fq -- '--hostname "$GITHUB_HOST"' <<<"$helper" &&
     grep -Fq -- '--git-protocol https' <<<"$helper" &&
     grep -Fq -- '--web' <<<"$helper" &&
