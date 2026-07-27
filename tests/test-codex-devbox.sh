@@ -136,6 +136,11 @@ bridge_exists() {
 }
 
 set_valid_settings() {
+  local test_key="${TEST_TMP}/settings-id-ed25519"
+
+  if [[ ! -s "${test_key}.pub" ]]; then
+    ssh-keygen -q -t ed25519 -N "" -f "$test_key"
+  fi
   CTID="123"
   CORES="4"
   MEMORY="8192"
@@ -144,6 +149,9 @@ set_valid_settings() {
   CT_HOSTNAME="codex-devbox"
   DEV_USER="dev"
   BRIDGE="vmbr0"
+  SSH_ACCESS="yes"
+  SSH_PUBLIC_KEY="$(<"${test_key}.pub")"
+  SSH_KEY_FINGERPRINT="$(ssh_public_key_fingerprint "$SSH_PUBLIC_KEY")"
   ALLOW_AGENT_FORWARDING="no"
   IPV4_MODE="dhcp"
   IPV4_ADDRESS=""
@@ -155,6 +163,27 @@ set_valid_settings() {
 accepts_valid_settings() {
   set_valid_settings
   validate_settings
+}
+
+accepts_settings_without_ssh() {
+  set_valid_settings
+  SSH_ACCESS="no"
+  SSH_PUBLIC_KEY=""
+  SSH_KEY_FINGERPRINT="<nicht eingerichtet>"
+  validate_settings
+}
+
+rejects_agent_forwarding_without_ssh() {
+  if (
+    set_valid_settings
+    SSH_ACCESS="no"
+    SSH_PUBLIC_KEY=""
+    SSH_KEY_FINGERPRINT="<nicht eingerichtet>"
+    ALLOW_AGENT_FORWARDING="yes"
+    validate_settings
+  ) >/dev/null 2>&1; then
+    return 1
+  fi
 }
 
 rejects_root_user() {
@@ -310,12 +339,206 @@ embedded_remote_control_helper() {
     '
 }
 
+embedded_ssh_helper() {
+  embedded_provisioner |
+    awk '
+      /^cat >\/usr\/local\/bin\/codex-devbox-ssh <<'\''SSH_HELPER'\''$/ {
+        inside=1
+        next
+      }
+      /^SSH_HELPER$/ { inside=0 }
+      inside
+    '
+}
+
+embedded_github_helper() {
+  embedded_provisioner |
+    awk '
+      /^cat >\/usr\/local\/bin\/codex-devbox-github <<'\''GITHUB_HELPER'\''$/ {
+        inside=1
+        next
+      }
+      /^GITHUB_HELPER$/ { inside=0 }
+      inside
+    '
+}
+
 validates_embedded_provisioner_syntax() {
   bash -n <(embedded_provisioner)
 }
 
+validates_embedded_ssh_helper_syntax() {
+  bash -n <(embedded_ssh_helper)
+}
+
+validates_embedded_github_helper_syntax() {
+  bash -n <(embedded_github_helper)
+}
+
 validates_embedded_remote_control_helper_syntax() {
   bash -n <(embedded_remote_control_helper)
+}
+
+ssh_helper_adds_key_and_controls_service() {
+  if [[ "${EUID}" -eq 0 ]]; then
+    return 0
+  fi
+
+  local fixture="${TEST_TMP}/ssh-helper"
+  local fixture_home="${fixture}/home"
+  local fixture_state="${fixture}/service-state"
+  local helper="${fixture}/codex-devbox-ssh"
+  local private_key="${fixture}/client-key"
+  local public_key=""
+  local output="${fixture}/output"
+  local status=0
+
+  mkdir -p "${fixture}/bin" "$fixture_home" "$fixture_state"
+  embedded_ssh_helper >"$helper"
+  chmod 0755 "$helper"
+  ssh-keygen -q -t ed25519 -N "" -f "$private_key"
+  public_key="$(<"${private_key}.pub")"
+
+  cat >"${fixture}/bin/systemctl" <<'MOCK_SYSTEMCTL'
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+state="${MOCK_SYSTEMCTL_STATE:?}"
+case "$*" in
+  "disable --now ssh.service")
+    ;;
+  "daemon-reload")
+    ;;
+  "enable --now ssh.socket")
+    : >"${state}/enabled"
+    : >"${state}/active"
+    ;;
+  "disable --now ssh.socket ssh.service")
+    rm -f "${state}/enabled" "${state}/active"
+    ;;
+  "is-enabled --quiet ssh.socket")
+    [[ -f "${state}/enabled" ]]
+    ;;
+  "is-active --quiet ssh.socket")
+    [[ -f "${state}/active" ]]
+    ;;
+  *)
+    printf 'Unerwarteter systemctl-Aufruf: %s\n' "$*" >&2
+    exit 2
+    ;;
+esac
+MOCK_SYSTEMCTL
+  chmod 0755 "${fixture}/bin/systemctl"
+
+  cat >"${fixture}/bin/sudo" <<'MOCK_SUDO'
+#!/usr/bin/env bash
+set -Eeuo pipefail
+exec "$@"
+MOCK_SUDO
+  chmod 0755 "${fixture}/bin/sudo"
+
+  if ! (
+    printf '%s\n' "$public_key" |
+      HOME="$fixture_home" \
+        MOCK_SYSTEMCTL_STATE="$fixture_state" \
+        PATH="${fixture}/bin:/usr/bin:/bin" \
+        "$helper" --setup >"$output" &&
+      grep -Fqx "$public_key" "${fixture_home}/.ssh/authorized_keys" &&
+      [[ "$(stat -c '%a' "${fixture_home}/.ssh/authorized_keys")" == "600" ]] &&
+      [[ -f "${fixture_state}/enabled" ]] &&
+      [[ -f "${fixture_state}/active" ]] &&
+      HOME="$fixture_home" \
+        MOCK_SYSTEMCTL_STATE="$fixture_state" \
+        PATH="${fixture}/bin:/usr/bin:/bin" \
+        "$helper" --status >/dev/null &&
+      HOME="$fixture_home" \
+        MOCK_SYSTEMCTL_STATE="$fixture_state" \
+        PATH="${fixture}/bin:/usr/bin:/bin" \
+        "$helper" --disable >/dev/null &&
+      [[ ! -e "${fixture_state}/enabled" ]] &&
+      [[ ! -e "${fixture_state}/active" ]] &&
+      grep -Fqx "$public_key" "${fixture_home}/.ssh/authorized_keys"
+  ); then
+    status=1
+  fi
+
+  return "$status"
+}
+
+github_helper_configures_login_credentials_and_identity() {
+  if [[ "${EUID}" -eq 0 ]]; then
+    return 0
+  fi
+
+  local fixture="${TEST_TMP}/github"
+  local fixture_home="${fixture}/home"
+  local fixture_state="${fixture}/gh-state"
+  local helper="${fixture}/codex-devbox-github"
+  local output="${fixture}/output"
+  local status_output="${fixture}/status-output"
+  local status=0
+
+  mkdir -p "${fixture}/bin" "$fixture_home" "$fixture_state"
+  embedded_github_helper >"$helper"
+  chmod 0755 "$helper"
+
+  cat >"${fixture}/bin/gh" <<'MOCK_GH'
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+state="${MOCK_GH_STATE:?}"
+case "$*" in
+  "auth status --hostname github.com")
+    [[ -f "${state}/authenticated" ]]
+    ;;
+  "auth login --hostname github.com --git-protocol https --web")
+    : >"${state}/authenticated"
+    ;;
+  "auth setup-git --hostname github.com")
+    git config --global --replace-all \
+      credential.https://github.com.helper '!gh auth git-credential'
+    ;;
+  "api user --jq .login")
+    printf 'c4kingpin\n'
+    ;;
+  "api user --jq .id")
+    printf '1272310\n'
+    ;;
+  "api user --jq .name // .login")
+    printf 'Test User\n'
+    ;;
+  *)
+    printf 'Unerwarteter gh-Aufruf: %s\n' "$*" >&2
+    exit 2
+    ;;
+esac
+MOCK_GH
+  chmod 0755 "${fixture}/bin/gh"
+
+  if ! (
+    printf '\n\n' |
+      HOME="$fixture_home" \
+        MOCK_GH_STATE="$fixture_state" \
+        PATH="${fixture}/bin:/usr/bin:/bin" \
+        "$helper" --setup >"$output" &&
+      [[ -f "${fixture_state}/authenticated" ]] &&
+      [[ -f "${fixture_home}/.config/codex-devbox/github-configured" ]] &&
+      [[ "$(HOME="$fixture_home" git config --global --get user.name)" == \
+        "Test User" ]] &&
+      [[ "$(HOME="$fixture_home" git config --global --get user.email)" == \
+        "1272310+c4kingpin@users.noreply.github.com" ]] &&
+      HOME="$fixture_home" \
+        MOCK_GH_STATE="$fixture_state" \
+        PATH="${fixture}/bin:/usr/bin:/bin" \
+        "$helper" --status >"$status_output" &&
+      grep -Fq 'GitHub-Anmeldung:  ja' "$status_output" &&
+      grep -Fq 'HTTPS-Credentials: ja' "$status_output" &&
+      grep -Fq 'GitHub-Konto:      c4kingpin' "$status_output"
+  ); then
+    status=1
+  fi
+
+  return "$status"
 }
 
 remote_control_helper_runs_login_service_and_pairing() {
@@ -525,7 +748,30 @@ provisioner_verifies_effective_ssh_security() {
       <<<"$provisioner" &&
     grep -Fq "assert_sshd_setting allowagentforwarding \"\$ALLOW_AGENT_FORWARDING\"" \
       <<<"$provisioner" &&
-    grep -Fq 'systemctl is-active --quiet ssh.service' <<<"$provisioner"
+    grep -Fq 'systemctl is-active --quiet ssh.socket' <<<"$provisioner" &&
+    grep -Fq 'systemctl disable --now ssh.socket ssh.service' \
+      <<<"$provisioner"
+}
+
+provisioner_configures_optional_ssh_access() {
+  local helper
+  local provisioner
+
+  helper="$(embedded_ssh_helper)"
+  provisioner="$(embedded_provisioner)"
+
+  grep -Fq 'ssh-keygen -t ed25519 -a 100' <<<"$helper" &&
+    grep -Fq 'Der private Schlüssel darf die Client-Maschine nicht verlassen.' \
+      <<<"$helper" &&
+    grep -Fq 'sudo systemctl enable --now ssh.socket' <<<"$helper" &&
+    grep -Fq 'sudo systemctl disable --now ssh.socket ssh.service' \
+      <<<"$helper" &&
+    grep -Fq 'SSH_ACCESS="$SSH_ACCESS"' "${SCRIPT_DIR}/codex-devbox.sh" &&
+    grep -Fq 'if [[ "$SSH_ACCESS" == "yes" ]]; then' <<<"$provisioner" &&
+    grep -Fq 'test ! -e "${DEV_HOME}/.ssh/authorized_keys"' \
+      <<<"$provisioner" &&
+    grep -Fq 'codex-devbox-ssh --first-login' <<<"$provisioner" &&
+    grep -Fq 'codex-devbox-ssh --help' <<<"$provisioner"
 }
 
 provisioner_checks_critical_endpoints() {
@@ -567,6 +813,26 @@ provisioner_configures_elixir_phoenix_and_github() {
       <<<"$provisioner" &&
     grep -Fq 'mix phx.new --version' <<<"$provisioner" &&
     grep -Fq "\$HOME/.local/share/mise/shims" <<<"$provisioner"
+}
+
+provisioner_configures_github_onboarding() {
+  local helper
+  local provisioner
+
+  helper="$(embedded_github_helper)"
+  provisioner="$(embedded_provisioner)"
+
+  grep -Fq 'gh auth login \' <<<"$helper" &&
+    grep -Fq -- '--hostname "$GITHUB_HOST"' <<<"$helper" &&
+    grep -Fq -- '--git-protocol https' <<<"$helper" &&
+    grep -Fq -- '--web' <<<"$helper" &&
+    grep -Fq 'gh auth setup-git --hostname "$GITHUB_HOST"' <<<"$helper" &&
+    grep -Fq '${account_id}+${login}@users.noreply.github.com' \
+      <<<"$helper" &&
+    grep -Fq 'git config --global user.name "$git_name"' <<<"$helper" &&
+    grep -Fq 'git config --global user.email "$git_email"' <<<"$helper" &&
+    grep -Fq 'codex-devbox-github --first-login' <<<"$provisioner" &&
+    grep -Fq 'codex-devbox-github --help' <<<"$provisioner"
 }
 
 provisioner_configures_remote_control() {
@@ -618,6 +884,8 @@ run_test "Remote Control versions are validated" validates_remote_control_versio
 run_test "real SSH public key" validates_real_ssh_key
 run_test "malformed SSH public keys" rejects_malformed_ssh_keys
 run_test "valid installation settings" accepts_valid_settings
+run_test "installation settings without SSH" accepts_settings_without_ssh
+run_test "agent forwarding requires SSH" rejects_agent_forwarding_without_ssh
 run_test "root user is rejected" rejects_root_user
 run_test "invalid static network is rejected" rejects_invalid_static_network
 run_test "usable static network is accepted" accepts_usable_static_network
@@ -631,6 +899,10 @@ run_test "version and LTS default are current" reports_current_version_and_lts_d
 run_test "failed commands are summarized" summarizes_failed_commands
 run_test "latest amd64 template is selected" selects_latest_amd64_template
 run_test "embedded provisioner syntax" validates_embedded_provisioner_syntax
+run_test "embedded SSH helper syntax" validates_embedded_ssh_helper_syntax
+run_test "SSH helper key and access management" ssh_helper_adds_key_and_controls_service
+run_test "embedded GitHub helper syntax" validates_embedded_github_helper_syntax
+run_test "GitHub helper login, credentials and identity" github_helper_configures_login_credentials_and_identity
 run_test "embedded Remote Control helper syntax" validates_embedded_remote_control_helper_syntax
 run_test "Remote Control helper login, service and pairing" remote_control_helper_runs_login_service_and_pairing
 run_test "provisioner uses safe user context" provisioner_uses_safe_user_context
@@ -639,8 +911,10 @@ run_test "provisioner uses portable locale" provisioner_uses_portable_locale
 run_test "provisioner configures fd for non-login shells" provisioner_configures_fd_for_non_login_shells
 run_test "provisioner prepares sshd runtime" provisioner_prepares_sshd_runtime
 run_test "provisioner verifies SSH security" provisioner_verifies_effective_ssh_security
+run_test "provisioner configures optional SSH access" provisioner_configures_optional_ssh_access
 run_test "provisioner checks critical endpoints" provisioner_checks_critical_endpoints
 run_test "provisioner configures Elixir, Phoenix and GitHub" provisioner_configures_elixir_phoenix_and_github
+run_test "provisioner configures GitHub onboarding" provisioner_configures_github_onboarding
 run_test "provisioner configures Remote Control" provisioner_configures_remote_control
 
 printf '\n%d passed, %d failed\n' "$PASSED" "$FAILED"

@@ -1,9 +1,9 @@
 # Codex Dev Box
 
 Interaktiver Installer für eine unprivilegierte Ubuntu-24.04-LXC-Devbox auf
-Proxmox VE. Das Skript richtet SSH-Public-Key-Zugriff, Node.js, Python,
-Erlang/Elixir mit Phoenix, lokales PostgreSQL, GitHub-Werkzeuge, die Codex CLI
-und optionales Remote Control mit persistentem Autostart ein.
+Proxmox VE. Das Skript richtet optionalen SSH-Public-Key-Zugriff, Node.js,
+Python, Erlang/Elixir mit Phoenix, lokales PostgreSQL, GitHub-Werkzeuge, die
+Codex CLI und optionales Remote Control mit persistentem Autostart ein.
 
 ## Voraussetzungen
 
@@ -13,7 +13,9 @@ und optionales Remote Control mit persistentem Autostart ein.
 - aktive Proxmox-Storages für `rootdir` und `vztmpl`
 - vorhandene Linux-Bridge, standardmäßig `vmbr0`
 - Internetzugriff für Host und Container
-- öffentlicher SSH-Schlüssel
+- für sofortigen SSH-Zugang: öffentlicher Schlüssel des zugreifenden Geräts
+- für Veröffentlichungen: GitHub-Konto und Zugriff auf die vorgesehenen
+  Repositories
 - für Remote Control: ChatGPT-Konto und Workspace mit Codex-Zugriff sowie ein
   unterstützter ChatGPT-Remote-Client
 
@@ -29,6 +31,10 @@ Ressourcen, Storages, Netzwerk und SSH-Agent-Forwarding konfigurieren. Für
 manuelle Werte gelten mindestens 2 GiB RAM und 16 GiB Disk. Statische
 IPv4-Konfigurationen benötigen eine nutzbare Host-Adresse und ein Gateway im
 selben `/1`- bis `/30`-Subnetz.
+
+SSH ist optional. Ohne hinterlegten Schlüssel wird der SSH-Zugang deaktiviert;
+die Devbox bleibt über die Proxmox-Konsole nutzbar. Ein SSH-Zugang kann beim
+First-Login-Onboarding oder später aktiviert werden.
 
 Für reproduzierbare Installationen können konkrete Codex-, Erlang-, Elixir- und
 Phoenix-Versionen gesetzt werden. Standard ist die aktuelle LTS-Linie Node.js
@@ -77,17 +83,70 @@ Benutzer `postgres` und Passwort `postgres` bereit. Die Zugangsdaten liegen
 zusätzlich in `~/.pgpass` mit Modus `0600`. `inotify-tools` ermöglicht Phoenix
 Live Reload unter Linux.
 
-## GitHub-Workflow
+## Zugriff und SSH-Onboarding
 
-Die GitHub CLI `gh` ist installiert. Anmeldung und persönliche Git-Identität
-werden absichtlich erst im Benutzerterminal eingerichtet, damit keine
-Zugangsdaten im Proxmox-Installationslog landen:
+Mit vorkonfiguriertem SSH-Schlüssel öffnet man die Entwickler-Shell wie gewohnt:
 
 ```bash
-git config --global user.name "DEIN NAME"
-git config --global user.email "DEINE GITHUB-ADRESSE"
-gh auth login
-gh auth setup-git
+ssh codex-devbox
+```
+
+Ohne SSH erfolgt der erste Zugriff über die Shell des Proxmox-Hosts:
+
+```bash
+pct enter <CTID>
+sudo -iu dev
+```
+
+Die erste interaktive Entwickler-Shell bietet als optionalen ersten
+Onboarding-Schritt an, einen öffentlichen Client-Schlüssel zu hinterlegen und
+den SSH-Zugang zu aktivieren. Der private Schlüssel wird auf dem zugreifenden
+Gerät erzeugt und bleibt dort. Wenn auf diesem Gerät noch kein Schlüssel
+existiert:
+
+```bash
+ssh-keygen -t ed25519 -a 100
+```
+
+Anschließend wird ausschließlich der Inhalt von `~/.ssh/id_ed25519.pub` in das
+Onboarding eingefügt. Verwaltung auf der Devbox:
+
+```bash
+codex-devbox-ssh --status
+codex-devbox-ssh --setup
+codex-devbox-ssh --disable
+```
+
+Ubuntu 24.04 aktiviert OpenSSH standardmäßig über `ssh.socket`. Der Helfer
+verwaltet deshalb sowohl Socket als auch Service, sodass im deaktivierten
+Zustand kein SSH-Listener verbleibt. `--disable` stoppt den SSH-Zugang, behält
+aber `~/.ssh/authorized_keys`, damit der Zugang später kontrolliert reaktiviert
+werden kann. Ohne SSH lassen sich Codex-Tasks nach dem ChatGPT-Pairing über
+Remote Control steuern.
+
+## GitHub-Workflow
+
+Die GitHub CLI `gh` ist installiert. In der ersten interaktiven
+Entwickler-Shell bietet die Devbox als zweiten Onboarding-Schritt die
+GitHub-Einrichtung an. Sie läuft absichtlich im Benutzerterminal, damit keine
+Zugangsdaten im Proxmox-Installationslog landen.
+
+Der Ablauf:
+
+1. `gh auth login --web` meldet `github.com` per Browser-/Gerätecode an.
+2. Für Git-Operationen wird HTTPS gewählt; `gh auth setup-git` richtet den
+   Credential-Helper ohne manuell kopierte Tokens ein.
+3. Die Devbox liest Benutzername, ID und Anzeigename des angemeldeten Kontos.
+4. Name und E-Mail für Commits werden bestätigt. Wenn noch keine Git-E-Mail
+   gesetzt ist, wird aus Datenschutzgründen die persönliche
+   GitHub-Noreply-Adresse vorgeschlagen.
+5. Anmeldung, Credential-Helper und Git-Identität werden abschließend geprüft.
+
+Die Einrichtung kann übersprungen, geprüft oder wiederholt werden:
+
+```bash
+codex-devbox-github --status
+codex-devbox-github --setup
 ```
 
 Der vorgesehene Ablauf arbeitet auf einem Task-Branch, prüft die Änderungen und
@@ -108,12 +167,19 @@ Die Devbox hinterlegt denselben Ablauf als kurze globale Arbeitsvereinbarung in
 das jeweilige Projekt präzisieren. Ohne abgeschlossene `gh`-Anmeldung oder bei
 ausdrücklich lokaler Arbeit führt Codex keine GitHub-Veröffentlichung aus.
 
+Die Anmeldung wird von `gh` im Benutzerkontext verwaltet und weder in ein
+Repository noch in das Installationslog geschrieben. Zum Entfernen der
+GitHub-Anmeldung:
+
+```bash
+gh auth logout --hostname github.com
+```
+
 ## Remote Control
 
-Beim ersten interaktiven SSH-Login bietet die Devbox die Remote-Control-
-Einrichtung an. Sie wird bewusst erst nach der Provisionierung ausgeführt,
-damit weder ChatGPT-Zugangsdaten noch Pairing-Codes im Proxmox-
-Installationslog landen.
+Als dritten First-Login-Schritt bietet die Devbox die Remote-Control-Einrichtung
+an. Sie wird bewusst erst nach der Provisionierung ausgeführt, damit weder
+ChatGPT-Zugangsdaten noch Pairing-Codes im Proxmox-Installationslog landen.
 
 Der Ablauf:
 
@@ -197,7 +263,8 @@ Offizielle Details:
 ## Sicherheitsprofil
 
 - unprivilegierter LXC-Container
-- ausschließlich SSH-Public-Key-Authentifizierung
+- SSH ist optional und ohne hinterlegten Schlüssel vollständig deaktiviert
+- bei aktiviertem SSH ausschließlich Public-Key-Authentifizierung
 - Root-Login, Passwort-Login, X11-Forwarding und SSH-Tunnel deaktiviert
 - SSH-Agent-Forwarding standardmäßig deaktiviert
 - effektive SSH-Konfiguration wird vor dem Dienststart mit `sshd -T` geprüft
@@ -208,6 +275,9 @@ Offizielle Details:
   geprüft
 - Codex wird über den offiziellen Standalone-Installer installiert; dieser
   verifiziert die heruntergeladenen Release-Artefakte per SHA-256
+- die GitHub-Anmeldung erfolgt erst im Benutzerterminal; die GitHub CLI
+  übernimmt die HTTPS-Credentials, ohne Tokens in Git-Konfiguration oder
+  Installationslog zu schreiben
 - Remote Control wird erst nach interaktiver ChatGPT-Anmeldung aktiviert und
   öffnet keinen öffentlichen Listener
 - der Pairing-Code wird nur im Benutzerterminal ausgegeben, nicht im
@@ -232,11 +302,12 @@ Vor der Erstellung prüft das Skript unter anderem:
   Codex-Endpunkte
 - Template-Architektur und Auswahl des neuesten Ubuntu-24.04-Templates
 
-Nach der Provisionierung werden Node.js, npm, Git LFS, GitHub CLI, Python,
-Erlang/OTP, Elixir, Mix, Phoenix, PostgreSQL, ripgrep, `fd`, Codex,
-Remote-Control-Verwaltung und User-Service, User-Linger, passwortloses `sudo`,
-Workspace-Schreibzugriff, SSH-Dateirechte, SSH-Dienst und APT-Timer verifiziert.
-Erst danach meldet der Installer Erfolg.
+Nach der Provisionierung werden Node.js, npm, Git LFS, GitHub CLI,
+GitHub-Onboarding, Python, Erlang/OTP, Elixir, Mix, Phoenix, PostgreSQL,
+ripgrep, `fd`, Codex, Remote-Control-Verwaltung und User-Service, User-Linger,
+passwortloses `sudo`, Workspace-Schreibzugriff, SSH-Konfiguration und der
+gewählte SSH-Aktivierungsstatus sowie APT-Timer verifiziert. Erst danach meldet
+der Installer Erfolg.
 
 ## Fehlerbehandlung
 

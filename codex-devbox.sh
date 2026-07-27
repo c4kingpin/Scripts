@@ -24,6 +24,7 @@ readonly DEFAULT_SWAP="512"
 readonly DEFAULT_DISK="32"
 readonly DEFAULT_USER="dev"
 readonly DEFAULT_BRIDGE="vmbr0"
+readonly DEFAULT_SSH_ACCESS="yes"
 readonly DEFAULT_AGENT_FORWARDING="no"
 
 LOG_FILE="<noch nicht initialisiert>"
@@ -453,6 +454,9 @@ load_defaults() {
   DISK="$DEFAULT_DISK"
   DEV_USER="$DEFAULT_USER"
   BRIDGE="$DEFAULT_BRIDGE"
+  SSH_ACCESS="$DEFAULT_SSH_ACCESS"
+  SSH_PUBLIC_KEY=""
+  SSH_KEY_FINGERPRINT="<nicht eingerichtet>"
   ALLOW_AGENT_FORWARDING="$DEFAULT_AGENT_FORWARDING"
   IPV4_MODE="dhcp"
   IPV4_ADDRESS=""
@@ -530,10 +534,27 @@ advanced_settings() {
   fi
 }
 
-read_ssh_key() {
+configure_ssh_access() {
   local key=""
   local key_file
+  local access_status
   local key_status
+
+  if whiptail \
+    --backtitle "$APP" \
+    --title "SSH-Zugang" \
+    --yesno "SSH-Zugang sofort einrichten?\n\nOhne SSH bleibt die Devbox über die Proxmox-Konsole nutzbar. Ein öffentlicher Schlüssel kann später im First-Login-Onboarding ergänzt werden." \
+    14 78; then
+    SSH_ACCESS="yes"
+  else
+    access_status=$?
+    [[ "$access_status" -eq 1 ]] || return 1
+    SSH_ACCESS="no"
+    SSH_PUBLIC_KEY=""
+    SSH_KEY_FINGERPRINT="<nicht eingerichtet>"
+    ALLOW_AGENT_FORWARDING="no"
+    return 0
+  fi
 
   for key_file in /root/.ssh/id_ed25519.pub /root/.ssh/id_ecdsa.pub /root/.ssh/id_rsa.pub; do
     if [[ -s "$key_file" ]]; then
@@ -612,6 +633,20 @@ validate_settings() {
   [[ "$ALLOW_AGENT_FORWARDING" =~ ^(yes|no)$ ]] ||
     fatal "Die Agent-Forwarding-Einstellung ist ungültig."
 
+  [[ "$SSH_ACCESS" =~ ^(yes|no)$ ]] ||
+    fatal "Die SSH-Zugangseinstellung ist ungültig."
+  if [[ "$SSH_ACCESS" == "yes" ]]; then
+    validate_ssh_public_key "$SSH_PUBLIC_KEY" ||
+      fatal "Der öffentliche SSH-Schlüssel ist ungültig."
+    [[ "$SSH_KEY_FINGERPRINT" == SHA256:* ]] ||
+      fatal "Der SSH-Schlüssel-Fingerprint ist ungültig."
+  else
+    [[ -z "$SSH_PUBLIC_KEY" ]] ||
+      fatal "Ohne SSH-Zugang darf kein öffentlicher Schlüssel gesetzt sein."
+    [[ "$ALLOW_AGENT_FORWARDING" == "no" ]] ||
+      fatal "SSH-Agent-Forwarding setzt aktivierten SSH-Zugang voraus."
+  fi
+
   [[ "$IPV4_MODE" =~ ^(dhcp|static)$ ]] ||
     fatal "Der IPv4-Modus ist ungültig."
 
@@ -669,6 +704,7 @@ Template-Storage:  ${TEMPLATE_STORAGE}
 Bridge:            ${BRIDGE}
 IPv4:              ${network_summary}
 Benutzer:          ${DEV_USER}
+SSH-Zugang:        ${SSH_ACCESS}
 SSH-Key:           ${SSH_KEY_FINGERPRINT}
 Agent-Forwarding:  ${ALLOW_AGENT_FORWARDING}
 Node.js:           ${NODE_MAJOR}.x
@@ -826,6 +862,7 @@ install_devbox() {
     NODESOURCE_KEY_FINGERPRINT="$NODESOURCE_KEY_FINGERPRINT" \
     NODE_MAJOR="$NODE_MAJOR" \
     PHOENIX_VERSION="$PHOENIX_VERSION" \
+    SSH_ACCESS="$SSH_ACCESS" \
     SSH_PUBLIC_KEY="$SSH_PUBLIC_KEY" \
     bash -s <<'INNER'
 set -Eeuo pipefail
@@ -953,6 +990,19 @@ download() {
     printf 'Ungültige Agent-Forwarding-Einstellung.\n' >&2
     exit 1
   }
+[[ "$SSH_ACCESS" =~ ^(yes|no)$ ]] ||
+  {
+    printf 'Ungültige SSH-Zugangseinstellung.\n' >&2
+    exit 1
+  }
+if [[ "$SSH_ACCESS" == "yes" && -z "$SSH_PUBLIC_KEY" ]]; then
+  printf 'Aktivierter SSH-Zugang benötigt einen öffentlichen Schlüssel.\n' >&2
+  exit 1
+fi
+if [[ "$SSH_ACCESS" == "no" && -n "$SSH_PUBLIC_KEY" ]]; then
+  printf 'Ohne SSH-Zugang darf kein öffentlicher Schlüssel gesetzt sein.\n' >&2
+  exit 1
+fi
 [[ "$NODE_MAJOR" =~ ^(22|24)$ ]] ||
   {
     printf 'Nicht unterstützte Node.js-Hauptversion.\n' >&2
@@ -1118,9 +1168,11 @@ chmod 0440 /etc/sudoers.d/90-codex-devbox
 visudo -cf /etc/sudoers.d/90-codex-devbox
 
 install -d -m 0700 -o "$DEV_USER" -g "$DEV_USER" "${DEV_HOME}/.ssh"
-printf '%s\n' "$SSH_PUBLIC_KEY" >"${DEV_HOME}/.ssh/authorized_keys"
-chown "$DEV_USER:$DEV_USER" "${DEV_HOME}/.ssh/authorized_keys"
-chmod 0600 "${DEV_HOME}/.ssh/authorized_keys"
+if [[ "$SSH_ACCESS" == "yes" ]]; then
+  printf '%s\n' "$SSH_PUBLIC_KEY" >"${DEV_HOME}/.ssh/authorized_keys"
+  chown "$DEV_USER:$DEV_USER" "${DEV_HOME}/.ssh/authorized_keys"
+  chmod 0600 "${DEV_HOME}/.ssh/authorized_keys"
+fi
 
 install -d -m 0755 -o "$DEV_USER" -g "$DEV_USER" "${DEV_HOME}/workspace"
 install -d -m 0700 -o "$DEV_USER" -g "$DEV_USER" "${DEV_HOME}/.codex"
@@ -1207,6 +1259,526 @@ fi
 ln -sfn -- "$fd_binary" /usr/local/bin/fd
 [[ -x /usr/local/bin/fd ]]
 
+log "SSH-Onboarding vorbereiten"
+cat >/usr/local/bin/codex-devbox-ssh <<'SSH_HELPER'
+#!/usr/bin/env bash
+
+set -Euo pipefail
+umask 077
+
+readonly STATE_DIR="${HOME}/.config/codex-devbox"
+readonly FIRST_LOGIN_MARKER="${STATE_DIR}/ssh-first-login-handled"
+readonly COMPLETE_MARKER="${STATE_DIR}/ssh-configured"
+readonly SSH_DIR="${HOME}/.ssh"
+readonly AUTHORIZED_KEYS="${SSH_DIR}/authorized_keys"
+
+usage() {
+  cat <<'EOF'
+Verwendung: codex-devbox-ssh [OPTION]
+
+Richtet optional einen eingehenden SSH-Public-Key-Zugang zur Devbox ein.
+Der private Schlüssel wird auf dem zugreifenden Gerät erzeugt und bleibt dort.
+
+Optionen:
+  --setup        Öffentlichen Client-Schlüssel hinzufügen und SSH aktivieren
+  --status       Schlüsselanzahl und Status des SSH-Zugangs anzeigen
+  --disable      SSH-Zugang deaktivieren; hinterlegte Schlüssel behalten
+  --first-login  Einrichtung beim ersten interaktiven Login anbieten
+  -h, --help     Diese Hilfe anzeigen
+EOF
+}
+
+prepare_state() {
+  install -d -m 0700 "$STATE_DIR" "$SSH_DIR"
+}
+
+mark_file() {
+  local path="$1"
+
+  : >"$path"
+  chmod 0600 "$path"
+}
+
+require_runtime() {
+  if [[ "${EUID}" -eq 0 ]]; then
+    printf 'Bitte als Entwickler-Benutzer, nicht als root, ausführen.\n' >&2
+    return 1
+  fi
+  if ! command -v ssh-keygen >/dev/null 2>&1; then
+    printf 'ssh-keygen wurde nicht gefunden.\n' >&2
+    return 1
+  fi
+  if ! command -v sudo >/dev/null 2>&1; then
+    printf 'sudo wurde nicht gefunden.\n' >&2
+    return 1
+  fi
+}
+
+validate_public_key() {
+  local key="$1"
+  local key_type key_data _key_comment
+  local key_file
+
+  [[ -n "$key" && "$key" != *$'\n'* && "$key" != *$'\r'* ]] || return 1
+  read -r key_type key_data _key_comment <<<"$key"
+  [[ -n "$key_data" ]] || return 1
+
+  case "$key_type" in
+    ssh-ed25519|ssh-rsa|ecdsa-sha2-nistp256|ecdsa-sha2-nistp384|ecdsa-sha2-nistp521|sk-ssh-ed25519@openssh.com|sk-ecdsa-sha2-nistp256@openssh.com)
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+
+  key_file="$(mktemp)"
+  chmod 0600 "$key_file"
+  printf '%s\n' "$key" >"$key_file"
+  if ! ssh-keygen -l -f "$key_file" >/dev/null 2>&1; then
+    rm -f "$key_file"
+    return 1
+  fi
+  rm -f "$key_file"
+}
+
+key_count() {
+  if [[ ! -s "$AUTHORIZED_KEYS" ]]; then
+    printf '0\n'
+    return
+  fi
+
+  awk '
+    $1 ~ /^(ssh-|ecdsa-|sk-)/ { count++ }
+    END { print count + 0 }
+  ' "$AUTHORIZED_KEYS"
+}
+
+show_status() {
+  local keys
+  local service="deaktiviert"
+  local status=0
+
+  prepare_state
+  require_runtime || return 1
+  keys="$(key_count)"
+  if systemctl is-enabled --quiet ssh.socket &&
+    systemctl is-active --quiet ssh.socket; then
+    service="aktiv"
+  else
+    status=1
+  fi
+  if [[ "$keys" -eq 0 ]]; then
+    status=1
+  fi
+
+  printf 'Autorisierte Schlüssel: %s\n' "$keys"
+  printf 'SSH-Socket:             %s\n' "$service"
+  return "$status"
+}
+
+setup_ssh() {
+  local public_key=""
+  local fingerprint=""
+
+  prepare_state
+  require_runtime || return 1
+
+  cat <<'EOF'
+
+Erzeuge den privaten Schlüssel auf dem Gerät, das auf die Devbox zugreifen
+soll. Wenn dort noch kein passender Schlüssel existiert:
+
+  ssh-keygen -t ed25519 -a 100
+
+Füge anschließend ausschließlich den Inhalt der zugehörigen .pub-Datei ein.
+Der private Schlüssel darf die Client-Maschine nicht verlassen.
+
+EOF
+  IFS= read -r -p "Öffentlicher SSH-Schlüssel: " public_key || return 1
+  if ! validate_public_key "$public_key"; then
+    printf 'Der öffentliche SSH-Schlüssel ist ungültig.\n' >&2
+    return 1
+  fi
+
+  touch "$AUTHORIZED_KEYS"
+  chmod 0600 "$AUTHORIZED_KEYS"
+  if ! grep -Fqx -- "$public_key" "$AUTHORIZED_KEYS"; then
+    printf '%s\n' "$public_key" >>"$AUTHORIZED_KEYS"
+  fi
+
+  sudo systemctl disable --now ssh.service
+  sudo systemctl daemon-reload
+  sudo systemctl enable --now ssh.socket
+  mark_file "$COMPLETE_MARKER"
+  mark_file "$FIRST_LOGIN_MARKER"
+  fingerprint="$(
+    ssh-keygen -l -f "$AUTHORIZED_KEYS" |
+      awk 'NR == 1 { print $2 }'
+  )"
+
+  printf '\nSSH-Zugang ist aktiv. Fingerprint: %s\n' "$fingerprint"
+  show_status
+}
+
+disable_ssh() {
+  prepare_state
+  require_runtime || return 1
+  sudo systemctl disable --now ssh.socket ssh.service
+  rm -f "$COMPLETE_MARKER"
+  mark_file "$FIRST_LOGIN_MARKER"
+  printf 'SSH ist deaktiviert. authorized_keys wurde beibehalten.\n'
+}
+
+first_login() {
+  local answer=""
+
+  prepare_state
+  if [[ -f "$FIRST_LOGIN_MARKER" || -f "$COMPLETE_MARKER" ]]; then
+    return 0
+  fi
+  if [[ -s "$AUTHORIZED_KEYS" ]]; then
+    mark_file "$COMPLETE_MARKER"
+    mark_file "$FIRST_LOGIN_MARKER"
+    return 0
+  fi
+  if [[ ! -t 0 || ! -t 1 ]]; then
+    return 0
+  fi
+
+  cat <<'EOF'
+
+Codex Dev Box – Ersteinrichtung (1/3)
+
+SSH ist optional. Die Devbox funktioniert bereits über die Proxmox-Konsole;
+nach dem ChatGPT-Pairing ist sie zusätzlich über Remote erreichbar.
+EOF
+  read -r -p "SSH-Zugang jetzt mit einem Client-Schlüssel einrichten? [j/N] " \
+    answer || answer="n"
+  case "${answer,,}" in
+    j|ja|y|yes)
+      if setup_ssh; then
+        return 0
+      fi
+      mark_file "$FIRST_LOGIN_MARKER"
+      printf '\nEinrichtung unvollständig. Erneut starten mit:\n'
+      printf '  codex-devbox-ssh --setup\n'
+      return 1
+      ;;
+    *)
+      mark_file "$FIRST_LOGIN_MARKER"
+      printf 'SSH bleibt deaktiviert. Später starten mit:\n'
+      printf '  codex-devbox-ssh --setup\n'
+      ;;
+  esac
+}
+
+main() {
+  case "${1:-}" in
+    ""|--setup)
+      setup_ssh
+      ;;
+    --status)
+      show_status
+      ;;
+    --disable)
+      disable_ssh
+      ;;
+    --first-login)
+      first_login
+      ;;
+    -h|--help)
+      usage
+      ;;
+    *)
+      printf 'Unbekannte Option: %s\n\n' "$1" >&2
+      usage >&2
+      return 2
+      ;;
+  esac
+}
+
+main "$@"
+SSH_HELPER
+chmod 0755 /usr/local/bin/codex-devbox-ssh
+
+log "GitHub-Onboarding vorbereiten"
+cat >/usr/local/bin/codex-devbox-github <<'GITHUB_HELPER'
+#!/usr/bin/env bash
+
+set -Euo pipefail
+umask 077
+
+readonly GITHUB_HOST="github.com"
+readonly STATE_DIR="${HOME}/.config/codex-devbox"
+readonly FIRST_LOGIN_MARKER="${STATE_DIR}/github-first-login-handled"
+readonly COMPLETE_MARKER="${STATE_DIR}/github-configured"
+
+usage() {
+  cat <<'EOF'
+Verwendung: codex-devbox-github [OPTION]
+
+Ohne Option werden GitHub-Anmeldung, HTTPS-Credential-Helper und persönliche
+Git-Identität eingerichtet.
+
+Optionen:
+  --setup        GitHub und Git-Identität einrichten oder reparieren
+  --status       GitHub-Anmeldung und Git-Identität anzeigen
+  --first-login  Einrichtung nur in der ersten interaktiven Shell anbieten
+  -h, --help     Diese Hilfe anzeigen
+EOF
+}
+
+prepare_state() {
+  install -d -m 0700 "$STATE_DIR"
+}
+
+mark_file() {
+  local path="$1"
+
+  : >"$path"
+  chmod 0600 "$path"
+}
+
+require_runtime() {
+  if [[ "${EUID}" -eq 0 ]]; then
+    printf 'Bitte als Entwickler-Benutzer, nicht als root, ausführen.\n' >&2
+    return 1
+  fi
+  if ! command -v git >/dev/null 2>&1; then
+    printf 'Git wurde nicht gefunden.\n' >&2
+    return 1
+  fi
+  if ! command -v gh >/dev/null 2>&1; then
+    printf 'Die GitHub CLI wurde nicht gefunden.\n' >&2
+    return 1
+  fi
+}
+
+is_authenticated() {
+  gh auth status --hostname "$GITHUB_HOST" >/dev/null 2>&1
+}
+
+credential_helper_ready() {
+  local helpers=""
+
+  helpers="$(
+    git config --global --get-all \
+      "credential.https://${GITHUB_HOST}.helper" 2>/dev/null || true
+  )"
+  grep -Eq 'gh auth git-credential$' <<<"$helpers"
+}
+
+git_config_value() {
+  git config --global --get "$1" 2>/dev/null || true
+}
+
+show_status() {
+  local authenticated="nein"
+  local credential_helper="nein"
+  local login="-"
+  local git_name=""
+  local git_email=""
+  local configured="nein"
+  local status=0
+
+  prepare_state
+  require_runtime || return 1
+
+  if is_authenticated; then
+    authenticated="ja"
+    login="$(gh api user --jq '.login' 2>/dev/null || printf '%s' '-')"
+  else
+    status=1
+  fi
+  if credential_helper_ready; then
+    credential_helper="ja"
+  else
+    status=1
+  fi
+
+  git_name="$(git_config_value user.name)"
+  git_email="$(git_config_value user.email)"
+  if [[ -z "$git_name" || -z "$git_email" ]]; then
+    status=1
+  fi
+  if [[ -f "$COMPLETE_MARKER" ]]; then
+    configured="ja"
+  fi
+
+  printf 'GitHub-Anmeldung:  %s\n' "$authenticated"
+  printf 'GitHub-Konto:      %s\n' "$login"
+  printf 'HTTPS-Credentials: %s\n' "$credential_helper"
+  printf 'Git-Name:          %s\n' "${git_name:--}"
+  printf 'Git-E-Mail:        %s\n' "${git_email:--}"
+  printf 'Onboarding:        %s\n' "$configured"
+  return "$status"
+}
+
+configure_identity() {
+  local login=""
+  local account_id=""
+  local account_name=""
+  local default_name=""
+  local default_email=""
+  local git_name=""
+  local git_email=""
+  local answer=""
+
+  login="$(gh api user --jq '.login')" || {
+    printf 'Der GitHub-Benutzername konnte nicht gelesen werden.\n' >&2
+    return 1
+  }
+  account_id="$(gh api user --jq '.id')" || {
+    printf 'Die GitHub-Benutzer-ID konnte nicht gelesen werden.\n' >&2
+    return 1
+  }
+  account_name="$(gh api user --jq '.name // .login')" || {
+    printf 'Der GitHub-Anzeigename konnte nicht gelesen werden.\n' >&2
+    return 1
+  }
+  if [[ ! "$login" =~ ^[A-Za-z0-9-]+$ ||
+    ! "$account_id" =~ ^[0-9]+$ ||
+    -z "$account_name" ]]; then
+    printf 'GitHub hat unerwartete Kontodaten geliefert.\n' >&2
+    return 1
+  fi
+
+  default_name="$(git_config_value user.name)"
+  [[ -n "$default_name" ]] || default_name="$account_name"
+  default_email="$(git_config_value user.email)"
+  [[ -n "$default_email" ]] ||
+    default_email="${account_id}+${login}@users.noreply.github.com"
+
+  printf '\nGit-Commits benötigen Name und E-Mail-Adresse.\n'
+  printf 'Als sichere Vorgabe wird die GitHub-Noreply-Adresse verwendet.\n'
+  read -r -p "Git-Name [${default_name}]: " answer || answer=""
+  git_name="${answer:-$default_name}"
+  read -r -p "Git-E-Mail [${default_email}]: " answer || answer=""
+  git_email="${answer:-$default_email}"
+
+  if [[ -z "$git_name" || "$git_name" == *$'\n'* ||
+    "$git_name" == *$'\r'* ]]; then
+    printf 'Der Git-Name ist ungültig.\n' >&2
+    return 1
+  fi
+  if [[ ! "$git_email" =~ ^[^[:space:]@]+@[^[:space:]@]+$ ]]; then
+    printf 'Die Git-E-Mail-Adresse ist ungültig.\n' >&2
+    return 1
+  fi
+
+  git config --global user.name "$git_name"
+  git config --global user.email "$git_email"
+}
+
+setup_github() {
+  prepare_state
+  require_runtime || return 1
+
+  if ! is_authenticated; then
+    cat <<'EOF'
+
+GitHub wird jetzt per Browser-/Gerätecode angemeldet.
+Der Token erscheint nicht im Proxmox-Installationslog.
+Für Git-Operationen verwendet die Devbox HTTPS über die GitHub CLI.
+
+EOF
+    gh auth login \
+      --hostname "$GITHUB_HOST" \
+      --git-protocol https \
+      --web || {
+      printf 'Die GitHub-Anmeldung wurde nicht abgeschlossen.\n' >&2
+      return 1
+    }
+  fi
+
+  if ! is_authenticated; then
+    printf 'Die GitHub CLI meldet nach dem Login keine aktive Anmeldung.\n' >&2
+    return 1
+  fi
+  gh auth setup-git --hostname "$GITHUB_HOST" || {
+    printf 'Der Git-Credential-Helper konnte nicht eingerichtet werden.\n' >&2
+    return 1
+  }
+  if ! credential_helper_ready; then
+    printf 'Der GitHub-Credential-Helper ist nach der Einrichtung nicht aktiv.\n' >&2
+    return 1
+  fi
+
+  configure_identity || return 1
+  mark_file "$COMPLETE_MARKER"
+  mark_file "$FIRST_LOGIN_MARKER"
+
+  cat <<'EOF'
+
+GitHub ist eingerichtet. Neue Branches erhalten beim ersten Push automatisch
+ein Upstream-Remote; Codex kann daraus einen Draft Pull Request erstellen.
+EOF
+  show_status
+}
+
+first_login() {
+  local answer=""
+
+  prepare_state
+  if [[ -f "$FIRST_LOGIN_MARKER" || -f "$COMPLETE_MARKER" ]]; then
+    return 0
+  fi
+  if [[ ! -t 0 || ! -t 1 ]]; then
+    return 0
+  fi
+
+  cat <<'EOF'
+
+Codex Dev Box – Ersteinrichtung (2/3)
+
+GitHub kann jetzt angemeldet und die persönliche Git-Identität gesetzt werden.
+Damit funktionieren Clone, Push und Draft Pull Requests ohne manuelle Tokens.
+EOF
+  read -r -p "GitHub jetzt einrichten? [J/n] " answer || answer="n"
+  case "${answer,,}" in
+    ""|j|ja|y|yes)
+      if setup_github; then
+        return 0
+      fi
+      mark_file "$FIRST_LOGIN_MARKER"
+      printf '\nEinrichtung unvollständig. Erneut starten mit:\n'
+      printf '  codex-devbox-github --setup\n'
+      return 1
+      ;;
+    *)
+      mark_file "$FIRST_LOGIN_MARKER"
+      printf 'Zurückgestellt. Später starten mit:\n'
+      printf '  codex-devbox-github --setup\n'
+      ;;
+  esac
+}
+
+main() {
+  case "${1:-}" in
+    ""|--setup)
+      setup_github
+      ;;
+    --status)
+      show_status
+      ;;
+    --first-login)
+      first_login
+      ;;
+    -h|--help)
+      usage
+      ;;
+    *)
+      printf 'Unbekannte Option: %s\n\n' "$1" >&2
+      usage >&2
+      return 2
+      ;;
+  esac
+}
+
+main "$@"
+GITHUB_HELPER
+chmod 0755 /usr/local/bin/codex-devbox-github
+
 log "Remote-Control-Verwaltung vorbereiten"
 install -d -m 0755 /etc/systemd/user
 cat >/etc/systemd/user/codex-remote-control.service <<UNIT
@@ -1245,7 +1817,7 @@ readonly SERVICE_NAME="codex-remote-control.service"
 readonly CODEX_BIN="${HOME}/.local/bin/codex"
 readonly CONTROL_SOCKET="${HOME}/.codex/app-server-control/app-server-control.sock"
 readonly STATE_DIR="${HOME}/.config/codex-devbox"
-readonly FIRST_LOGIN_MARKER="${STATE_DIR}/first-login-handled"
+readonly FIRST_LOGIN_MARKER="${STATE_DIR}/remote-control-first-login-handled"
 readonly COMPLETE_MARKER="${STATE_DIR}/remote-control-configured"
 readonly USER_ID="${EUID}"
 readonly USER_RUNTIME_DIR="/run/user/${USER_ID}"
@@ -1261,7 +1833,7 @@ Optionen:
   --status       Anmeldung, Autostart und Dienststatus anzeigen
   --pair         Remote Control einrichten oder einen neuen Pairing-Code erzeugen
   --disable      Remote-Control-Dienst stoppen und Autostart deaktivieren
-  --first-login  Einrichtung nur beim ersten interaktiven SSH-Login anbieten
+  --first-login  Einrichtung nur in der ersten interaktiven Shell anbieten
   -h, --help     Diese Hilfe anzeigen
 EOF
 }
@@ -1462,7 +2034,7 @@ first_login() {
 
   cat <<'EOF'
 
-Codex Dev Box – Ersteinrichtung
+Codex Dev Box – Ersteinrichtung (3/3)
 
 Remote Control kann diese Devbox über dein ChatGPT-Konto erreichbar machen.
 Dabei gelten weiterhin die Codex-Berechtigungen und Freigabeabfragen.
@@ -1577,8 +2149,13 @@ assert_sshd_setting permituserenvironment no
 assert_sshd_setting gatewayports no
 assert_sshd_setting usedns no
 assert_sshd_setting loglevel VERBOSE
-systemctl enable ssh.service
-systemctl restart ssh.service
+if [[ "$SSH_ACCESS" == "yes" ]]; then
+  systemctl disable --now ssh.service
+  systemctl daemon-reload
+  systemctl enable --now ssh.socket
+else
+  systemctl disable --now ssh.socket ssh.service
+fi
 
 log "Shell und Workspace konfigurieren"
 cat >/etc/profile.d/codex-devbox.sh <<'PROFILE'
@@ -1597,7 +2174,17 @@ if [[ $- == *i* ]] && [[ -d "$HOME/workspace" ]]; then
   cd "$HOME/workspace"
 fi
 if [[ $- == *i* ]] && [[ -t 0 ]] && [[ -t 1 ]] &&
-  [[ ! -e "$HOME/.config/codex-devbox/first-login-handled" ]] &&
+  [[ ! -e "$HOME/.config/codex-devbox/ssh-first-login-handled" ]] &&
+  command -v codex-devbox-ssh >/dev/null 2>&1; then
+  codex-devbox-ssh --first-login || true
+fi
+if [[ $- == *i* ]] && [[ -t 0 ]] && [[ -t 1 ]] &&
+  [[ ! -e "$HOME/.config/codex-devbox/github-first-login-handled" ]] &&
+  command -v codex-devbox-github >/dev/null 2>&1; then
+  codex-devbox-github --first-login || true
+fi
+if [[ $- == *i* ]] && [[ -t 0 ]] && [[ -t 1 ]] &&
+  [[ ! -e "$HOME/.config/codex-devbox/remote-control-first-login-handled" ]] &&
   command -v codex-devbox-remote-control >/dev/null 2>&1; then
   codex-devbox-remote-control --first-login || true
 fi
@@ -1661,6 +2248,10 @@ fi
 run_as_dev "${DEV_HOME}/.local/bin/codex" remote-control start --help >/dev/null
 run_as_dev "${DEV_HOME}/.local/bin/codex" remote-control stop --help >/dev/null
 run_as_dev "${DEV_HOME}/.local/bin/codex" remote-control pair --help >/dev/null
+test -x /usr/local/bin/codex-devbox-github
+run_as_dev /usr/local/bin/codex-devbox-github --help >/dev/null
+test -x /usr/local/bin/codex-devbox-ssh
+run_as_dev /usr/local/bin/codex-devbox-ssh --help >/dev/null
 test -x /usr/local/bin/codex-devbox-remote-control
 test -f /etc/systemd/user/codex-remote-control.service
 grep -Fxq \
@@ -1685,11 +2276,20 @@ pg_isready --host 127.0.0.1 --port 5432
 )" == "localhost" ]]
 [[ "$(stat -c '%U:%G:%a' "${DEV_HOME}/.ssh")" == \
   "${DEV_USER}:${DEV_USER}:700" ]]
-[[ "$(stat -c '%U:%G:%a' "${DEV_HOME}/.ssh/authorized_keys")" == \
-  "${DEV_USER}:${DEV_USER}:600" ]]
 /usr/sbin/sshd -t
-systemctl is-active --quiet ssh.service
-systemctl is-enabled --quiet ssh.service
+if [[ "$SSH_ACCESS" == "yes" ]]; then
+  [[ "$(stat -c '%U:%G:%a' "${DEV_HOME}/.ssh/authorized_keys")" == \
+    "${DEV_USER}:${DEV_USER}:600" ]]
+  systemctl is-active --quiet ssh.socket
+  systemctl is-enabled --quiet ssh.socket
+  ! systemctl is-enabled --quiet ssh.service
+else
+  test ! -e "${DEV_HOME}/.ssh/authorized_keys"
+  ! systemctl is-active --quiet ssh.socket
+  ! systemctl is-enabled --quiet ssh.socket
+  ! systemctl is-active --quiet ssh.service
+  ! systemctl is-enabled --quiet ssh.service
+fi
 systemctl is-enabled --quiet apt-daily.timer
 systemctl is-enabled --quiet apt-daily-upgrade.timer
 
@@ -1703,6 +2303,7 @@ show_summary() {
   CURRENT_STEP="Installation abschließen"
 
   local ip=""
+  local access_instructions=""
   local forward_agent_setting="no"
   ip="$(
     pct exec "$CTID" -- hostname -I 2>/dev/null |
@@ -1712,6 +2313,28 @@ show_summary() {
   [[ -n "$ip" ]] || ip="<CONTAINER-IP>"
   if [[ "$ALLOW_AGENT_FORWARDING" == "yes" ]]; then
     forward_agent_setting="yes"
+  fi
+  if [[ "$SSH_ACCESS" == "yes" ]]; then
+    access_instructions="Lokale SSH-Konfiguration (~/.ssh/config):
+
+Host ${CT_HOSTNAME}
+    HostName ${ip}
+    User ${DEV_USER}
+    ForwardAgent ${forward_agent_setting}
+    ServerAliveInterval 60
+    ServerAliveCountMax 3
+
+Entwickler-Shell öffnen:
+
+  ssh ${CT_HOSTNAME}"
+  else
+    access_instructions="SSH ist deaktiviert. Entwickler-Shell über den Proxmox-Host öffnen:
+
+  pct enter ${CTID}
+  sudo -iu ${DEV_USER}
+
+SSH kann im anschließenden Onboarding oder später mit
+codex-devbox-ssh --setup aktiviert werden."
   fi
 
   cat <<EOF
@@ -1723,35 +2346,27 @@ Hostname:   ${CT_HOSTNAME}
 IP-Adresse: ${ip}
 Benutzer:   ${DEV_USER}
 Workspace:  /home/${DEV_USER}/workspace
+SSH:        ${SSH_ACCESS}
 SSH-Key:    ${SSH_KEY_FINGERPRINT}
 Logdatei:   ${LOG_FILE}
 
-Lokale SSH-Konfiguration (~/.ssh/config):
+${access_instructions}
 
-Host ${CT_HOSTNAME}
-    HostName ${ip}
-    User ${DEV_USER}
-    ForwardAgent ${forward_agent_setting}
-    ServerAliveInterval 60
-    ServerAliveCountMax 3
+In der ersten interaktiven Entwickler-Shell startet das dreistufige Onboarding:
 
-Anschließend:
+  1. optionaler SSH-Zugang mit einem öffentlichen Client-Schlüssel
+  2. GitHub-Anmeldung, HTTPS-Credential-Helper und persönliche Git-Identität
+  3. ChatGPT-Anmeldung, Remote-Control-Dienst und Pairing-Code
 
-  ssh ${CT_HOSTNAME}
-
-Beim ersten interaktiven SSH-Login startet die Remote-Control-Einrichtung.
-Es koppelt Codex per Gerätecode mit dem ChatGPT-Konto, aktiviert den
-persistenten Benutzerdienst und zeigt einen kurzlebigen Pairing-Code an.
-
-Einmalige GitHub-Einrichtung:
-
-  git config --global user.name "DEIN NAME"
-  git config --global user.email "DEINE GITHUB-ADRESSE"
-  gh auth login
-  gh auth setup-git
+Alle Schritte können zurückgestellt und später erneut ausgeführt werden.
 
 Spätere Verwaltung:
 
+  codex-devbox-ssh --status
+  codex-devbox-ssh --setup
+  codex-devbox-ssh --disable
+  codex-devbox-github --status
+  codex-devbox-github --setup
   codex-devbox-remote-control --status
   codex-devbox-remote-control --pair
   codex-devbox-remote-control --disable
@@ -1805,7 +2420,7 @@ main() {
     advanced_settings || exit 0
   fi
 
-  read_ssh_key || exit 0
+  configure_ssh_access || exit 0
   validate_settings
   confirm_settings || exit 0
 
