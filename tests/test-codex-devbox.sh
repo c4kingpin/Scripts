@@ -1,22 +1,23 @@
 #!/usr/bin/env bash
+# shellcheck disable=SC2016
 
 set -Eeuo pipefail
 
-SCRIPT_DIR="$(
-  cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." >/dev/null 2>&1
-  pwd
-)"
-
-# shellcheck source=codex-devbox.sh
-source "${SCRIPT_DIR}/codex-devbox.sh"
-
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+readonly REPO_ROOT
+readonly CT_SCRIPT="${REPO_ROOT}/ct/codex-devbox.sh"
+readonly INSTALL_SCRIPT="${REPO_ROOT}/install/codex-devbox-install.sh"
+readonly METADATA="${REPO_ROOT}/json/codex-devbox.json"
 TEST_TMP="$(mktemp -d /tmp/codex-devbox-tests.XXXXXX)"
+readonly TEST_TMP
+readonly MANAGER="${TEST_TMP}/codex-devbox"
+
 PASSED=0
 FAILED=0
 
 cleanup() {
   if [[ "$TEST_TMP" == /tmp/codex-devbox-tests.* && -d "$TEST_TMP" ]]; then
-    rm -rf -- "$TEST_TMP"
+    rm -rf "$TEST_TMP"
   fi
 }
 trap cleanup EXIT
@@ -34,892 +35,304 @@ run_test() {
   fi
 }
 
-accepts_valid_ipv4() {
-  is_ipv4 "0.0.0.0" &&
-    is_ipv4 "192.168.10.42" &&
-    is_ipv4 "255.255.255.255"
-}
-
-rejects_invalid_ipv4() {
-  ! is_ipv4 "256.1.1.1" &&
-    ! is_ipv4 "192.168.1" &&
-    ! is_ipv4 "192.168.1.1.5" &&
-    ! is_ipv4 "192.168.-1.1" &&
-    ! is_ipv4 "192.168.001.1" &&
-    ! is_ipv4 "192.168.1.1/24"
-}
-
-validates_ipv4_cidr() {
-  is_ipv4_cidr "10.0.0.1/0" &&
-    is_ipv4_cidr "10.0.0.1/32" &&
-    ! is_ipv4_cidr "10.0.0.1/33" &&
-    ! is_ipv4_cidr "300.0.0.1/24" &&
-    ! is_ipv4_cidr "10.0.0.1"
-}
-
-validates_static_network_semantics() {
-  static_network_is_usable "192.168.10.42/24" "192.168.10.1" &&
-    static_network_is_usable "10.20.30.2/30" "10.20.30.1" &&
-    ! static_network_is_usable "192.168.10.0/24" "192.168.10.1" &&
-    ! static_network_is_usable "192.168.10.255/24" "192.168.10.1" &&
-    ! static_network_is_usable "192.168.10.42/24" "192.168.11.1" &&
-    ! static_network_is_usable "192.168.10.42/24" "192.168.10.42" &&
-    ! static_network_is_usable "192.168.10.42/32" "192.168.10.1"
-}
-
-converts_ipv4_to_integer() {
-  [[ "$(ipv4_to_int "0.0.0.0")" == "0" ]] &&
-    [[ "$(ipv4_to_int "192.168.1.10")" == "3232235786" ]] &&
-    [[ "$(ipv4_to_int "255.255.255.255")" == "4294967295" ]]
-}
-
-parses_supported_pve_versions() {
-  [[ "$(pve_major_version \
-    'pve-manager/8.4.1/2a5fa54a8503f96d (running kernel: 6.8.12-9-pve)')" == \
-    "8" ]] &&
-    [[ "$(pve_major_version \
-      'pve-manager/9.2.3/d0fde103346cf89a (running kernel: 7.0.12-1-pve)')" == \
-      "9" ]] &&
-    ! pve_major_version "proxmox-ve: unknown"
-}
-
-validates_remote_control_versions() {
-  stable_release_at_least "0.143.0" "0.143.0" &&
-    stable_release_at_least "0.144.0" "0.143.0" &&
-    stable_release_at_least "1.0.0" "0.143.0" &&
-    ! stable_release_at_least "0.142.9" "0.143.0" &&
-    ! stable_release_at_least "0.143.0-alpha.1" "0.143.0"
-}
-
-validates_real_ssh_key() {
-  local public_key
-
-  ssh-keygen \
-    -q \
-    -t ed25519 \
-    -N "" \
-    -f "${TEST_TMP}/id_ed25519"
-  public_key="$(<"${TEST_TMP}/id_ed25519.pub")"
-
-  validate_ssh_public_key "$public_key" &&
-    [[ "$(ssh_public_key_fingerprint "$public_key")" == SHA256:* ]]
-}
-
-rejects_malformed_ssh_keys() {
-  ! validate_ssh_public_key "ssh-ed25519 not-base64" &&
-    ! validate_ssh_public_key $'ssh-ed25519 AAAA\ncommand="id"' &&
-    ! validate_ssh_public_key "ssh-dss AAAAB3NzaC1kc3MAAACB"
-}
-
-pct() {
-  return 1
-}
-
-pvesh() {
-  if [[ "$*" == "get /cluster/nextid --vmid 123" ]]; then
-    printf '123\n'
-    return 0
-  fi
-  return 1
-}
-
-storage_is_active() {
-  return 0
-}
-
-storage_available_kib() {
-  printf '104857600\n'
-}
-
-bridge_exists() {
-  return 0
-}
-
-set_valid_settings() {
-  local test_key="${TEST_TMP}/settings-id-ed25519"
-
-  if [[ ! -s "${test_key}.pub" ]]; then
-    ssh-keygen -q -t ed25519 -N "" -f "$test_key"
-  fi
-  CTID="123"
-  CORES="4"
-  MEMORY="8192"
-  SWAP="512"
-  DISK="32"
-  CT_HOSTNAME="codex-devbox"
-  DEV_USER="dev"
-  BRIDGE="vmbr0"
-  SSH_ACCESS="yes"
-  SSH_PUBLIC_KEY="$(<"${test_key}.pub")"
-  SSH_KEY_FINGERPRINT="$(ssh_public_key_fingerprint "$SSH_PUBLIC_KEY")"
-  ALLOW_AGENT_FORWARDING="no"
-  IPV4_MODE="dhcp"
-  IPV4_ADDRESS=""
-  IPV4_GATEWAY=""
-  STORAGE="local-lvm"
-  TEMPLATE_STORAGE="local"
-}
-
-accepts_valid_settings() {
-  set_valid_settings
-  validate_settings
-}
-
-accepts_settings_without_ssh() {
-  set_valid_settings
-  SSH_ACCESS="no"
-  SSH_PUBLIC_KEY=""
-  SSH_KEY_FINGERPRINT="<nicht eingerichtet>"
-  validate_settings
-}
-
-rejects_agent_forwarding_without_ssh() {
-  if (
-    set_valid_settings
-    SSH_ACCESS="no"
-    SSH_PUBLIC_KEY=""
-    SSH_KEY_FINGERPRINT="<nicht eingerichtet>"
-    ALLOW_AGENT_FORWARDING="yes"
-    validate_settings
-  ) >/dev/null 2>&1; then
-    return 1
-  fi
-}
-
-rejects_root_user() {
-  if (
-    set_valid_settings
-    DEV_USER="root"
-    validate_settings
-  ) >/dev/null 2>&1; then
-    return 1
-  fi
-}
-
-rejects_invalid_static_network() {
-  if (
-    set_valid_settings
-    IPV4_MODE="static"
-    IPV4_ADDRESS="999.168.1.50/24"
-    IPV4_GATEWAY="192.168.1.1"
-    validate_settings
-  ) >/dev/null 2>&1; then
-    return 1
-  fi
-}
-
-accepts_usable_static_network() {
-  set_valid_settings
-  IPV4_MODE="static"
-  IPV4_ADDRESS="192.168.10.42/24"
-  IPV4_GATEWAY="192.168.10.1"
-  validate_settings
-}
-
-rejects_unusable_static_network() {
-  if (
-    set_valid_settings
-    IPV4_MODE="static"
-    IPV4_ADDRESS="192.168.10.42/24"
-    IPV4_GATEWAY="192.168.11.1"
-    validate_settings
-  ) >/dev/null 2>&1; then
-    return 1
-  fi
-}
-
-rejects_undersized_resources() {
-  if (
-    set_valid_settings
-    MEMORY="1024"
-    validate_settings
-  ) >/dev/null 2>&1; then
-    return 1
-  fi
-
-  if (
-    set_valid_settings
-    DISK="8"
-    validate_settings
-  ) >/dev/null 2>&1; then
-    return 1
-  fi
-}
-
-checks_vmid_cluster_wide() {
-  vmid_is_available "123" &&
-    ! vmid_is_available "124"
-}
-
-rejects_occupied_vmid() {
-  if (
-    set_valid_settings
-    CTID="124"
-    validate_settings
-  ) >/dev/null 2>&1; then
-    return 1
-  fi
-}
-
-rejects_missing_storage_capacity() {
-  if (
-    set_valid_settings
-    # shellcheck disable=SC2329
-    storage_available_kib() {
-      printf '1024\n'
+extract_manager() {
+  awk '
+    /^cat <<'\''MANAGER'\'' >\/usr\/local\/bin\/codex-devbox$/ {
+      capture=1
+      next
     }
-    validate_settings
-  ) >/dev/null 2>&1; then
-    return 1
-  fi
+    /^MANAGER$/ {
+      capture=0
+    }
+    capture
+  ' "$INSTALL_SCRIPT" >"$MANAGER"
+  chmod 0755 "$MANAGER"
 }
 
-rejects_unknown_option() {
+scripts_have_valid_syntax() {
+  bash -n "$CT_SCRIPT" "$INSTALL_SCRIPT" "$MANAGER"
+}
+
+metadata_is_valid_json() {
+  python3 -m json.tool "$METADATA" >/dev/null
+}
+
+uses_community_file_layout() {
+  [[ -f "$CT_SCRIPT" ]] &&
+    [[ -f "$INSTALL_SCRIPT" ]] &&
+    [[ -f "$METADATA" ]] &&
+    [[ ! -e "${REPO_ROOT}/codex-devbox.sh" ]] &&
+    grep -Fq 'source "$(dirname "${BASH_SOURCE[0]}")/../misc/build.func"' \
+      "$CT_SCRIPT" &&
+    grep -Fq 'CODEX_DEVBOX_SOURCE_URL' "$CT_SCRIPT" &&
+    grep -Fq 'relative_path" == "install/codex-devbox-install.sh"' \
+      "$CT_SCRIPT" &&
+    grep -Fq 'source /dev/stdin <<<"$FUNCTIONS_FILE_PATH"' "$INSTALL_SCRIPT"
+}
+
+ct_script_has_standard_defaults() {
+  grep -Fq 'APP="Codex-DevBox"' "$CT_SCRIPT" &&
+    grep -Fq 'var_cpu="${var_cpu:-4}"' "$CT_SCRIPT" &&
+    grep -Fq 'var_ram="${var_ram:-8192}"' "$CT_SCRIPT" &&
+    grep -Fq 'var_disk="${var_disk:-32}"' "$CT_SCRIPT" &&
+    grep -Fq 'var_os="${var_os:-debian}"' "$CT_SCRIPT" &&
+    grep -Fq 'var_version="${var_version:-13}"' "$CT_SCRIPT" &&
+    grep -Fq 'var_arm64="${var_arm64:-no}"' "$CT_SCRIPT" &&
+    grep -Fq 'var_unprivileged="${var_unprivileged:-1}"' "$CT_SCRIPT"
+}
+
+ct_app_name_maps_to_installer() {
+  local app
+  local installer_slug
+
+  app="$(sed -n 's/^APP="\([^"]*\)"$/\1/p' "$CT_SCRIPT")"
+  installer_slug="$(tr '[:upper:]' '[:lower:]' <<<"$app" | tr -d ' ')"
+
+  [[ "${installer_slug}-install.sh" == "$(basename "$INSTALL_SCRIPT")" ]]
+}
+
+preview_source_routes_framework_and_installer() {
+  local preview_root="${TEST_TMP}/preview"
+  local preview_log="${preview_root}/fetch.log"
+
+  mkdir -p "${preview_root}/bin" "${preview_root}/ct" "${preview_root}/misc"
+  cp "$CT_SCRIPT" "${preview_root}/ct/codex-devbox.sh"
+  printf '%s\n' \
+    'header_info() { :; }' \
+    'variables() { :; }' \
+    'color() { :; }' \
+    'catch_errors() { :; }' \
+    'msg_ok() { :; }' \
+    'start() { :; }' \
+    'description() { :; }' \
+    'build_container() {' \
+    '  _cs_fetch_text misc/install.func >/dev/null' \
+    '  _cs_fetch_text install/codex-devbox-install.sh >/dev/null' \
+    '}' >"${preview_root}/misc/build.func"
+  printf '%s\n' \
+    '#!/usr/bin/env bash' \
+    'printf "%s\n" "$*" >>"$PREVIEW_LOG"' >"${preview_root}/bin/curl"
+  chmod 0755 "${preview_root}/bin/curl"
+
+  CODEX_DEVBOX_SOURCE_URL="https://example.test/codex-devbox" \
+    PREVIEW_LOG="$preview_log" \
+    PATH="${preview_root}/bin:/usr/bin:/bin" \
+    bash "${preview_root}/ct/codex-devbox.sh" >/dev/null
+
+  grep -Fq \
+    'https://raw.githubusercontent.com/community-scripts/ProxmoxVED/main/misc/install.func' \
+    "$preview_log" &&
+    grep -Fq \
+      'https://example.test/codex-devbox/install/codex-devbox-install.sh' \
+      "$preview_log"
+}
+
+ct_script_uses_standard_orchestration() {
+  grep -Fq 'header_info "$APP"' "$CT_SCRIPT" &&
+    grep -Fxq 'variables' "$CT_SCRIPT" &&
+    grep -Fxq 'color' "$CT_SCRIPT" &&
+    grep -Fxq 'catch_errors' "$CT_SCRIPT" &&
+    grep -Fxq 'start' "$CT_SCRIPT" &&
+    grep -Fxq 'build_container' "$CT_SCRIPT" &&
+    grep -Fxq 'description' "$CT_SCRIPT"
+}
+
+ct_script_has_update_path() {
+  grep -Fq 'function update_script()' "$CT_SCRIPT" &&
+    grep -Fq 'check_container_storage' "$CT_SCRIPT" &&
+    grep -Fq 'check_container_resources' "$CT_SCRIPT" &&
+    grep -Fq '/usr/local/bin/codex-devbox update' "$CT_SCRIPT"
+}
+
+ct_script_does_not_duplicate_proxmox_core() {
+  ! grep -Eq \
+    'whiptail|pct create|pveam|pvesm|pvesh get /cluster/nextid|create_container\(' \
+    "$CT_SCRIPT"
+}
+
+install_script_uses_community_lifecycle() {
+  grep -Fxq 'color' "$INSTALL_SCRIPT" &&
+    grep -Fxq 'verb_ip6' "$INSTALL_SCRIPT" &&
+    grep -Fxq 'catch_errors' "$INSTALL_SCRIPT" &&
+    grep -Fxq 'setting_up_container' "$INSTALL_SCRIPT" &&
+    grep -Fxq 'network_check' "$INSTALL_SCRIPT" &&
+    grep -Fxq 'update_os' "$INSTALL_SCRIPT" &&
+    grep -Fxq 'motd_ssh' "$INSTALL_SCRIPT" &&
+    grep -Fxq 'customize' "$INSTALL_SCRIPT" &&
+    grep -Fxq 'cleanup_lxc' "$INSTALL_SCRIPT" &&
+    [[ "$(tail -n 3 "$INSTALL_SCRIPT")" == $'motd_ssh\ncustomize\ncleanup_lxc' ]]
+}
+
+install_script_uses_tools_helpers() {
+  grep -Fq 'setup_nodejs' "$INSTALL_SCRIPT" &&
+    grep -Fq 'setup_postgresql' "$INSTALL_SCRIPT" &&
+    grep -Fq 'setup_postgresql_db' "$INSTALL_SCRIPT" &&
+    grep -Fq 'curl_with_retry "https://mise.run"' "$INSTALL_SCRIPT" &&
+    ! grep -Fq 'deb.nodesource.com' "$INSTALL_SCRIPT"
+}
+
+install_script_is_bare_metal() {
+  ! grep -Eq 'setup_docker|docker (run|compose|pull)|podman' "$INSTALL_SCRIPT"
+}
+
+developer_user_is_least_privilege() {
+  grep -Fq 'useradd --create-home --user-group --shell /bin/bash' \
+    "$INSTALL_SCRIPT" &&
+    grep -Fq 'PermitRootLogin no' "$INSTALL_SCRIPT" &&
+    grep -Fq 'PasswordAuthentication no' "$INSTALL_SCRIPT" &&
+    grep -Fq 'AllowUsers ${DEV_USER}' "$INSTALL_SCRIPT" &&
+    grep -Fq \
+      '${DEV_USER} ALL=(root) NOPASSWD: /usr/local/bin/codex-devbox ssh setup' \
+      "$INSTALL_SCRIPT" &&
+    ! grep -Eq 'NOPASSWD:[[:space:]]*ALL' "$INSTALL_SCRIPT"
+}
+
+ssh_onboarding_distinguishes_key_directions() {
+  grep -Fq 'A private client key must' "$INSTALL_SCRIPT" &&
+    grep -Fq 'SSH_AUTHORIZED_KEY' "$INSTALL_SCRIPT" &&
+    grep -Fq 'keys generate' "$INSTALL_SCRIPT" &&
+    grep -Fq 'ssh-keygen' "$INSTALL_SCRIPT" &&
+    grep -Fq 'keys upload-github' "$INSTALL_SCRIPT"
+}
+
+unsupported_cli_remote_service_is_absent() {
+  ! grep -Eq \
+    'codex remote-control|codex-remote-control\.service|app-server-control\.sock' \
+    "$CT_SCRIPT" "$INSTALL_SCRIPT"
+}
+
+remote_instructions_use_supported_path() {
+  local output
+
+  output="$("$MANAGER" remote-info)"
+  grep -Fq 'ChatGPT on iOS' <<<"$output" &&
+    grep -Fq 'ChatGPT desktop app on macOS or Windows' <<<"$output" &&
+    grep -Fq 'SSH connection' <<<"$output" &&
+    grep -Fq 'pct enter <CTID>' <<<"$output"
+}
+
+manager_exposes_expected_commands() {
+  local output
+
+  output="$("$MANAGER" --help)"
+  grep -Fq 'onboard' <<<"$output" &&
+    grep -Fq 'ssh setup' <<<"$output" &&
+    grep -Fq 'auth login' <<<"$output" &&
+    grep -Fq 'github setup' <<<"$output" &&
+    grep -Fq 'keys generate' <<<"$output" &&
+    grep -Fq 'remote-info' <<<"$output" &&
+    grep -Fq 'doctor' <<<"$output" &&
+    grep -Fq 'update' <<<"$output"
+}
+
+manager_rejects_unknown_commands() {
   local status=0
 
-  bash "${SCRIPT_DIR}/codex-devbox.sh" --does-not-exist >/dev/null 2>&1 ||
-    status=$?
+  "$MANAGER" does-not-exist >/dev/null 2>&1 || status=$?
   [[ "$status" -eq 2 ]]
 }
 
-reports_current_version_and_lts_default() {
-  [[ "$(bash "${SCRIPT_DIR}/codex-devbox.sh" --version)" == \
-    "Codex Dev Box 1.4.0" ]] &&
-    grep -Fq "readonly NODE_MAJOR=\"\${NODE_MAJOR:-24}\"" \
-      "${SCRIPT_DIR}/codex-devbox.sh" &&
-    grep -Fq "readonly ERLANG_VERSION=\"\${ERLANG_VERSION:-28.4}\"" \
-      "${SCRIPT_DIR}/codex-devbox.sh" &&
-    grep -Fq "readonly ELIXIR_VERSION=\"\${ELIXIR_VERSION:-1.20.2}\"" \
-      "${SCRIPT_DIR}/codex-devbox.sh" &&
-    grep -Fq "readonly PHOENIX_VERSION=\"\${PHOENIX_VERSION:-1.8.9}\"" \
-      "${SCRIPT_DIR}/codex-devbox.sh" &&
-    grep -Fq 'readonly MIN_CODEX_REMOTE_CONTROL_VERSION="0.143.0"' \
-      "${SCRIPT_DIR}/codex-devbox.sh"
+metadata_matches_scripts() {
+  python3 - "$METADATA" "$CT_SCRIPT" <<'PY'
+import json
+import pathlib
+import sys
+
+metadata = json.loads(pathlib.Path(sys.argv[1]).read_text())
+ct_script = pathlib.Path(sys.argv[2]).read_text()
+
+resources = metadata["install_methods"][0]["resources"]
+assert metadata["name"] == "Codex DevBox"
+assert metadata["slug"] == "codex-devbox"
+assert metadata["type"] == "ct"
+assert metadata["updateable"] is True
+assert metadata["privileged"] is False
+assert metadata["has_arm"] is False
+assert metadata["interface_port"] is None
+assert metadata["categories"] == [20]
+assert metadata["config_path"] == "/home/dev/.config/codex-devbox"
+assert metadata["install_methods"][0]["script"] == "ct/codex-devbox.sh"
+assert resources == {
+    "cpu": 4,
+    "ram": 8192,
+    "hdd": 32,
+    "os": "Debian",
+    "version": "13",
+}
+for value in ('var_cpu="${var_cpu:-4}"',
+              'var_ram="${var_ram:-8192}"',
+              'var_disk="${var_disk:-32}"',
+              'var_os="${var_os:-debian}"',
+              'var_version="${var_version:-13}"',
+              'var_arm64="${var_arm64:-no}"'):
+    assert value in ct_script
+PY
 }
 
-summarizes_failed_commands() {
-  local long_command summary
+no_hardcoded_default_credentials() {
+  python3 - "$METADATA" <<'PY'
+import json
+import pathlib
+import sys
 
-  long_command="$(printf 'x%.0s' {1..300})"
-  summary="$(summarize_command "${long_command}"$'\nshould-not-appear')"
-  ((${#summary} == 240)) &&
-    [[ "$summary" == *... ]] &&
-    [[ "$summary" != *should-not-appear* ]]
+metadata = json.loads(pathlib.Path(sys.argv[1]).read_text())
+assert metadata["default_credentials"] == {
+    "username": None,
+    "password": None,
+}
+PY
+  ! grep -Eq \
+    'PASSWORD=(postgres|password|changeme)|password["'\'']?[[:space:]]*[:=][[:space:]]*["'\'']?(postgres|password|changeme)' \
+    "$CT_SCRIPT" "$INSTALL_SCRIPT"
 }
 
-selects_latest_amd64_template() {
-  local available
-
-  available=$'system ubuntu-24.04-standard_24.04-1_amd64.tar.zst\n'
-  available+=$'system ubuntu-24.04-standard_24.04-3_arm64.tar.zst\n'
-  available+=$'system ubuntu-22.04-standard_22.04-9_amd64.tar.zst\n'
-  available+='system ubuntu-24.04-standard_24.04-2_amd64.tar.zst'
-
-  [[ "$(latest_ubuntu_template <<<"$available")" == \
-    "ubuntu-24.04-standard_24.04-2_amd64.tar.zst" ]]
+managed_secrets_have_restricted_permissions() {
+  grep -Fq 'chmod 0600' "$INSTALL_SCRIPT" &&
+    grep -Fq '"${DEV_HOME}/.pgpass"' "$INSTALL_SCRIPT" &&
+    grep -Fq '"${DEV_HOME}/.config/codex-devbox/postgres.env"' \
+      "$INSTALL_SCRIPT"
 }
 
-embedded_provisioner() {
-  awk '
-    /^    bash -s <<'\''INNER'\''$/ { inside=1; next }
-    /^INNER$/ { inside=0 }
-    inside
-  ' "${SCRIPT_DIR}/codex-devbox.sh"
+first_login_onboarding_is_optional_and_repeatable() {
+  grep -Fq 'onboarding-complete' "$INSTALL_SCRIPT" &&
+    grep -Fq 'codex-devbox onboard || true' "$INSTALL_SCRIPT" &&
+    grep -Fq 'codex login --device-auth' "$MANAGER" &&
+    grep -Fq 'onboard() {' "$MANAGER"
 }
 
-embedded_remote_control_helper() {
-  embedded_provisioner |
-    awk '
-      /^cat >\/usr\/local\/bin\/codex-devbox-remote-control <<'\''REMOTE_CONTROL_HELPER'\''$/ {
-        inside=1
-        next
-      }
-      /^REMOTE_CONTROL_HELPER$/ { inside=0 }
-      inside
-    '
+update_preserves_user_state() {
+  grep -Fq 'Updating Codex CLI' "$MANAGER" &&
+    grep -Fq 'Ensuring managed Erlang, Elixir and Phoenix versions' "$MANAGER" &&
+    ! grep -Eq \
+      'rm -rf[[:space:]]+("?)(/home/dev/workspace|/home/dev/\.codex|/home/dev/\.ssh)' \
+      "$MANAGER"
 }
 
-embedded_ssh_helper() {
-  embedded_provisioner |
-    awk '
-      /^cat >\/usr\/local\/bin\/codex-devbox-ssh <<'\''SSH_HELPER'\''$/ {
-        inside=1
-        next
-      }
-      /^SSH_HELPER$/ { inside=0 }
-      inside
-    '
-}
+extract_manager
 
-embedded_github_helper() {
-  embedded_provisioner |
-    awk '
-      /^cat >\/usr\/local\/bin\/codex-devbox-github <<'\''GITHUB_HELPER'\''$/ {
-        inside=1
-        next
-      }
-      /^GITHUB_HELPER$/ { inside=0 }
-      inside
-    '
-}
-
-validates_embedded_provisioner_syntax() {
-  bash -n <(embedded_provisioner)
-}
-
-validates_embedded_ssh_helper_syntax() {
-  bash -n <(embedded_ssh_helper)
-}
-
-validates_embedded_github_helper_syntax() {
-  bash -n <(embedded_github_helper)
-}
-
-validates_embedded_remote_control_helper_syntax() {
-  bash -n <(embedded_remote_control_helper)
-}
-
-ssh_helper_adds_key_and_controls_service() {
-  if [[ "${EUID}" -eq 0 ]]; then
-    return 0
-  fi
-
-  local fixture="${TEST_TMP}/ssh-helper"
-  local fixture_home="${fixture}/home"
-  local fixture_state="${fixture}/service-state"
-  local helper="${fixture}/codex-devbox-ssh"
-  local private_key="${fixture}/client-key"
-  local public_key=""
-  local output="${fixture}/output"
-  local status=0
-
-  mkdir -p "${fixture}/bin" "$fixture_home" "$fixture_state"
-  embedded_ssh_helper >"$helper"
-  chmod 0755 "$helper"
-  ssh-keygen -q -t ed25519 -N "" -f "$private_key"
-  public_key="$(<"${private_key}.pub")"
-
-  cat >"${fixture}/bin/systemctl" <<'MOCK_SYSTEMCTL'
-#!/usr/bin/env bash
-set -Eeuo pipefail
-
-state="${MOCK_SYSTEMCTL_STATE:?}"
-case "$*" in
-  "disable --now ssh.service")
-    ;;
-  "daemon-reload")
-    ;;
-  "enable --now ssh.socket")
-    : >"${state}/enabled"
-    : >"${state}/active"
-    ;;
-  "disable --now ssh.socket ssh.service")
-    rm -f "${state}/enabled" "${state}/active"
-    ;;
-  "is-enabled --quiet ssh.socket")
-    [[ -f "${state}/enabled" ]]
-    ;;
-  "is-active --quiet ssh.socket")
-    [[ -f "${state}/active" ]]
-    ;;
-  *)
-    printf 'Unerwarteter systemctl-Aufruf: %s\n' "$*" >&2
-    exit 2
-    ;;
-esac
-MOCK_SYSTEMCTL
-  chmod 0755 "${fixture}/bin/systemctl"
-
-  cat >"${fixture}/bin/sudo" <<'MOCK_SUDO'
-#!/usr/bin/env bash
-set -Eeuo pipefail
-exec "$@"
-MOCK_SUDO
-  chmod 0755 "${fixture}/bin/sudo"
-
-  if ! (
-    printf '%s\n' "$public_key" |
-      HOME="$fixture_home" \
-        MOCK_SYSTEMCTL_STATE="$fixture_state" \
-        PATH="${fixture}/bin:/usr/bin:/bin" \
-        "$helper" --setup >"$output" &&
-      grep -Fqx "$public_key" "${fixture_home}/.ssh/authorized_keys" &&
-      [[ "$(stat -c '%a' "${fixture_home}/.ssh/authorized_keys")" == "600" ]] &&
-      [[ -f "${fixture_state}/enabled" ]] &&
-      [[ -f "${fixture_state}/active" ]] &&
-      HOME="$fixture_home" \
-        MOCK_SYSTEMCTL_STATE="$fixture_state" \
-        PATH="${fixture}/bin:/usr/bin:/bin" \
-        "$helper" --status >/dev/null &&
-      HOME="$fixture_home" \
-        MOCK_SYSTEMCTL_STATE="$fixture_state" \
-        PATH="${fixture}/bin:/usr/bin:/bin" \
-        "$helper" --disable >/dev/null &&
-      [[ ! -e "${fixture_state}/enabled" ]] &&
-      [[ ! -e "${fixture_state}/active" ]] &&
-      grep -Fqx "$public_key" "${fixture_home}/.ssh/authorized_keys"
-  ); then
-    status=1
-  fi
-
-  return "$status"
-}
-
-github_helper_configures_login_credentials_and_identity() {
-  if [[ "${EUID}" -eq 0 ]]; then
-    return 0
-  fi
-
-  local fixture="${TEST_TMP}/github"
-  local fixture_home="${fixture}/home"
-  local fixture_state="${fixture}/gh-state"
-  local helper="${fixture}/codex-devbox-github"
-  local output="${fixture}/output"
-  local status_output="${fixture}/status-output"
-  local status=0
-
-  mkdir -p "${fixture}/bin" "$fixture_home" "$fixture_state"
-  embedded_github_helper >"$helper"
-  chmod 0755 "$helper"
-
-  cat >"${fixture}/bin/gh" <<'MOCK_GH'
-#!/usr/bin/env bash
-set -Eeuo pipefail
-
-state="${MOCK_GH_STATE:?}"
-case "$*" in
-  "auth status --hostname github.com")
-    [[ -f "${state}/authenticated" ]]
-    ;;
-  "auth login --hostname github.com --git-protocol https --web")
-    : >"${state}/authenticated"
-    ;;
-  "auth setup-git --hostname github.com")
-    git config --global --replace-all \
-      credential.https://github.com.helper '!gh auth git-credential'
-    ;;
-  "api user --jq .login")
-    printf 'c4kingpin\n'
-    ;;
-  "api user --jq .id")
-    printf '1272310\n'
-    ;;
-  "api user --jq .name // .login")
-    printf 'Test User\n'
-    ;;
-  *)
-    printf 'Unerwarteter gh-Aufruf: %s\n' "$*" >&2
-    exit 2
-    ;;
-esac
-MOCK_GH
-  chmod 0755 "${fixture}/bin/gh"
-
-  if ! (
-    printf '\n\n' |
-      HOME="$fixture_home" \
-        MOCK_GH_STATE="$fixture_state" \
-        PATH="${fixture}/bin:/usr/bin:/bin" \
-        "$helper" --setup >"$output" &&
-      [[ -f "${fixture_state}/authenticated" ]] &&
-      [[ -f "${fixture_home}/.config/codex-devbox/github-configured" ]] &&
-      [[ "$(HOME="$fixture_home" git config --global --get user.name)" == \
-        "Test User" ]] &&
-      [[ "$(HOME="$fixture_home" git config --global --get user.email)" == \
-        "1272310+c4kingpin@users.noreply.github.com" ]] &&
-      HOME="$fixture_home" \
-        MOCK_GH_STATE="$fixture_state" \
-        PATH="${fixture}/bin:/usr/bin:/bin" \
-        "$helper" --status >"$status_output" &&
-      grep -Fq 'GitHub-Anmeldung:  ja' "$status_output" &&
-      grep -Fq 'HTTPS-Credentials: ja' "$status_output" &&
-      grep -Fq 'GitHub-Konto:      c4kingpin' "$status_output"
-  ); then
-    status=1
-  fi
-
-  return "$status"
-}
-
-remote_control_helper_runs_login_service_and_pairing() {
-  if [[ "${EUID}" -eq 0 ]]; then
-    return 0
-  fi
-
-  local fixture="${TEST_TMP}/rc"
-  local fixture_home="${fixture}/home"
-  local fixture_state="${fixture}/systemctl-state"
-  local helper="${fixture}/codex-devbox-remote-control"
-  local output="${fixture}/output"
-  local socket_path="${fixture_home}/.codex/app-server-control/app-server-control.sock"
-  local system_socket
-  local status=0
-
-  mkdir -p \
-    "${fixture}/bin" \
-    "$(dirname "$socket_path")" \
-    "${fixture_home}/.local/bin" \
-    "${fixture_home}/workspace" \
-    "$fixture_state"
-  embedded_remote_control_helper >"$helper"
-  chmod 0755 "$helper"
-
-  cat >"${fixture_home}/.local/bin/codex" <<'MOCK_CODEX'
-#!/usr/bin/env bash
-set -Eeuo pipefail
-
-case "$*" in
-  "remote-control start --help"|"remote-control stop --help"|"remote-control pair --help")
-    ;;
-  "login status")
-    [[ -f "$HOME/.codex/auth.json" ]]
-    ;;
-  "login --device-auth")
-    install -d -m 0700 "$HOME/.codex"
-    : >"$HOME/.codex/auth.json"
-    ;;
-  "remote-control pair")
-    printf 'Pairing-Code: TEST-CODE\n'
-    ;;
-  *)
-    printf 'Unerwarteter Codex-Aufruf: %s\n' "$*" >&2
-    exit 2
-    ;;
-esac
-MOCK_CODEX
-  chmod 0755 "${fixture_home}/.local/bin/codex"
-
-  cat >"${fixture}/bin/systemctl" <<'MOCK_SYSTEMCTL'
-#!/usr/bin/env bash
-set -Eeuo pipefail
-
-state="${MOCK_SYSTEMCTL_STATE:?}"
-case "$*" in
-  "--user daemon-reload")
-    expected_runtime="/run/user/$(id -u)"
-    [[ "${XDG_RUNTIME_DIR:-}" == "$expected_runtime" ]]
-    [[ "${DBUS_SESSION_BUS_ADDRESS:-}" == \
-      "unix:path=${expected_runtime}/bus" ]]
-    ;;
-  "--user reset-failed codex-remote-control.service")
-    ;;
-  "--user enable --now codex-remote-control.service")
-    : >"${state}/enabled"
-    : >"${state}/active"
-    ;;
-  "--user is-enabled --quiet codex-remote-control.service")
-    [[ -f "${state}/enabled" ]]
-    ;;
-  "--user is-active --quiet codex-remote-control.service")
-    [[ -f "${state}/active" ]]
-    ;;
-  "--user is-failed --quiet codex-remote-control.service")
-    exit 1
-    ;;
-  "--user disable --now codex-remote-control.service")
-    rm -f "${state}/enabled" "${state}/active"
-    ;;
-  *)
-    printf 'Unerwarteter systemctl-Aufruf: %s\n' "$*" >&2
-    exit 2
-    ;;
-esac
-MOCK_SYSTEMCTL
-  chmod 0755 "${fixture}/bin/systemctl"
-
-  system_socket="$(find /run -type s -print -quit 2>/dev/null)"
-  [[ -n "$system_socket" && -S "$system_socket" ]] || return 0
-  ln -s -- "$system_socket" "$socket_path"
-
-  if ! (
-    HOME="$fixture_home" \
-      MOCK_SYSTEMCTL_STATE="$fixture_state" \
-      PATH="${fixture}/bin:/usr/bin:/bin" \
-      "$helper" --pair >"$output" &&
-      grep -Fq 'Pairing-Code: TEST-CODE' "$output" &&
-      [[ -f "${fixture_home}/.codex/auth.json" ]] &&
-      [[ "$(stat -c '%a' "${fixture_home}/.codex/auth.json")" == "600" ]] &&
-      [[ -f "${fixture_home}/.config/codex-devbox/remote-control-configured" ]] &&
-      [[ -f "${fixture_state}/enabled" ]] &&
-      [[ -f "${fixture_state}/active" ]] &&
-      HOME="$fixture_home" \
-        MOCK_SYSTEMCTL_STATE="$fixture_state" \
-        PATH="${fixture}/bin:/usr/bin:/bin" \
-        "$helper" --status >/dev/null &&
-      HOME="$fixture_home" \
-        MOCK_SYSTEMCTL_STATE="$fixture_state" \
-        PATH="${fixture}/bin:/usr/bin:/bin" \
-        "$helper" --disable >/dev/null &&
-      [[ ! -e "${fixture_state}/enabled" ]] &&
-      [[ ! -e "${fixture_state}/active" ]]
-  ); then
-    status=1
-  fi
-
-  return "$status"
-}
-
-provisioner_uses_safe_user_context() {
-  local provisioner
-
-  provisioner="$(embedded_provisioner)"
-
-  grep -Fq 'run_as_dev() {' <<<"$provisioner" &&
-    grep -Fq "cd \"\$HOME\"" <<<"$provisioner" &&
-    [[ "$(grep -Fc "sudo -u \"\$DEV_USER\"" <<<"$provisioner")" -eq 1 ]] &&
-    grep -Fq 'run_as_dev env ' <<<"$provisioner" &&
-    grep -Fq 'run_as_dev git lfs install --skip-repo' <<<"$provisioner" &&
-    grep -Fq "run_as_dev \"\${DEV_HOME}/.local/bin/codex\" --version" \
-      <<<"$provisioner" &&
-    grep -Fq 'Installierte Codex-Version entspricht nicht' \
-      <<<"$provisioner"
-}
-
-provisioner_reports_inner_failures() {
-  local provisioner
-
-  provisioner="$(embedded_provisioner)"
-  grep -Fq 'trap on_inner_error ERR' <<<"$provisioner" &&
-    grep -Fq "command=\"\${command%%" <<<"$provisioner" &&
-    grep -Fq "printf 'Teilschritt: %s\\n'" <<<"$provisioner"
-}
-
-provisioner_uses_portable_locale() {
-  grep -Fq 'LANG=C.UTF-8 ' "${SCRIPT_DIR}/codex-devbox.sh" &&
-    grep -Fq 'LC_ALL=C.UTF-8 ' "${SCRIPT_DIR}/codex-devbox.sh"
-}
-
-provisioner_configures_fd_for_non_login_shells() {
-  local provisioner path_line fd_check_line
-
-  provisioner="$(embedded_provisioner)"
-  path_line="$(
-    grep -nF \
-      'export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"' \
-      <<<"$provisioner" |
-      cut -d: -f1
-  )"
-  fd_check_line="$(
-    grep -nFx 'command -v fd' <<<"$provisioner" |
-      cut -d: -f1
-  )"
-
-  [[ "$path_line" =~ ^[0-9]+$ ]] &&
-    [[ "$fd_check_line" =~ ^[0-9]+$ ]] &&
-    ((path_line < fd_check_line)) &&
-    grep -Fq "fd_binary=\"\$(command -v fdfind || true)\"" \
-      <<<"$provisioner" &&
-    grep -Fq "[[ -z \"\$fd_binary\" && -x /usr/lib/cargo/bin/fd ]]" \
-      <<<"$provisioner" &&
-    grep -Fq "ln -sfn -- \"\$fd_binary\" /usr/local/bin/fd" \
-      <<<"$provisioner" &&
-    grep -Fq '[[ -x /usr/local/bin/fd ]]' <<<"$provisioner"
-}
-
-provisioner_prepares_sshd_runtime() {
-  local provisioner runtime_line validation_line
-
-  provisioner="$(embedded_provisioner)"
-  runtime_line="$(
-    grep -nF 'install -d -m 0755 /run/sshd' <<<"$provisioner" |
-      cut -d: -f1
-  )"
-  validation_line="$(
-    grep -nF '/usr/sbin/sshd -t' <<<"$provisioner" |
-      head -n 1 |
-      cut -d: -f1
-  )"
-
-  [[ "$runtime_line" =~ ^[0-9]+$ ]] &&
-    [[ "$validation_line" =~ ^[0-9]+$ ]] &&
-    ((runtime_line < validation_line))
-}
-
-provisioner_verifies_effective_ssh_security() {
-  local provisioner
-
-  provisioner="$(embedded_provisioner)"
-  grep -Fq '/etc/ssh/sshd_config.d/00-codex-devbox.conf' \
-    <<<"$provisioner" &&
-    grep -Fq '/usr/sbin/sshd -T ' <<<"$provisioner" &&
-    grep -Fq 'assert_sshd_setting passwordauthentication no' \
-      <<<"$provisioner" &&
-    grep -Fq 'assert_sshd_setting authenticationmethods publickey' \
-      <<<"$provisioner" &&
-    grep -Fq "assert_sshd_setting allowagentforwarding \"\$ALLOW_AGENT_FORWARDING\"" \
-      <<<"$provisioner" &&
-    grep -Fq 'systemctl is-active --quiet ssh.socket' <<<"$provisioner" &&
-    grep -Fq 'systemctl disable --now ssh.socket ssh.service' \
-      <<<"$provisioner"
-}
-
-provisioner_configures_optional_ssh_access() {
-  local helper
-  local provisioner
-
-  helper="$(embedded_ssh_helper)"
-  provisioner="$(embedded_provisioner)"
-
-  # Die geprüften Skriptfragmente enthalten absichtlich Variablenliterale.
-  # shellcheck disable=SC2016
-  grep -Fq 'ssh-keygen -t ed25519 -a 100' <<<"$helper" &&
-    grep -Fq 'Der private Schlüssel darf die Client-Maschine nicht verlassen.' \
-      <<<"$helper" &&
-    grep -Fq 'sudo systemctl enable --now ssh.socket' <<<"$helper" &&
-    grep -Fq 'sudo systemctl disable --now ssh.socket ssh.service' \
-      <<<"$helper" &&
-    grep -Fq 'SSH_ACCESS="$SSH_ACCESS"' "${SCRIPT_DIR}/codex-devbox.sh" &&
-    grep -Fq 'if [[ "$SSH_ACCESS" == "yes" ]]; then' <<<"$provisioner" &&
-    grep -Fq 'test ! -e "${DEV_HOME}/.ssh/authorized_keys"' \
-      <<<"$provisioner" &&
-    grep -Fq 'codex-devbox-ssh --first-login' <<<"$provisioner" &&
-    grep -Fq 'codex-devbox-ssh --help' <<<"$provisioner"
-}
-
-provisioner_checks_critical_endpoints() {
-  grep -Fq 'archive.ubuntu.com' "${SCRIPT_DIR}/codex-devbox.sh" &&
-    grep -Fq 'security.ubuntu.com' "${SCRIPT_DIR}/codex-devbox.sh" &&
-    grep -Fq 'deb.nodesource.com' "${SCRIPT_DIR}/codex-devbox.sh" &&
-    grep -Fq 'chatgpt.com' "${SCRIPT_DIR}/codex-devbox.sh" &&
-    grep -Fq 'mise.run' "${SCRIPT_DIR}/codex-devbox.sh" &&
-    grep -Fq 'mise.jdx.dev' "${SCRIPT_DIR}/codex-devbox.sh" &&
-    grep -Fq 'repo.hex.pm' "${SCRIPT_DIR}/codex-devbox.sh"
-}
-
-provisioner_configures_elixir_phoenix_and_github() {
-  local provisioner
-
-  provisioner="$(embedded_provisioner)"
-
-  grep -Eq '^[[:space:]]+gh[[:space:]]' <<<"$provisioner" &&
-    grep -Eq '^[[:space:]]+inotify-tools[[:space:]]' <<<"$provisioner" &&
-    grep -Eq '^[[:space:]]+postgresql[[:space:]]' <<<"$provisioner" &&
-    grep -Fq "download \"https://mise.run\" \"\$mise_installer\"" \
-      <<<"$provisioner" &&
-    grep -Fq "\"\$mise_bin\" use --global \"erlang@\${ERLANG_VERSION}\"" \
-      <<<"$provisioner" &&
-    grep -Fq "\"\$mise_bin\" use --global \"elixir@\${ELIXIR_VERSION}\"" \
-      <<<"$provisioner" &&
-    grep -Fq 'mix local.hex --force' <<<"$provisioner" &&
-    grep -Fq 'mix local.rebar --force' <<<"$provisioner" &&
-    grep -Fq "mix archive.install hex phx_new \"\$PHOENIX_VERSION\" --force" \
-      <<<"$provisioner" &&
-    grep -Fq "ALTER SYSTEM SET listen_addresses TO 'localhost';" \
-      <<<"$provisioner" &&
-    grep -Fq 'systemctl is-active --quiet postgresql.service' \
-      <<<"$provisioner" &&
-    grep -Fq 'gh --version' <<<"$provisioner" &&
-    grep -Fq "cat >\"\${DEV_HOME}/.codex/AGENTS.md\"" <<<"$provisioner" &&
-    grep -Fq 'create or update a draft pull request' <<<"$provisioner" &&
-    grep -Fq 'git config --global push.autoSetupRemote true' \
-      <<<"$provisioner" &&
-    grep -Fq 'mix phx.new --version' <<<"$provisioner" &&
-    grep -Fq "\$HOME/.local/share/mise/shims" <<<"$provisioner"
-}
-
-provisioner_configures_github_onboarding() {
-  local helper
-  local provisioner
-
-  helper="$(embedded_github_helper)"
-  provisioner="$(embedded_provisioner)"
-
-  # Die geprüften Skriptfragmente enthalten absichtlich Variablenliterale.
-  # shellcheck disable=SC2016
-  grep -Fq "gh auth login \\" <<<"$helper" &&
-    grep -Fq -- '--hostname "$GITHUB_HOST"' <<<"$helper" &&
-    grep -Fq -- '--git-protocol https' <<<"$helper" &&
-    grep -Fq -- '--web' <<<"$helper" &&
-    grep -Fq 'gh auth setup-git --hostname "$GITHUB_HOST"' <<<"$helper" &&
-    grep -Fq '${account_id}+${login}@users.noreply.github.com' \
-      <<<"$helper" &&
-    grep -Fq 'git config --global user.name "$git_name"' <<<"$helper" &&
-    grep -Fq 'git config --global user.email "$git_email"' <<<"$helper" &&
-    grep -Fq 'codex-devbox-github --first-login' <<<"$provisioner" &&
-    grep -Fq 'codex-devbox-github --help' <<<"$provisioner"
-}
-
-provisioner_configures_remote_control() {
-  local helper
-  local provisioner
-
-  helper="$(embedded_remote_control_helper)"
-  provisioner="$(embedded_provisioner)"
-
-  grep -Fq \
-    'cat >/etc/systemd/user/codex-remote-control.service <<UNIT' \
-    <<<"$provisioner" &&
-    grep -Fq \
-      "ExecStart=\${DEV_HOME}/.local/bin/codex remote-control start" \
-      <<<"$provisioner" &&
-    grep -Fq \
-      "ExecStop=\${DEV_HOME}/.local/bin/codex remote-control stop" \
-      <<<"$provisioner" &&
-    grep -Fq 'Type=oneshot' <<<"$provisioner" &&
-    grep -Fq 'RemainAfterExit=yes' <<<"$provisioner" &&
-    grep -Fq 'WantedBy=default.target' <<<"$provisioner" &&
-    grep -Fq "loginctl enable-linger \"\$DEV_USER\"" <<<"$provisioner" &&
-    grep -Fq "systemctl start \"user@\${dev_uid}.service\"" \
-      <<<"$provisioner" &&
-    grep -Fq \
-      "DBUS_SESSION_BUS_ADDRESS=\"unix:path=/run/user/\${dev_uid}/bus\"" \
-      <<<"$provisioner" &&
-    grep -Fq "export XDG_RUNTIME_DIR=\"\$USER_RUNTIME_DIR\"" \
-      <<<"$helper" &&
-    grep -Fq "[[ -S \"\$CONTROL_SOCKET\" ]]" <<<"$helper" &&
-    grep -Fq \
-      "run_as_dev \"\${DEV_HOME}/.local/bin/codex\" remote-control start --help" \
-      <<<"$provisioner" &&
-    grep -Fq "\"\$CODEX_BIN\" login --device-auth" <<<"$helper" &&
-    grep -Fq \
-      "systemctl --user enable --now \"\$SERVICE_NAME\"" \
-      <<<"$helper" &&
-    grep -Fq "\"\$CODEX_BIN\" remote-control pair" <<<"$helper" &&
-    grep -Fq 'codex-devbox-remote-control --first-login' <<<"$provisioner"
-}
-
-run_test "valid IPv4 addresses" accepts_valid_ipv4
-run_test "invalid IPv4 addresses" rejects_invalid_ipv4
-run_test "IPv4 CIDR validation" validates_ipv4_cidr
-run_test "static IPv4 network semantics" validates_static_network_semantics
-run_test "IPv4 integer conversion" converts_ipv4_to_integer
-run_test "Proxmox versions are parsed" parses_supported_pve_versions
-run_test "Remote Control versions are validated" validates_remote_control_versions
-run_test "real SSH public key" validates_real_ssh_key
-run_test "malformed SSH public keys" rejects_malformed_ssh_keys
-run_test "valid installation settings" accepts_valid_settings
-run_test "installation settings without SSH" accepts_settings_without_ssh
-run_test "agent forwarding requires SSH" rejects_agent_forwarding_without_ssh
-run_test "root user is rejected" rejects_root_user
-run_test "invalid static network is rejected" rejects_invalid_static_network
-run_test "usable static network is accepted" accepts_usable_static_network
-run_test "unusable static network is rejected" rejects_unusable_static_network
-run_test "undersized resources are rejected" rejects_undersized_resources
-run_test "VMID is checked cluster-wide" checks_vmid_cluster_wide
-run_test "occupied VMID is rejected" rejects_occupied_vmid
-run_test "insufficient storage is rejected" rejects_missing_storage_capacity
-run_test "unknown CLI option returns exit code 2" rejects_unknown_option
-run_test "version and LTS default are current" reports_current_version_and_lts_default
-run_test "failed commands are summarized" summarizes_failed_commands
-run_test "latest amd64 template is selected" selects_latest_amd64_template
-run_test "embedded provisioner syntax" validates_embedded_provisioner_syntax
-run_test "embedded SSH helper syntax" validates_embedded_ssh_helper_syntax
-run_test "SSH helper key and access management" ssh_helper_adds_key_and_controls_service
-run_test "embedded GitHub helper syntax" validates_embedded_github_helper_syntax
-run_test "GitHub helper login, credentials and identity" github_helper_configures_login_credentials_and_identity
-run_test "embedded Remote Control helper syntax" validates_embedded_remote_control_helper_syntax
-run_test "Remote Control helper login, service and pairing" remote_control_helper_runs_login_service_and_pairing
-run_test "provisioner uses safe user context" provisioner_uses_safe_user_context
-run_test "provisioner reports inner failures" provisioner_reports_inner_failures
-run_test "provisioner uses portable locale" provisioner_uses_portable_locale
-run_test "provisioner configures fd for non-login shells" provisioner_configures_fd_for_non_login_shells
-run_test "provisioner prepares sshd runtime" provisioner_prepares_sshd_runtime
-run_test "provisioner verifies SSH security" provisioner_verifies_effective_ssh_security
-run_test "provisioner configures optional SSH access" provisioner_configures_optional_ssh_access
-run_test "provisioner checks critical endpoints" provisioner_checks_critical_endpoints
-run_test "provisioner configures Elixir, Phoenix and GitHub" provisioner_configures_elixir_phoenix_and_github
-run_test "provisioner configures GitHub onboarding" provisioner_configures_github_onboarding
-run_test "provisioner configures Remote Control" provisioner_configures_remote_control
+run_test "Bash syntax" scripts_have_valid_syntax
+run_test "metadata JSON" metadata_is_valid_json
+run_test "Community file layout" uses_community_file_layout
+run_test "standard CT defaults" ct_script_has_standard_defaults
+run_test "APP maps to installer filename" ct_app_name_maps_to_installer
+run_test "preview source routing" preview_source_routes_framework_and_installer
+run_test "standard CT orchestration" ct_script_uses_standard_orchestration
+run_test "standard update path" ct_script_has_update_path
+run_test "no duplicated Proxmox core" ct_script_does_not_duplicate_proxmox_core
+run_test "install lifecycle" install_script_uses_community_lifecycle
+run_test "tools.func helpers" install_script_uses_tools_helpers
+run_test "bare-metal install" install_script_is_bare_metal
+run_test "least-privilege developer user" developer_user_is_least_privilege
+run_test "SSH key directions" ssh_onboarding_distinguishes_key_directions
+run_test "unsupported CLI Remote service removed" unsupported_cli_remote_service_is_absent
+run_test "supported mobile connection instructions" remote_instructions_use_supported_path
+run_test "manager command surface" manager_exposes_expected_commands
+run_test "manager rejects unknown commands" manager_rejects_unknown_commands
+run_test "metadata matches scripts" metadata_matches_scripts
+run_test "no hardcoded default credentials" no_hardcoded_default_credentials
+run_test "managed secret permissions" managed_secrets_have_restricted_permissions
+run_test "optional repeatable onboarding" first_login_onboarding_is_optional_and_repeatable
+run_test "updates preserve user state" update_preserves_user_state
 
 printf '\n%d passed, %d failed\n' "$PASSED" "$FAILED"
 ((FAILED == 0))

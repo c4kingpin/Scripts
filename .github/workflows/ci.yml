@@ -27,10 +27,22 @@ jobs:
           sudo apt-get install -y --no-install-recommends shellcheck
 
       - name: Validate Bash syntax
-        run: bash -n codex-devbox.sh tests/test-codex-devbox.sh
+        run: >-
+          bash -n
+          ct/codex-devbox.sh
+          install/codex-devbox-install.sh
+          tests/test-codex-devbox.sh
+
+      - name: Validate metadata JSON
+        run: python3 -m json.tool json/codex-devbox.json >/dev/null
 
       - name: Run regression tests
         run: bash tests/test-codex-devbox.sh
 
       - name: Run ShellCheck
-        run: shellcheck -x codex-devbox.sh tests/test-codex-devbox.sh
+        run: >-
+          shellcheck -x
+          --exclude=SC1090,SC1091,SC2086,SC2154
+          ct/codex-devbox.sh
+          install/codex-devbox-install.sh
+          tests/test-codex-devbox.sh

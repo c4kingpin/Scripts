@@ -1,354 +1,265 @@
-# Codex Dev Box
+# Codex DevBox für Proxmox
 
-Interaktiver Installer für eine unprivilegierte Ubuntu-24.04-LXC-Devbox auf
-Proxmox VE. Das Skript richtet optionalen SSH-Public-Key-Zugriff, Node.js,
-Python, Erlang/Elixir mit Phoenix, lokales PostgreSQL, GitHub-Werkzeuge, die
-Codex CLI und optionales Remote Control mit persistentem Autostart ein.
+Dieses Repository enthält einen Community-Scripts-kompatiblen LXC-Installer
+für eine isolierte Codex-Entwicklungsumgebung. Die Struktur entspricht dem
+aktuellen Entwicklungsrepository
+[ProxmoxVED](https://github.com/community-scripts/ProxmoxVED):
 
-## Voraussetzungen
+- `ct/codex-devbox.sh` – Proxmox-Dialog, Container-Erstellung und Updates
+- `install/codex-devbox-install.sh` – Installation innerhalb des Containers
+- `json/codex-devbox.json` – Community-Scripts-Metadaten
 
-- Proxmox VE 8 oder neuer auf einem `amd64`-Host
-- Ausführung als `root` direkt auf dem Proxmox-VE-Host
-- interaktives Terminal
-- aktive Proxmox-Storages für `rootdir` und `vztmpl`
-- vorhandene Linux-Bridge, standardmäßig `vmbr0`
-- Internetzugriff für Host und Container
-- für sofortigen SSH-Zugang: öffentlicher Schlüssel des zugreifenden Geräts
-- für Veröffentlichungen: GitHub-Konto und Zugriff auf die vorgesehenen
-  Repositories
-- für Remote Control: ChatGPT-Konto und Workspace mit Codex-Zugriff sowie ein
-  unterstützter ChatGPT-Remote-Client
+Der frühere eigenständige Proxmox-Monolith wurde durch die zentralen
+Community-Scripts-Funktionen ersetzt. Storage-, Netzwerk-, Template-,
+Ressourcen- und Container-Dialoge kommen dadurch direkt aus dem Upstream-
+Framework.
 
-## Verwendung
+## Standardkonfiguration
 
-```bash
-bash ./codex-devbox.sh
-```
+| Einstellung | Standard |
+| --- | --- |
+| Betriebssystem | Debian 13 |
+| Container | unprivilegiert |
+| CPU | 4 Kerne |
+| RAM | 8192 MiB |
+| Speicher | 32 GiB |
+| Architektur | amd64 |
+| Benutzer | `dev` |
+| Workspace | `/home/dev/workspace` |
 
-Der Standardmodus erstellt einen Container mit 4 CPU-Kernen, 8 GiB RAM,
-512 MiB Swap, 32 GiB Disk und DHCP. Im erweiterten Modus lassen sich
-Ressourcen, Storages, Netzwerk und SSH-Agent-Forwarding konfigurieren. Für
-manuelle Werte gelten mindestens 2 GiB RAM und 16 GiB Disk. Statische
-IPv4-Konfigurationen benötigen eine nutzbare Host-Adresse und ein Gateway im
-selben `/1`- bis `/30`-Subnetz.
+Installiert werden unter anderem Codex CLI, Node.js 24, Git, Git LFS, GitHub
+CLI, Python, ShellCheck, ripgrep, `fd`, Erlang/OTP, Elixir, Phoenix und
+PostgreSQL. Erlang, Elixir und Phoenix werden für den Benutzer `dev` über
+`mise` verwaltet.
 
-SSH ist optional. Ohne hinterlegten Schlüssel wird der SSH-Zugang deaktiviert;
-die Devbox bleibt über die Proxmox-Konsole nutzbar. Ein SSH-Zugang kann beim
-First-Login-Onboarding oder später aktiviert werden.
+## Installation
 
-Für reproduzierbare Installationen können konkrete Codex-, Erlang-, Elixir- und
-Phoenix-Versionen gesetzt werden. Standard ist die aktuelle LTS-Linie Node.js
-24; Node.js 22 bleibt als Maintenance-LTS-Option verfügbar:
+Das Skript wird in der Proxmox-VE-Shell als `root` gestartet.
+
+Solange die Dateien in diesem eigenständigen Repository liegen:
 
 ```bash
-CODEX_RELEASE=0.145.0 \
-ERLANG_VERSION=28.4 \
-ELIXIR_VERSION=1.20.2 \
-PHOENIX_VERSION=1.8.9 \
-NODE_MAJOR=24 \
-bash ./codex-devbox.sh
+CODEX_DEVBOX_SOURCE_URL="https://raw.githubusercontent.com/c4kingpin/Scripts/master" \
+  bash -c "$(curl -fsSL https://raw.githubusercontent.com/c4kingpin/Scripts/master/ct/codex-devbox.sh)"
 ```
 
-Remote Control einschließlich manuellem Pairing benötigt mindestens Codex
-`0.143.0`. Eine explizit gesetzte ältere oder gleich alte Vorabversion wird
-bereits vor der Container-Erstellung abgelehnt. Die Codex CLI kennzeichnet
-`remote-control` derzeit noch als experimentell; der Installer prüft die
-Funktion deshalb zusätzlich nach der Installation.
-
-Weitere Optionen:
+`CODEX_DEVBOX_SOURCE_URL` sorgt dafür, dass das offizielle Community-Framework
+den zugehörigen Installer aus diesem Repository lädt. Nach einer Aufnahme in
+`community-scripts/ProxmoxVED` genügt der normale Community-Aufruf:
 
 ```bash
-bash ./codex-devbox.sh --help
-bash ./codex-devbox.sh --version
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/community-scripts/ProxmoxVED/main/ct/codex-devbox.sh)"
 ```
 
-## Elixir und Phoenix
+Das Community-Scripts-Framework bietet die Standard- und erweiterten
+Installationsdialoge. Darin können unter anderem VMID, Hostname, Storage,
+Bridge, IP-Konfiguration, DNS und ein vorhandener SSH-Public-Key festgelegt
+werden.
 
-`mise` verwaltet Erlang/OTP und Elixir im Benutzerkontext. Dadurch kann ein
-Repository mit `mise.toml` oder `.tool-versions` eigene Laufzeitversionen
-festlegen, ohne das Basissystem umzubauen. Hex, Rebar und der gepinnte
-`phx_new`-Generator sind bereits eingerichtet:
+## Erster Login und Onboarding
 
-```bash
-elixir --version
-mix phx.new meine_app
-cd meine_app
-mix setup
-mix phx.server
-```
-
-PostgreSQL läuft als lokaler Systemdienst und lauscht ausschließlich auf
-`localhost`. Für die von Phoenix erzeugte Entwicklungskonfiguration stehen
-Benutzer `postgres` und Passwort `postgres` bereit. Die Zugangsdaten liegen
-zusätzlich in `~/.pgpass` mit Modus `0600`. `inotify-tools` ermöglicht Phoenix
-Live Reload unter Linux.
-
-## Zugriff und SSH-Onboarding
-
-Mit vorkonfiguriertem SSH-Schlüssel öffnet man die Entwickler-Shell wie gewohnt:
-
-```bash
-ssh codex-devbox
-```
-
-Ohne SSH erfolgt der erste Zugriff über die Shell des Proxmox-Hosts:
+Die Devbox ist immer über die Proxmox-Konsole nutzbar; SSH ist keine
+Voraussetzung:
 
 ```bash
 pct enter <CTID>
 sudo -iu dev
 ```
 
-Die erste interaktive Entwickler-Shell bietet als optionalen ersten
-Onboarding-Schritt an, einen öffentlichen Client-Schlüssel zu hinterlegen und
-den SSH-Zugang zu aktivieren. Der private Schlüssel wird auf dem zugreifenden
-Gerät erzeugt und bleibt dort. Wenn auf diesem Gerät noch kein Schlüssel
-existiert:
+Beim ersten interaktiven Login startet das optionale Onboarding. Es kann
+jederzeit wiederholt werden:
 
 ```bash
-ssh-keygen -t ed25519 -a 100
+codex-devbox onboard
 ```
 
-Anschließend wird ausschließlich der Inhalt von `~/.ssh/id_ed25519.pub` in das
-Onboarding eingefügt. Verwaltung auf der Devbox:
+Das Onboarding behandelt nacheinander:
+
+1. optionalen eingehenden SSH-Zugang,
+2. optionale Codex-CLI-Anmeldung per Gerätecode,
+3. GitHub-Anmeldung und Git-Identität,
+4. einen optionalen ausgehenden Ed25519-Schlüssel der Devbox,
+5. Diagnose und Hinweise zur ChatGPT-Mobilverbindung.
+
+Der Abschluss wird in
+`~/.config/codex-devbox/onboarding-complete` vermerkt. Das Onboarding kann
+trotzdem jederzeit erneut aufgerufen werden.
+
+## SSH sicher einrichten
+
+SSH bleibt deaktiviert, solange kein Public Key hinterlegt ist. Wurde im
+erweiterten Proxmox-Dialog bereits ein SSH-Key angegeben, übernimmt der
+Installer diesen für `dev` und aktiviert den Dienst.
+
+Andernfalls wird der Zugriff später eingerichtet. Der private Schlüssel wird
+auf dem Mac, Windows-PC oder sonstigen SSH-Client erzeugt, der sich mit der
+Devbox verbinden soll:
 
 ```bash
-codex-devbox-ssh --status
-codex-devbox-ssh --setup
-codex-devbox-ssh --disable
+ssh-keygen -t ed25519 -a 100 -f ~/.ssh/codex-devbox
 ```
 
-Ubuntu 24.04 aktiviert OpenSSH standardmäßig über `ssh.socket`. Der Helfer
-verwaltet deshalb sowohl Socket als auch Service, sodass im deaktivierten
-Zustand kein SSH-Listener verbleibt. `--disable` stoppt den SSH-Zugang, behält
-aber `~/.ssh/authorized_keys`, damit der Zugang später kontrolliert reaktiviert
-werden kann. Ohne SSH lassen sich Codex-Tasks nach dem ChatGPT-Pairing über
-Remote Control steuern.
+Nur die einzelne Zeile aus `~/.ssh/codex-devbox.pub` wird im Onboarding
+eingefügt. Der private Client-Schlüssel gehört nicht auf die Devbox.
 
-## GitHub-Workflow
-
-Die GitHub CLI `gh` ist installiert. In der ersten interaktiven
-Entwickler-Shell bietet die Devbox als zweiten Onboarding-Schritt die
-GitHub-Einrichtung an. Sie läuft absichtlich im Benutzerterminal, damit keine
-Zugangsdaten im Proxmox-Installationslog landen.
-
-Der Ablauf:
-
-1. `gh auth login --web` meldet `github.com` per Browser-/Gerätecode an.
-2. Für Git-Operationen wird HTTPS gewählt; `gh auth setup-git` richtet den
-   Credential-Helper ohne manuell kopierte Tokens ein.
-3. Die Devbox liest Benutzername, ID und Anzeigename des angemeldeten Kontos.
-4. Name und E-Mail für Commits werden bestätigt. Wenn noch keine Git-E-Mail
-   gesetzt ist, wird aus Datenschutzgründen die persönliche
-   GitHub-Noreply-Adresse vorgeschlagen.
-5. Anmeldung, Credential-Helper und Git-Identität werden abschließend geprüft.
-
-Die Einrichtung kann übersprungen, geprüft oder wiederholt werden:
+Verwaltung innerhalb des Containers:
 
 ```bash
-codex-devbox-github --status
-codex-devbox-github --setup
+codex-devbox ssh status
+sudo /usr/local/bin/codex-devbox ssh setup
+sudo /usr/local/bin/codex-devbox ssh disable
 ```
 
-Der vorgesehene Ablauf arbeitet auf einem Task-Branch, prüft die Änderungen und
-pusht anschließend zu GitHub:
+Die SSH-Konfiguration erlaubt ausschließlich Public-Key-Anmeldung für `dev`.
+Root-, Passwort- und Keyboard-Interactive-Login sowie Agent-, TCP-, Socket-,
+X11- und Tunnel-Forwarding sind deaktiviert.
+
+## Devbox-Schlüssel und GitHub
+
+Die Richtung der beiden Schlüsseltypen ist bewusst getrennt:
+
+- Der Client-Schlüssel authentifiziert Mac oder Windows **an der Devbox**.
+- Der optionale Devbox-Schlüssel authentifiziert die Devbox **an GitHub oder
+  einem anderen Git-Server**.
+
+GitHub wird standardmäßig per HTTPS über die GitHub CLI eingerichtet:
 
 ```bash
-git switch -c feature/meine-aenderung
-# entwickeln und projektspezifische Tests ausführen
-git diff --check
-git add -A
-git commit -m "Beschreibung"
-git push --set-upstream origin HEAD
-gh pr create --draft --fill
+codex-devbox github setup
+codex-devbox github status
 ```
 
-Die Devbox hinterlegt denselben Ablauf als kurze globale Arbeitsvereinbarung in
-`~/.codex/AGENTS.md`. Repository-spezifische `AGENTS.md`-Dateien können ihn für
-das jeweilige Projekt präzisieren. Ohne abgeschlossene `gh`-Anmeldung oder bei
-ausdrücklich lokaler Arbeit führt Codex keine GitHub-Veröffentlichung aus.
-
-Die Anmeldung wird von `gh` im Benutzerkontext verwaltet und weder in ein
-Repository noch in das Installationslog geschrieben. Zum Entfernen der
-GitHub-Anmeldung:
+Ein zusätzlicher ausgehender SSH-Schlüssel kann erzeugt und nach erfolgreicher
+GitHub-Anmeldung hochgeladen werden:
 
 ```bash
-gh auth logout --hostname github.com
+codex-devbox keys generate
+codex-devbox keys status
+codex-devbox keys upload-github
 ```
 
-## Remote Control
+Private Schlüssel, GitHub-Tokens und Codex-Anmeldedaten werden weder vom
+Installer ausgegeben noch in dieses Repository geschrieben.
 
-Als dritten First-Login-Schritt bietet die Devbox die Remote-Control-Einrichtung
-an. Sie wird bewusst erst nach der Provisionierung ausgeführt, damit weder
-ChatGPT-Zugangsdaten noch Pairing-Codes im Proxmox-Installationslog landen.
+## Codex-Anmeldung
 
-Der Ablauf:
-
-1. Die Devbox prüft mit `codex login status`, ob Codex angemeldet ist.
-2. Falls nötig, startet `codex login --device-auth` den für headless Systeme
-   vorgesehenen OAuth-Gerätecode-Flow.
-3. Nach erfolgreicher Anmeldung aktiviert die Devbox
-   `codex-remote-control.service` als `systemd`-Benutzerdienst.
-4. `codex remote-control pair` erzeugt einen kurzlebigen Pairing-Code.
-5. Der Benutzer verbindet damit den Remote-Client im selben ChatGPT-Konto und
-   Workspace.
-
-Die Einrichtung kann beim ersten Login zurückgestellt und jederzeit erneut
-gestartet werden:
+Die Codex-Anmeldung findet erst im Benutzerterminal statt, niemals während der
+Installation. Für die headless Devbox verwendet der Manager den Gerätecode-
+Flow:
 
 ```bash
-codex-devbox-remote-control --pair
+codex-devbox auth login
+codex-devbox auth status
+codex-devbox auth logout
 ```
 
-Verwaltung und Diagnose:
+Codex verwaltet seine Anmeldung selbst unter `~/.codex`. Dieser Ordner darf
+nicht kopiert, veröffentlicht oder eingecheckt werden. Die CLI-Anmeldung ist
+von der Einrichtung einer ChatGPT-Remote-Verbindung in der Desktop-App
+getrennt.
+
+## ChatGPT auf iPhone oder iPad
+
+Die unterstützte Verbindung läuft über einen gekoppelten Desktop-Rechner:
+
+```text
+ChatGPT auf iOS
+  → ChatGPT Desktop auf macOS oder Windows
+  → SSH-Verbindung zur Devbox
+  → Projekt unter /home/dev/workspace
+```
+
+Die Remote-Verbindung wird in der ChatGPT-Desktop-App unter den SSH-
+Verbindungen eingerichtet. Sie kann nicht über einen `codex remote-control`
+CLI-Dienst auf der Linux-Devbox gestartet werden. Danach kann die gekoppelte
+iOS-App auf die vom Desktop bereitgestellte Remote-Umgebung zugreifen.
+
+Die aktuellen Hinweise zeigt auch:
 
 ```bash
-codex-devbox-remote-control --status
-codex-devbox-remote-control --pair
-codex-devbox-remote-control --disable
-journalctl --user -u codex-remote-control.service -n 100
+codex-devbox remote-info
 ```
 
-Der Verwaltungsbefehl setzt `XDG_RUNTIME_DIR` und die Adresse des
-systemd-User-Bus selbst. Dadurch funktioniert `systemctl --user` auch in der
-Proxmox-LXC-Konsole, die diese Sitzungsvariablen nicht immer bereitstellt.
-Falls der User-Manager noch nicht läuft, startet der Befehl ihn über das
-bereits konfigurierte passwortlose `sudo`. Zur Diagnose:
+Ohne SSH bleibt die Devbox vollständig über `pct enter` und `sudo -iu dev`
+nutzbar.
+
+## PostgreSQL
+
+Der Installer legt die lokale Entwicklungsdatenbank `devbox` und die Rolle
+`dev` mit einem zufälligen Passwort an. Die Zugangsdaten liegen ausschließlich
+im Container:
+
+```text
+/home/dev/.pgpass
+/home/dev/.config/codex-devbox/postgres.env
+```
+
+Beide Dateien gehören `dev` und haben Modus `0600`. Für ein Phoenix-Projekt
+kann die Umgebung beispielsweise so geladen werden:
 
 ```bash
-sudo systemctl status "user@$(id -u).service"
+set -a
+source ~/.config/codex-devbox/postgres.env
+set +a
 ```
 
-Der systemd-Benutzerdienst startet und stoppt den Codex App-Server-Daemon als
-Entwickler-Benutzer. Die Einrichtung wartet auf dessen lokalen Control-Socket,
-bevor sie den Pairing-Code anfordert. User-Linger hält den Benutzerdienst auch
-ohne aktive SSH-Sitzung verfügbar; zusammen mit dem bereits gesetzten Proxmox-
-Parameter `onboot=1` startet Remote Control nach einem Host- oder Container-
-Neustart automatisch. Vor der ersten erfolgreichen Anmeldung und Einrichtung
-bleibt der Dienst deaktiviert.
+## Betrieb und Updates
 
-Remote Control benötigt eine ChatGPT-Anmeldung mit Codex-Zugriff. Eine
-vorhandene API-Key-Anmeldung kann lokale Codex-Aufgaben ausführen, erfüllt aber
-nicht zwingend die ChatGPT-Workspace-Voraussetzungen für Remote Control. In
-diesem Fall:
+Diagnose:
 
 ```bash
-codex logout
-codex-devbox-remote-control --pair
+codex-devbox doctor
 ```
 
-Der Verwaltungsbefehl speichert selbst keine Tokens. Codex verwaltet die
-Anmeldung in seinem Auth-Cache; eine vorhandene `~/.codex/auth.json` wird auf
-Modus `0600` gesetzt. Diese Datei enthält Zugangsdaten und darf weder kopiert
-noch eingecheckt werden. Das Abmelden mit `codex logout` entfernt die Codex-
-Anmeldung. Anschließend sollte Remote Control deaktiviert oder die Einrichtung
-nach einer erneuten Anmeldung wiederholt werden.
+Der offizielle Updatepfad wird über `update_script()` im CT-Wrapper
+bereitgestellt. Auf dem Proxmox-Host kann derselbe Installationsaufruf erneut
+gestartet und der vorhandene Container zum Update ausgewählt werden. Innerhalb
+des Containers steht zusätzlich der Manager zur Verfügung:
 
-Workspace-Administratoren können Remote Control deaktivieren oder zusätzliche
-SSO-, MFA- beziehungsweise Passkey-Schritte verlangen. Die Devbox öffnet keinen
-App-Server-Port im Netzwerk; App-Server-Transporte sollten nicht direkt in ein
-öffentliches oder gemeinsam genutztes Netz veröffentlicht werden.
+```bash
+sudo codex-devbox update
+```
 
-Remote-Sitzungen übernehmen die lokalen Berechtigungen der Devbox. Da der
-Entwickler-Benutzer passwortloses `sudo` besitzt, dürfen ausschließlich
-vertrauenswürdige Geräte gekoppelt werden. Nicht mehr verwendete Verbindungen
-sollten im Remote-Client entfernt und der Dienst auf der Devbox mit
-`codex-devbox-remote-control --disable` abgeschaltet werden.
+Das Update aktualisiert Debian-Pakete, Codex CLI und die verwaltete
+Erlang-/Elixir-/Phoenix-Toolchain. Workspace, SSH-Schlüssel, Codex-
+Anmeldedaten, Git-Konfiguration und PostgreSQL-Daten werden nicht gelöscht.
 
-Offizielle Details:
-
-- [Remote connections](https://learn.chatgpt.com/docs/remote-connections)
-- [Authentication](https://learn.chatgpt.com/docs/auth)
-- [Codex CLI changelog](https://learn.chatgpt.com/docs/changelog)
-
-## Sicherheitsprofil
-
-- unprivilegierter LXC-Container
-- SSH ist optional und ohne hinterlegten Schlüssel vollständig deaktiviert
-- bei aktiviertem SSH ausschließlich Public-Key-Authentifizierung
-- Root-Login, Passwort-Login, X11-Forwarding und SSH-Tunnel deaktiviert
-- SSH-Agent-Forwarding standardmäßig deaktiviert
-- effektive SSH-Konfiguration wird vor dem Dienststart mit `sshd -T` geprüft
-- automatische Sicherheitsupdates aktiviert
-- PostgreSQL ist auf Loopback-Zugriff beschränkt; die lokale
-  Entwicklungsanmeldung liegt mit Modus `0600` in `~/.pgpass`
-- NodeSource-Schlüssel wird vor der Verwendung gegen seinen Fingerprint
-  geprüft
-- Codex wird über den offiziellen Standalone-Installer installiert; dieser
-  verifiziert die heruntergeladenen Release-Artefakte per SHA-256
-- die GitHub-Anmeldung erfolgt erst im Benutzerterminal; die GitHub CLI
-  übernimmt die HTTPS-Credentials, ohne Tokens in Git-Konfiguration oder
-  Installationslog zu schreiben
-- Remote Control wird erst nach interaktiver ChatGPT-Anmeldung aktiviert und
-  öffnet keinen öffentlichen Listener
-- der Pairing-Code wird nur im Benutzerterminal ausgegeben, nicht im
-  Installationslog
-- Installationslogs liegen mit Modus `0600` unter
-  `/var/log/codex-devbox/`
-
-Der Entwickler-Benutzer besitzt absichtlich passwortloses `sudo`, damit Codex
-Werkzeuge nachinstallieren kann. Die Devbox sollte deshalb als vertrauensarme
-Arbeitsumgebung behandelt und nicht ohne zusätzliche Proxmox-Firewallregeln
-direkt aus dem Internet erreichbar gemacht werden.
-
-## Produktionsprüfungen
-
-Vor der Erstellung prüft das Skript unter anderem:
-
-- Proxmox-Version, Host-Architektur und benötigte Host-Werkzeuge
-- Cluster-weite Verfügbarkeit der VMID, erneut unmittelbar vor `pct create`
-- Bridge, Storage-Fähigkeiten und freien Speicherplatz
-- Ressourcenuntergrenzen und vollständige Netzparameter
-- DNS-Auflösung aller benötigten Ubuntu-, NodeSource-, Hex-, mise- und
-  Codex-Endpunkte
-- Template-Architektur und Auswahl des neuesten Ubuntu-24.04-Templates
-
-Nach der Provisionierung werden Node.js, npm, Git LFS, GitHub CLI,
-GitHub-Onboarding, Python, Erlang/OTP, Elixir, Mix, Phoenix, PostgreSQL,
-ripgrep, `fd`, Codex, Remote-Control-Verwaltung und User-Service, User-Linger,
-passwortloses `sudo`, Workspace-Schreibzugriff, SSH-Konfiguration und der
-gewählte SSH-Aktivierungsstatus sowie APT-Timer verifiziert. Erst danach meldet
-der Installer Erfolg.
-
-## Fehlerbehandlung
-
-Bei einem Fehler nach der Container-Erstellung bleibt der unvollständige
-Container zur Diagnose erhalten. Das Skript zeigt Logpfad und passende
-`pct`-Befehle an. Fehler innerhalb des Containers enthalten den konkreten
-Teilschritt und eine kompakte Kommandoangabe, ohne das gesamte Provisionierungs-
-skript ins Terminal zu schreiben. Parallele Installationen werden durch ein
-Host-Lock verhindert.
-
-Ein fehlgeschlagener Container wird nicht fortgesetzt. Entferne ihn nach der
-Diagnose mit den angezeigten `pct`-Befehlen und starte eine frische Installation.
-
-## Betriebsintegration
-
-Die Devbox lässt sich in vorhandene Proxmox-Firewall-, HA-, Backup- und
-Monitoring-Konzepte integrieren. Eine vollständige End-to-End-Validierung
-erfolgt auf einem Proxmox-Testhost.
+Automatische Sicherheitsupdates sind aktiviert. Da `dev` bewusst kein
+allgemeines passwortloses `sudo` besitzt, erfolgen Systemänderungen entweder
+über den eingeschränkten SSH-Onboarding-Befehl oder über die Proxmox-
+Root-Konsole.
 
 ## Tests
 
-Die lokalen Tests benötigen Bash und OpenSSH:
+Lokale Prüfungen:
 
 ```bash
-bash ./tests/test-codex-devbox.sh
-bash -n codex-devbox.sh tests/test-codex-devbox.sh
-shellcheck -x codex-devbox.sh tests/test-codex-devbox.sh
+bash -n \
+  ct/codex-devbox.sh \
+  install/codex-devbox-install.sh \
+  tests/test-codex-devbox.sh
+
+python3 -m json.tool json/codex-devbox.json >/dev/null
+bash tests/test-codex-devbox.sh
+
+shellcheck -x \
+  ct/codex-devbox.sh \
+  install/codex-devbox-install.sh \
+  tests/test-codex-devbox.sh
 ```
 
-Dieselben Prüfungen laufen bei jedem Push und Pull Request über GitHub Actions.
-Ein vollständiger End-to-End-Test benötigt einen Proxmox-VE-Testhost, weil
-Container-, Storage- und Netzwerkoperationen nicht lokal simuliert werden.
+Diese Prüfungen laufen bei Pushes und Pull Requests über GitHub Actions. Ein
+vollständiger End-to-End-Test erfordert weiterhin einen Proxmox-VE-Testhost,
+weil Container-, Storage- und Netzwerkoperationen lokal nicht realistisch
+simuliert werden können.
 
 ## Upstream-Dokumentation
 
+- [Community-Scripts: CT detailed guide](https://community-scripts.org/docs/ct/detailed_guide)
+- [Community-Scripts: Install detailed guide](https://community-scripts.org/docs/install/detailed_guide)
+- [Community-Scripts: Contribution workflow](https://github.com/community-scripts/ProxmoxVE/blob/main/CONTRIBUTING.md)
 - [Codex CLI](https://developers.openai.com/codex/cli/)
-- [Proxmox `pct`](https://pve.proxmox.com/pve-docs/pct.1.html)
-- [Proxmox `pvesm`](https://pve.proxmox.com/pve-docs/pvesm.1.html)
-- [Node.js Release-Status](https://nodejs.org/en/about/previous-releases)
-- [NodeSource Distributions](https://github.com/nodesource/distributions)
-- [Elixir installieren](https://elixir-lang.org/install/)
-- [Phoenix installieren](https://hexdocs.pm/phoenix/installation.html)
+- [ChatGPT Remote connections](https://learn.chatgpt.com/docs/remote-connections)
+- [Codex `AGENTS.md`](https://developers.openai.com/codex/guides/agents-md/)
 - [mise](https://mise.jdx.dev/)
-- [Codex-Anweisungen mit `AGENTS.md`](https://learn.chatgpt.com/docs/agent-configuration/agents-md)
+- [Phoenix installation](https://hexdocs.pm/phoenix/installation.html)
