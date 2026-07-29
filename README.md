@@ -77,9 +77,10 @@ Das Onboarding behandelt nacheinander:
 
 1. optionalen eingehenden SSH-Zugang,
 2. optionale Codex-CLI-Anmeldung per Gerätecode,
-3. GitHub-Anmeldung und Git-Identität,
-4. einen optionalen ausgehenden Ed25519-Schlüssel der Devbox,
-5. Diagnose und Hinweise zur ChatGPT-Mobilverbindung.
+3. optionalen OpenRouter-API-Key samt Modell für Codex,
+4. GitHub-Anmeldung und Git-Identität,
+5. einen optionalen ausgehenden Ed25519-Schlüssel der Devbox,
+6. Diagnose und Hinweise zur ChatGPT-Mobilverbindung.
 
 Der Abschluss wird in
 `~/.config/codex-devbox/onboarding-complete` vermerkt. Das Onboarding kann
@@ -157,6 +158,33 @@ Codex verwaltet seine Anmeldung selbst unter `~/.codex`. Dieser Ordner darf
 nicht kopiert, veröffentlicht oder eingecheckt werden. Die CLI-Anmeldung ist
 von der Einrichtung einer ChatGPT-Remote-Verbindung in der Desktop-App
 getrennt.
+
+## OpenRouter für Codex
+
+Alternativ zur Codex-CLI-Anmeldung kann ein OpenRouter-API-Key hinterlegt
+werden:
+
+```bash
+codex-devbox openrouter setup
+codex-devbox openrouter status
+```
+
+Die Einrichtung fragt den Key verdeckt und ein OpenRouter-Modell ab. Ohne
+Modellangabe wird `~openai/gpt-latest` verwendet. Der Key liegt ausschließlich
+in `~/.config/codex-devbox/openrouter.env` mit Dateimodus `0600`; Statusausgaben
+zeigen seinen Wert nie an. Codex wird über das Profil
+`~/.codex/openrouter.config.toml` mit dem OpenRouter-Endpunkt und der Responses
+API gestartet.
+
+Die OpenRouter-Einrichtung lässt sich einschließlich des gespeicherten Keys
+wieder entfernen:
+
+```bash
+codex-devbox openrouter disable
+```
+
+Danach nutzt `codex` wieder seine normale Konfiguration und gegebenenfalls die
+separate Codex-CLI-Anmeldung.
 
 ## ChatGPT auf iPhone oder iPad
 
