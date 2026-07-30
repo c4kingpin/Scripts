@@ -2,7 +2,7 @@
 
 # Copyright (c) 2021-2026 community-scripts ORG
 # Author: Jörn Siedentopf (c4kingpin)
-# License: MIT | https://github.com/community-scripts/ProxmoxVED/raw/main/LICENSE
+# License: MIT | https://github.com/community-scripts/ProxmoxVE/raw/main/LICENSE
 # Source: https://github.com/openai/codex
 
 source /dev/stdin <<<"$FUNCTIONS_FILE_PATH"
@@ -32,6 +32,7 @@ run_as_dev() {
 
 msg_info "Installing Dependencies"
 $STD apt install -y --no-install-recommends \
+  autoconf \
   bash-completion \
   build-essential \
   ca-certificates \
@@ -43,6 +44,8 @@ $STD apt install -y --no-install-recommends \
   inotify-tools \
   jq \
   less \
+  libncurses-dev \
+  libssl-dev \
   nano \
   openssh-server \
   openssl \
@@ -91,7 +94,9 @@ CURL_RETRIES=5 CURL_TIMEOUT=300 CURL_CONNECT_TO=15 \
 chmod 0755 "$mise_installer"
 run_as_dev env MISE_INSTALL_PATH="${DEV_HOME}/.local/bin/mise" sh "$mise_installer"
 rm -f "$mise_installer"
-run_as_dev env MISE_ERLANG_COMPILE=false \
+run_as_dev env \
+  MISE_ERLANG_COMPILE=true \
+  KERL_CONFIGURE_OPTIONS="--without-javac --without-wx --without-odbc" \
   "${DEV_HOME}/.local/bin/mise" use --global "erlang@${ERLANG_VERSION}"
 run_as_dev "${DEV_HOME}/.local/bin/mise" use --global "elixir@${ELIXIR_VERSION}"
 run_as_dev "${DEV_HOME}/.local/bin/mise" reshim
@@ -766,7 +771,14 @@ update_devbox() {
   npm install --global @openai/codex@latest
 
   info "Ensuring managed Erlang, Elixir and Phoenix versions"
-  run_as_dev env MISE_ERLANG_COMPILE=false \
+  apt-get install -y --no-install-recommends \
+    autoconf \
+    build-essential \
+    libncurses-dev \
+    libssl-dev
+  run_as_dev env \
+    MISE_ERLANG_COMPILE=true \
+    KERL_CONFIGURE_OPTIONS="--without-javac --without-wx --without-odbc" \
     "${DEV_HOME}/.local/bin/mise" use --global "erlang@${ERLANG_VERSION}"
   run_as_dev "${DEV_HOME}/.local/bin/mise" use --global \
     "elixir@${ELIXIR_VERSION}"
