@@ -62,11 +62,10 @@ uses_community_file_layout() {
     [[ -f "$INSTALL_SCRIPT" ]] &&
     [[ -f "$METADATA" ]] &&
     [[ ! -e "${REPO_ROOT}/codex-devbox.sh" ]] &&
-    grep -Fq 'source "$(dirname "${BASH_SOURCE[0]}")/../misc/build.func"' \
+    grep -Fq 'COMMUNITY_FRAMEWORK_URL="https://raw.githubusercontent.com/community-scripts/ProxmoxVE/main"' \
       "$CT_SCRIPT" &&
     grep -Fq 'CODEX_DEVBOX_SOURCE_URL' "$CT_SCRIPT" &&
-    grep -Fq 'relative_path" == "install/codex-devbox-install.sh"' \
-      "$CT_SCRIPT" &&
+    ! grep -Fq 'community-scripts/ProxmoxVED' "$CT_SCRIPT" &&
     grep -Fq 'source /dev/stdin <<<"$FUNCTIONS_FILE_PATH"' "$INSTALL_SCRIPT"
 }
 
@@ -95,23 +94,24 @@ preview_source_routes_framework_and_installer() {
   local preview_root="${TEST_TMP}/preview"
   local preview_log="${preview_root}/fetch.log"
 
-  mkdir -p "${preview_root}/bin" "${preview_root}/ct" "${preview_root}/misc"
+  mkdir -p "${preview_root}/bin" "${preview_root}/ct"
   cp "$CT_SCRIPT" "${preview_root}/ct/codex-devbox.sh"
   printf '%s\n' \
+    '#!/usr/bin/env bash' \
+    'printf "%s\n" "$*" >>"$PREVIEW_LOG"' \
+    'cat <<'\''BUILD_FUNC'\''' \
     'header_info() { :; }' \
-    'variables() { :; }' \
+    'variables() { var_install="codex-devbox-install"; }' \
     'color() { :; }' \
     'catch_errors() { :; }' \
     'msg_ok() { :; }' \
     'start() { :; }' \
     'description() { :; }' \
     'build_container() {' \
-    '  _cs_fetch_text misc/install.func >/dev/null' \
-    '  _cs_fetch_text install/codex-devbox-install.sh >/dev/null' \
-    '}' >"${preview_root}/misc/build.func"
-  printf '%s\n' \
-    '#!/usr/bin/env bash' \
-    'printf "%s\n" "$*" >>"$PREVIEW_LOG"' >"${preview_root}/bin/curl"
+    '  curl -fsSL "https://raw.githubusercontent.com/community-scripts/ProxmoxVE/main/misc/install.func" >/dev/null' \
+    '  curl -fsSL "https://raw.githubusercontent.com/community-scripts/ProxmoxVE/main/install/${var_install}.sh" >/dev/null' \
+    '}' \
+    'BUILD_FUNC' >"${preview_root}/bin/curl"
   chmod 0755 "${preview_root}/bin/curl"
 
   CODEX_DEVBOX_SOURCE_URL="https://example.test/codex-devbox" \
@@ -120,11 +120,37 @@ preview_source_routes_framework_and_installer() {
     bash "${preview_root}/ct/codex-devbox.sh" >/dev/null
 
   grep -Fq \
-    'https://raw.githubusercontent.com/community-scripts/ProxmoxVED/main/misc/install.func' \
+    'https://raw.githubusercontent.com/community-scripts/ProxmoxVE/main/misc/build.func' \
+    "$preview_log" &&
+    grep -Fq \
+    'https://raw.githubusercontent.com/community-scripts/ProxmoxVE/main/misc/install.func' \
     "$preview_log" &&
     grep -Fq \
       'https://example.test/codex-devbox/install/codex-devbox-install.sh' \
       "$preview_log"
+}
+
+framework_download_failure_is_explicit() {
+  local preview_root="${TEST_TMP}/download-failure"
+  local output_file="${preview_root}/output.log"
+  local status=0
+
+  mkdir -p "${preview_root}/bin" "${preview_root}/ct"
+  cp "$CT_SCRIPT" "${preview_root}/ct/codex-devbox.sh"
+  printf '%s\n' \
+    '#!/usr/bin/env bash' \
+    'exit 22' >"${preview_root}/bin/curl"
+  chmod 0755 "${preview_root}/bin/curl"
+
+  PATH="${preview_root}/bin:/usr/bin:/bin" \
+    bash "${preview_root}/ct/codex-devbox.sh" \
+    >"$output_file" 2>&1 || status=$?
+
+  [[ "$status" -eq 115 ]] &&
+    grep -Fq \
+      'FATAL: Failed to download the Community Scripts framework.' \
+      "$output_file" &&
+    ! grep -Fq 'command not found' "$output_file"
 }
 
 ct_script_uses_standard_orchestration() {
@@ -316,6 +342,7 @@ run_test "Community file layout" uses_community_file_layout
 run_test "standard CT defaults" ct_script_has_standard_defaults
 run_test "APP maps to installer filename" ct_app_name_maps_to_installer
 run_test "preview source routing" preview_source_routes_framework_and_installer
+run_test "explicit framework download failure" framework_download_failure_is_explicit
 run_test "standard CT orchestration" ct_script_uses_standard_orchestration
 run_test "standard update path" ct_script_has_update_path
 run_test "no duplicated Proxmox core" ct_script_does_not_duplicate_proxmox_core
