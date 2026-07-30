@@ -198,6 +198,17 @@ install_script_uses_tools_helpers() {
     ! grep -Fq 'deb.nodesource.com' "$INSTALL_SCRIPT"
 }
 
+erlang_source_build_supports_debian_13() {
+  grep -Fq autoconf "$INSTALL_SCRIPT" &&
+    grep -Fq libncurses-dev "$INSTALL_SCRIPT" &&
+    grep -Fq libssl-dev "$INSTALL_SCRIPT" &&
+    [[ "$(grep -Fc 'MISE_ERLANG_COMPILE=true' "$INSTALL_SCRIPT")" -eq 2 ]] &&
+    [[ "$(grep -Fc 'KERL_CONFIGURE_OPTIONS="--without-javac --without-wx --without-odbc"' \
+      "$INSTALL_SCRIPT")" -eq 2 ]] &&
+    ! grep -Fq 'MISE_ERLANG_COMPILE=false' "$INSTALL_SCRIPT" &&
+    ! grep -Fq 'community-scripts/ProxmoxVED' "$INSTALL_SCRIPT"
+}
+
 install_script_is_bare_metal() {
   ! grep -Eq 'setup_docker|docker (run|compose|pull)|podman' "$INSTALL_SCRIPT"
 }
@@ -392,6 +403,7 @@ run_test "standard update path" ct_script_has_update_path
 run_test "no duplicated Proxmox core" ct_script_does_not_duplicate_proxmox_core
 run_test "install lifecycle" install_script_uses_community_lifecycle
 run_test "tools.func helpers" install_script_uses_tools_helpers
+run_test "Debian 13 Erlang source build" erlang_source_build_supports_debian_13
 run_test "bare-metal install" install_script_is_bare_metal
 run_test "least-privilege developer user" developer_user_is_least_privilege
 run_test "SSH key directions" ssh_onboarding_distinguishes_key_directions
