@@ -19,6 +19,7 @@ NODE_VERSION="24"
 ERLANG_VERSION="28.4"
 ELIXIR_VERSION="1.20.2"
 PHOENIX_VERSION="1.8.9"
+CODEX_AUTONOMY="${CODEX_AUTONOMY:-balanced}"
 
 run_as_dev() {
   runuser -u "$DEV_USER" -- env \
@@ -154,6 +155,47 @@ cat <<'EOF' >"${DEV_HOME}/.codex/AGENTS.md"
 - Never force-push unless the user explicitly requests it.
 EOF
 
+case "$CODEX_AUTONOMY" in
+controlled)
+  codex_approval_policy="untrusted"
+  codex_sandbox_mode="read-only"
+  codex_network_access=""
+  ;;
+balanced)
+  codex_approval_policy="on-request"
+  codex_sandbox_mode="workspace-write"
+  codex_network_access="false"
+  ;;
+autonomous)
+  codex_approval_policy="never"
+  codex_sandbox_mode="workspace-write"
+  codex_network_access="true"
+  ;;
+full-access)
+  codex_approval_policy="never"
+  codex_sandbox_mode="danger-full-access"
+  codex_network_access=""
+  ;;
+*)
+  msg_error "Invalid Codex autonomy profile: ${CODEX_AUTONOMY}"
+  ;;
+esac
+
+cat <<EOF >"${DEV_HOME}/.codex/config.toml"
+# Managed by the Codex DevBox installer.
+# Change these values at any time to adjust Codex autonomy.
+approval_policy = "${codex_approval_policy}"
+sandbox_mode = "${codex_sandbox_mode}"
+EOF
+
+if [[ -n "$codex_network_access" ]]; then
+  cat <<EOF >>"${DEV_HOME}/.codex/config.toml"
+
+[sandbox_workspace_write]
+network_access = ${codex_network_access}
+EOF
+fi
+
 cat <<'EOF' >>"${DEV_HOME}/.bashrc"
 
 # Codex Dev Box
@@ -173,10 +215,12 @@ EOF
 
 chown "$DEV_USER:$DEV_USER" \
   "${DEV_HOME}/.bashrc" \
-  "${DEV_HOME}/.codex/AGENTS.md"
+  "${DEV_HOME}/.codex/AGENTS.md" \
+  "${DEV_HOME}/.codex/config.toml"
 chmod 0644 \
   "${DEV_HOME}/.bashrc" \
   "${DEV_HOME}/.codex/AGENTS.md"
+chmod 0600 "${DEV_HOME}/.codex/config.toml"
 
 run_as_dev git lfs install --skip-repo
 run_as_dev git config --global init.defaultBranch main
@@ -197,6 +241,10 @@ readonly STATE_DIR="${DEV_HOME}/.config/codex-devbox"
 readonly ONBOARDING_MARKER="${STATE_DIR}/onboarding-complete"
 readonly SSH_CONFIG="/etc/ssh/sshd_config.d/00-codex-devbox.conf"
 readonly SSH_KEY_FILE="${DEV_HOME}/.ssh/authorized_keys"
+readonly OPENROUTER_ENV="${STATE_DIR}/openrouter.env"
+readonly OPENROUTER_PROFILE="${DEV_HOME}/.codex/openrouter.config.toml"
+readonly OPENROUTER_WRAPPER="${DEV_HOME}/.local/bin/codex-openrouter"
+readonly LEGACY_OPENROUTER_WRAPPER="${DEV_HOME}/.local/bin/codex"
 readonly NODE_MAJOR="24"
 readonly ERLANG_VERSION="28.4"
 readonly ELIXIR_VERSION="1.20.2"
@@ -231,6 +279,9 @@ Commands:
   auth status         Show Codex CLI authentication status
   auth login          Authenticate Codex CLI with the device-code flow
   auth logout         Remove the Codex CLI authentication
+  openrouter status   Show OpenRouter configuration status
+  openrouter setup    Configure codex-openrouter as a fallback
+  openrouter disable  Stop using OpenRouter and remove its stored API key
   github status       Show GitHub authentication and Git identity
   github setup        Configure GitHub authentication and Git identity
   keys status         Show the Dev Box identity key
@@ -396,6 +447,143 @@ codex_auth_logout() {
   require_dev
   codex logout
   ok "Codex CLI authentication removed"
+}
+
+is_managed_openrouter_file() {
+  local path="$1"
+
+  [[ -f "$path" ]] &&
+    head -n 2 "$path" | grep -Fq "Managed by codex-devbox openrouter setup"
+}
+
+openrouter_status() {
+  require_dev
+  local model=""
+  local status=0
+
+  if is_managed_openrouter_file "$OPENROUTER_ENV"; then
+    ok "OpenRouter API key is stored (value hidden)"
+  else
+    warn "OpenRouter API key is not configured"
+    status=1
+  fi
+
+  if is_managed_openrouter_file "$OPENROUTER_PROFILE"; then
+    model="$(sed -n 's/^model = "\(.*\)"$/\1/p' "$OPENROUTER_PROFILE")"
+    ok "Codex OpenRouter profile (${model:-unknown model})"
+  else
+    warn "Codex OpenRouter profile is not configured"
+    status=1
+  fi
+
+  if is_managed_openrouter_file "$LEGACY_OPENROUTER_WRAPPER"; then
+    warn "Legacy setup still routes codex through OpenRouter; run setup again"
+    status=1
+  elif is_managed_openrouter_file "$OPENROUTER_WRAPPER"; then
+    ok "OpenRouter fallback command: codex-openrouter"
+  else
+    warn "OpenRouter fallback command is not configured"
+    status=1
+  fi
+
+  return "$status"
+}
+
+openrouter_setup() {
+  require_dev
+  [[ -t 0 && -t 1 ]] ||
+    die "OpenRouter setup requires an interactive terminal."
+
+  local api_key=""
+  local model=""
+  local path
+
+  for path in "$OPENROUTER_ENV" "$OPENROUTER_PROFILE" "$OPENROUTER_WRAPPER"; do
+    if [[ -e "$path" ]] && ! is_managed_openrouter_file "$path"; then
+      die "Refusing to overwrite unmanaged file: ${path}"
+    fi
+  done
+
+  read -r -s -p "OpenRouter API key: " api_key
+  printf '\n'
+  [[ "$api_key" == sk-or-* ]] ||
+    die "The API key must start with sk-or-."
+
+  read -r -p "OpenRouter model [~openai/gpt-latest]: " model
+  model="${model:-~openai/gpt-latest}"
+  [[ "$model" =~ ^[A-Za-z0-9._~:/-]+$ ]] ||
+    die "The OpenRouter model ID is invalid."
+
+  if is_managed_openrouter_file "$LEGACY_OPENROUTER_WRAPPER"; then
+    rm -f "$LEGACY_OPENROUTER_WRAPPER"
+  fi
+
+  install -d -m 0700 "$STATE_DIR" "${DEV_HOME}/.codex" \
+    "${DEV_HOME}/.local/bin"
+
+  {
+    printf '# Managed by codex-devbox openrouter setup\n'
+    printf 'export OPENROUTER_API_KEY=%q\n' "$api_key"
+  } >"$OPENROUTER_ENV"
+  chmod 0600 "$OPENROUTER_ENV"
+
+  cat >"$OPENROUTER_PROFILE" <<EOF
+# Managed by codex-devbox openrouter setup
+model = "${model}"
+model_provider = "openrouter"
+
+[model_providers.openrouter]
+name = "OpenRouter"
+base_url = "https://openrouter.ai/api/v1"
+env_key = "OPENROUTER_API_KEY"
+wire_api = "responses"
+EOF
+  chmod 0600 "$OPENROUTER_PROFILE"
+
+  cat >"$OPENROUTER_WRAPPER" <<'EOF'
+#!/usr/bin/env bash
+# Managed by codex-devbox openrouter setup
+set -Eeuo pipefail
+
+readonly openrouter_env="${HOME}/.config/codex-devbox/openrouter.env"
+[[ -r "$openrouter_env" ]] || {
+  printf 'error - OpenRouter API key is not configured\n' >&2
+  exit 1
+}
+# shellcheck source=/dev/null
+source "$openrouter_env"
+
+system_codex="$(PATH=/usr/local/bin:/usr/bin:/bin command -v codex || true)"
+[[ -n "$system_codex" && "$system_codex" != "$0" ]] || {
+  printf 'error - System Codex CLI was not found\n' >&2
+  exit 1
+}
+exec "$system_codex" --profile openrouter "$@"
+EOF
+  chmod 0700 "$OPENROUTER_WRAPPER"
+
+  unset api_key
+  ok "OpenRouter fallback configured"
+  info "Use codex normally for ChatGPT, then codex-openrouter as a fallback."
+  openrouter_status
+}
+
+openrouter_disable() {
+  require_dev
+  local path
+
+  for path in \
+    "$OPENROUTER_ENV" \
+    "$OPENROUTER_PROFILE" \
+    "$OPENROUTER_WRAPPER" \
+    "$LEGACY_OPENROUTER_WRAPPER"; do
+    if is_managed_openrouter_file "$path"; then
+      rm -f "$path"
+    elif [[ -e "$path" ]]; then
+      warn "Retained unmanaged file: ${path}"
+    fi
+  done
+  ok "OpenRouter disabled and its managed API key removed"
 }
 
 github_status() {
@@ -601,9 +789,10 @@ Codex Dev Box onboarding
 
 1. Optional inbound SSH access for the ChatGPT desktop host or another client
 2. Optional Codex CLI authentication using a device code
-3. GitHub authentication and Git commit identity
-4. Optional outbound Ed25519 identity key
-5. Environment diagnostics and supported ChatGPT mobile instructions
+3. Optional OpenRouter API key and model for Codex
+4. GitHub authentication and Git commit identity
+5. Optional outbound Ed25519 identity key
+6. Environment diagnostics and supported ChatGPT mobile instructions
 EOF
 
   if prompt_yes_no "Configure inbound SSH now?"; then
@@ -611,6 +800,9 @@ EOF
   fi
   if prompt_yes_no "Authenticate the Codex CLI now?"; then
     codex_auth_login
+  fi
+  if prompt_yes_no "Configure OpenRouter as a Codex fallback?" "no"; then
+    openrouter_setup
   fi
   if prompt_yes_no "Configure GitHub now?"; then
     github_setup
@@ -655,6 +847,15 @@ main() {
       ;;
     auth:logout)
       codex_auth_logout
+      ;;
+    openrouter:status)
+      openrouter_status
+      ;;
+    openrouter:setup)
+      openrouter_setup
+      ;;
+    openrouter:disable)
+      openrouter_disable
       ;;
     github:status)
       github_status

@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# shellcheck disable=SC1090,SC1091
 source "$(dirname "${BASH_SOURCE[0]}")/../misc/build.func" 2>/dev/null || source <(curl -fsSL "${COMMUNITY_SCRIPTS_URL:-https://raw.githubusercontent.com/community-scripts/ProxmoxVED/main}/misc/build.func")
 # Copyright (c) 2021-2026 community-scripts ORG
 # Author: Jörn Siedentopf (c4kingpin)
@@ -54,7 +55,57 @@ function update_script() {
   exit
 }
 
+select_codex_autonomy() {
+  local choice=""
+  local original_mode="${MODE:-default}"
+  local requested="${var_codex_autonomy:-}"
+
+  case "$requested" in
+  controlled | balanced | autonomous | full-access)
+    CODEX_AUTONOMY="$requested"
+    ;;
+  "")
+    if [[ ! -t 0 ]] ||
+      [[ "${PHS_SILENT:-0}" == "1" ]] ||
+      [[ "${var_unattended:-}" =~ ^(yes|true|1)$ ]] ||
+      [[ "${UNATTENDED:-}" =~ ^(yes|true|1)$ ]] ||
+      [[ "${METHOD:-default}" =~ ^(mydefaults|appdefaults|generated)$ ]]; then
+      CODEX_AUTONOMY="balanced"
+    else
+      MODE="advanced"
+      choice="$(
+        prompt_select \
+          "How autonomously may Codex work?" \
+          2 \
+          120 \
+          "Controlled - read-only; approve edits and commands" \
+          "Balanced - edit workspace; approve external access (recommended)" \
+          "Autonomous - workspace and network without approval prompts" \
+          "Full access - no sandbox or prompts (LXC boundary only)"
+      )"
+      MODE="$original_mode"
+
+      case "$choice" in
+      Controlled*) CODEX_AUTONOMY="controlled" ;;
+      Balanced*) CODEX_AUTONOMY="balanced" ;;
+      Autonomous*) CODEX_AUTONOMY="autonomous" ;;
+      "Full access"*) CODEX_AUTONOMY="full-access" ;;
+      *) CODEX_AUTONOMY="balanced" ;;
+      esac
+    fi
+    ;;
+  *)
+    msg_error "Invalid var_codex_autonomy: ${requested}"
+    exit 1
+    ;;
+  esac
+
+  export CODEX_AUTONOMY
+  msg_ok "Codex autonomy profile: ${CODEX_AUTONOMY}"
+}
+
 start
+select_codex_autonomy
 build_container
 description
 

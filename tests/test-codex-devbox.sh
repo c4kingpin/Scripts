@@ -133,6 +133,7 @@ ct_script_uses_standard_orchestration() {
     grep -Fxq 'color' "$CT_SCRIPT" &&
     grep -Fxq 'catch_errors' "$CT_SCRIPT" &&
     grep -Fxq 'start' "$CT_SCRIPT" &&
+    grep -Fxq 'select_codex_autonomy' "$CT_SCRIPT" &&
     grep -Fxq 'build_container' "$CT_SCRIPT" &&
     grep -Fxq 'description' "$CT_SCRIPT"
 }
@@ -218,6 +219,7 @@ manager_exposes_expected_commands() {
   grep -Fq 'onboard' <<<"$output" &&
     grep -Fq 'ssh setup' <<<"$output" &&
     grep -Fq 'auth login' <<<"$output" &&
+    grep -Fq 'openrouter setup' <<<"$output" &&
     grep -Fq 'github setup' <<<"$output" &&
     grep -Fq 'keys generate' <<<"$output" &&
     grep -Fq 'remote-info' <<<"$output" &&
@@ -290,7 +292,49 @@ managed_secrets_have_restricted_permissions() {
   grep -Fq 'chmod 0600' "$INSTALL_SCRIPT" &&
     grep -Fq '"${DEV_HOME}/.pgpass"' "$INSTALL_SCRIPT" &&
     grep -Fq '"${DEV_HOME}/.config/codex-devbox/postgres.env"' \
-      "$INSTALL_SCRIPT"
+      "$INSTALL_SCRIPT" &&
+    grep -Fq 'chmod 0600 "${DEV_HOME}/.codex/config.toml"' \
+      "$INSTALL_SCRIPT" &&
+    grep -Fq 'chmod 0600 "$OPENROUTER_ENV"' "$MANAGER"
+}
+
+codex_autonomy_is_selectable_and_persisted() {
+  grep -Fq 'select_codex_autonomy() {' "$CT_SCRIPT" &&
+    grep -Fq 'var_codex_autonomy' "$CT_SCRIPT" &&
+    grep -Fq '"How autonomously may Codex work?"' "$CT_SCRIPT" &&
+    grep -Fq 'CODEX_AUTONOMY="balanced"' "$CT_SCRIPT" &&
+    grep -Fq 'export CODEX_AUTONOMY' "$CT_SCRIPT" &&
+    grep -Fq 'CODEX_AUTONOMY="${CODEX_AUTONOMY:-balanced}"' \
+      "$INSTALL_SCRIPT" &&
+    grep -Fq 'approval_policy = "${codex_approval_policy}"' \
+      "$INSTALL_SCRIPT" &&
+    grep -Fq 'sandbox_mode = "${codex_sandbox_mode}"' "$INSTALL_SCRIPT" &&
+    grep -Fq 'network_access = ${codex_network_access}' "$INSTALL_SCRIPT" &&
+    grep -Fq 'codex_approval_policy="untrusted"' "$INSTALL_SCRIPT" &&
+    grep -Fq 'codex_approval_policy="on-request"' "$INSTALL_SCRIPT" &&
+    grep -Fq 'codex_approval_policy="never"' "$INSTALL_SCRIPT" &&
+    grep -Fq 'codex_sandbox_mode="read-only"' "$INSTALL_SCRIPT" &&
+    grep -Fq 'codex_sandbox_mode="workspace-write"' "$INSTALL_SCRIPT" &&
+    grep -Fq 'codex_sandbox_mode="danger-full-access"' "$INSTALL_SCRIPT"
+}
+
+openrouter_configuration_is_safe_and_supported() {
+  grep -Fq 'openrouter_setup() {' "$MANAGER" &&
+    grep -Fq 'read -r -s -p "OpenRouter API key: "' "$MANAGER" &&
+    grep -Fq 'OPENROUTER_WRAPPER="${DEV_HOME}/.local/bin/codex-openrouter"' \
+      "$MANAGER" &&
+    grep -Fq 'LEGACY_OPENROUTER_WRAPPER="${DEV_HOME}/.local/bin/codex"' \
+      "$MANAGER" &&
+    grep -Fq 'rm -f "$LEGACY_OPENROUTER_WRAPPER"' "$MANAGER" &&
+    grep -Fq 'export OPENROUTER_API_KEY=%q' "$MANAGER" &&
+    grep -Fq 'base_url = "https://openrouter.ai/api/v1"' "$MANAGER" &&
+    grep -Fq 'env_key = "OPENROUTER_API_KEY"' "$MANAGER" &&
+    grep -Fq 'wire_api = "responses"' "$MANAGER" &&
+    grep -Fq -- '--profile openrouter "$@"' "$MANAGER" &&
+    grep -Fq 'Use codex normally for ChatGPT' "$MANAGER" &&
+    grep -Fq 'OpenRouter fallback command: codex-openrouter' "$MANAGER" &&
+    grep -Fq 'value hidden' "$MANAGER" &&
+    ! grep -Fq 'cat "$OPENROUTER_ENV"' "$MANAGER"
 }
 
 first_login_onboarding_is_optional_and_repeatable() {
@@ -331,6 +375,8 @@ run_test "manager rejects unknown commands" manager_rejects_unknown_commands
 run_test "metadata matches scripts" metadata_matches_scripts
 run_test "no hardcoded default credentials" no_hardcoded_default_credentials
 run_test "managed secret permissions" managed_secrets_have_restricted_permissions
+run_test "selectable Codex autonomy" codex_autonomy_is_selectable_and_persisted
+run_test "safe supported OpenRouter config" openrouter_configuration_is_safe_and_supported
 run_test "optional repeatable onboarding" first_login_onboarding_is_optional_and_repeatable
 run_test "updates preserve user state" update_preserves_user_state
 

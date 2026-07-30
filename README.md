@@ -26,6 +26,7 @@ Framework.
 | Architektur | amd64 |
 | Benutzer | `dev` |
 | Workspace | `/home/dev/workspace` |
+| Codex-Autonomie | ausgewogen |
 
 Installiert werden unter anderem Codex CLI, Node.js 24, Git, Git LFS, GitHub
 CLI, Python, ShellCheck, ripgrep, `fd`, Erlang/OTP, Elixir, Phoenix und
@@ -56,6 +57,31 @@ Installationsdialoge. Darin können unter anderem VMID, Hostname, Storage,
 Bridge, IP-Konfiguration, DNS und ein vorhandener SSH-Public-Key festgelegt
 werden.
 
+Vor dem Erstellen des Containers fragt das Skript zusätzlich, wie autonom Codex
+arbeiten darf:
+
+| Profil | Codex-Verhalten |
+| --- | --- |
+| Kontrolliert | Nur lesender Zugriff; Änderungen und Befehle benötigen eine Freigabe. |
+| Ausgewogen (Standard) | Codex darf den Workspace selbstständig bearbeiten und fragt für Zugriffe außerhalb des Workspace oder auf das Netzwerk. |
+| Autonom | Codex darf den Workspace bearbeiten und das Netzwerk ohne Freigabedialoge nutzen; die Workspace-Sandbox bleibt aktiv. |
+| Vollzugriff | Keine Sandbox und keine Freigabedialoge innerhalb des LXC-Containers. |
+
+Die Auswahl wird als `approval_policy` und `sandbox_mode` in
+`/home/dev/.codex/config.toml` gespeichert und kann dort später geändert werden.
+Bei einer unbeaufsichtigten Installation wird `balanced` verwendet. Alternativ
+kann das Profil vorgegeben werden:
+
+```bash
+var_codex_autonomy=autonomous \
+  CODEX_DEVBOX_SOURCE_URL="https://raw.githubusercontent.com/c4kingpin/Scripts/master" \
+  bash -c "$(curl -fsSL https://raw.githubusercontent.com/c4kingpin/Scripts/master/ct/codex-devbox.sh)"
+```
+
+Gültige Werte sind `controlled`, `balanced`, `autonomous` und `full-access`.
+`full-access` hebt nur die innere Codex-Sandbox auf; die Grenze des
+unprivilegierten LXC-Containers bleibt bestehen.
+
 ## Erster Login und Onboarding
 
 Die Devbox ist immer über die Proxmox-Konsole nutzbar; SSH ist keine
@@ -77,9 +103,10 @@ Das Onboarding behandelt nacheinander:
 
 1. optionalen eingehenden SSH-Zugang,
 2. optionale Codex-CLI-Anmeldung per Gerätecode,
-3. GitHub-Anmeldung und Git-Identität,
-4. einen optionalen ausgehenden Ed25519-Schlüssel der Devbox,
-5. Diagnose und Hinweise zur ChatGPT-Mobilverbindung.
+3. optionalen OpenRouter-API-Key samt Modell für Codex,
+4. GitHub-Anmeldung und Git-Identität,
+5. einen optionalen ausgehenden Ed25519-Schlüssel der Devbox,
+6. Diagnose und Hinweise zur ChatGPT-Mobilverbindung.
 
 Der Abschluss wird in
 `~/.config/codex-devbox/onboarding-complete` vermerkt. Das Onboarding kann
@@ -157,6 +184,42 @@ Codex verwaltet seine Anmeldung selbst unter `~/.codex`. Dieser Ordner darf
 nicht kopiert, veröffentlicht oder eingecheckt werden. Die CLI-Anmeldung ist
 von der Einrichtung einer ChatGPT-Remote-Verbindung in der Desktop-App
 getrennt.
+
+## OpenRouter für Codex
+
+Zusätzlich zur Codex-CLI-Anmeldung kann ein OpenRouter-API-Key als manueller
+Fallback hinterlegt werden:
+
+```bash
+codex-devbox openrouter setup
+codex-devbox openrouter status
+```
+
+Die Einrichtung fragt den Key verdeckt und ein OpenRouter-Modell ab. Ohne
+Modellangabe wird `~openai/gpt-latest` verwendet. Der Key liegt ausschließlich
+in `~/.config/codex-devbox/openrouter.env` mit Dateimodus `0600`; Statusausgaben
+zeigen seinen Wert nie an. Der normale Aufruf `codex` nutzt weiterhin die
+ChatGPT-Anmeldung und damit zunächst das im ChatGPT-Abo enthaltene
+Codex-Kontingent. OpenRouter wird erst mit dem separaten Befehl gestartet:
+
+```bash
+codex-openrouter
+```
+
+Dieser Befehl startet Codex über das Profil
+`~/.codex/openrouter.config.toml` mit dem OpenRouter-Endpunkt und der Responses
+API. Codex unterstützt derzeit keinen nahtlosen automatischen Providerwechsel
+nach Erreichen des ChatGPT-Limits; der Wechsel erfolgt deshalb bewusst manuell.
+
+Die OpenRouter-Einrichtung lässt sich einschließlich des gespeicherten Keys
+wieder entfernen:
+
+```bash
+codex-devbox openrouter disable
+```
+
+Dabei werden der gespeicherte Key, das Profil und `codex-openrouter` entfernt.
+Der normale `codex`-Aufruf und seine ChatGPT-Anmeldung bleiben unverändert.
 
 ## ChatGPT auf iPhone oder iPad
 
