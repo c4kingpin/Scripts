@@ -243,7 +243,8 @@ readonly SSH_CONFIG="/etc/ssh/sshd_config.d/00-codex-devbox.conf"
 readonly SSH_KEY_FILE="${DEV_HOME}/.ssh/authorized_keys"
 readonly OPENROUTER_ENV="${STATE_DIR}/openrouter.env"
 readonly OPENROUTER_PROFILE="${DEV_HOME}/.codex/openrouter.config.toml"
-readonly OPENROUTER_WRAPPER="${DEV_HOME}/.local/bin/codex"
+readonly OPENROUTER_WRAPPER="${DEV_HOME}/.local/bin/codex-openrouter"
+readonly LEGACY_OPENROUTER_WRAPPER="${DEV_HOME}/.local/bin/codex"
 readonly NODE_MAJOR="24"
 readonly ERLANG_VERSION="28.4"
 readonly ELIXIR_VERSION="1.20.2"
@@ -279,7 +280,7 @@ Commands:
   auth login          Authenticate Codex CLI with the device-code flow
   auth logout         Remove the Codex CLI authentication
   openrouter status   Show OpenRouter configuration status
-  openrouter setup    Store an API key and use OpenRouter with Codex
+  openrouter setup    Configure codex-openrouter as a fallback
   openrouter disable  Stop using OpenRouter and remove its stored API key
   github status       Show GitHub authentication and Git identity
   github setup        Configure GitHub authentication and Git identity
@@ -475,10 +476,13 @@ openrouter_status() {
     status=1
   fi
 
-  if is_managed_openrouter_file "$OPENROUTER_WRAPPER"; then
-    ok "Codex uses the OpenRouter profile by default"
+  if is_managed_openrouter_file "$LEGACY_OPENROUTER_WRAPPER"; then
+    warn "Legacy setup still routes codex through OpenRouter; run setup again"
+    status=1
+  elif is_managed_openrouter_file "$OPENROUTER_WRAPPER"; then
+    ok "OpenRouter fallback command: codex-openrouter"
   else
-    warn "Codex does not use the OpenRouter profile by default"
+    warn "OpenRouter fallback command is not configured"
     status=1
   fi
 
@@ -509,6 +513,10 @@ openrouter_setup() {
   model="${model:-~openai/gpt-latest}"
   [[ "$model" =~ ^[A-Za-z0-9._~:/-]+$ ]] ||
     die "The OpenRouter model ID is invalid."
+
+  if is_managed_openrouter_file "$LEGACY_OPENROUTER_WRAPPER"; then
+    rm -f "$LEGACY_OPENROUTER_WRAPPER"
+  fi
 
   install -d -m 0700 "$STATE_DIR" "${DEV_HOME}/.codex" \
     "${DEV_HOME}/.local/bin"
@@ -555,7 +563,8 @@ EOF
   chmod 0700 "$OPENROUTER_WRAPPER"
 
   unset api_key
-  ok "OpenRouter configured as the default Codex provider"
+  ok "OpenRouter fallback configured"
+  info "Use codex normally for ChatGPT, then codex-openrouter as a fallback."
   openrouter_status
 }
 
@@ -563,7 +572,11 @@ openrouter_disable() {
   require_dev
   local path
 
-  for path in "$OPENROUTER_ENV" "$OPENROUTER_PROFILE" "$OPENROUTER_WRAPPER"; do
+  for path in \
+    "$OPENROUTER_ENV" \
+    "$OPENROUTER_PROFILE" \
+    "$OPENROUTER_WRAPPER" \
+    "$LEGACY_OPENROUTER_WRAPPER"; do
     if is_managed_openrouter_file "$path"; then
       rm -f "$path"
     elif [[ -e "$path" ]]; then
@@ -788,7 +801,7 @@ EOF
   if prompt_yes_no "Authenticate the Codex CLI now?"; then
     codex_auth_login
   fi
-  if prompt_yes_no "Use Codex with an OpenRouter API key?" "no"; then
+  if prompt_yes_no "Configure OpenRouter as a Codex fallback?" "no"; then
     openrouter_setup
   fi
   if prompt_yes_no "Configure GitHub now?"; then

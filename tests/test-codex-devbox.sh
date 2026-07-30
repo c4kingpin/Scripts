@@ -321,11 +321,18 @@ codex_autonomy_is_selectable_and_persisted() {
 openrouter_configuration_is_safe_and_supported() {
   grep -Fq 'openrouter_setup() {' "$MANAGER" &&
     grep -Fq 'read -r -s -p "OpenRouter API key: "' "$MANAGER" &&
+    grep -Fq 'OPENROUTER_WRAPPER="${DEV_HOME}/.local/bin/codex-openrouter"' \
+      "$MANAGER" &&
+    grep -Fq 'LEGACY_OPENROUTER_WRAPPER="${DEV_HOME}/.local/bin/codex"' \
+      "$MANAGER" &&
+    grep -Fq 'rm -f "$LEGACY_OPENROUTER_WRAPPER"' "$MANAGER" &&
     grep -Fq 'export OPENROUTER_API_KEY=%q' "$MANAGER" &&
     grep -Fq 'base_url = "https://openrouter.ai/api/v1"' "$MANAGER" &&
     grep -Fq 'env_key = "OPENROUTER_API_KEY"' "$MANAGER" &&
     grep -Fq 'wire_api = "responses"' "$MANAGER" &&
     grep -Fq -- '--profile openrouter "$@"' "$MANAGER" &&
+    grep -Fq 'Use codex normally for ChatGPT' "$MANAGER" &&
+    grep -Fq 'OpenRouter fallback command: codex-openrouter' "$MANAGER" &&
     grep -Fq 'value hidden' "$MANAGER" &&
     ! grep -Fq 'cat "$OPENROUTER_ENV"' "$MANAGER"
 }

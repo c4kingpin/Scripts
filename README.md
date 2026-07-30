@@ -187,8 +187,8 @@ getrennt.
 
 ## OpenRouter für Codex
 
-Alternativ zur Codex-CLI-Anmeldung kann ein OpenRouter-API-Key hinterlegt
-werden:
+Zusätzlich zur Codex-CLI-Anmeldung kann ein OpenRouter-API-Key als manueller
+Fallback hinterlegt werden:
 
 ```bash
 codex-devbox openrouter setup
@@ -198,9 +198,18 @@ codex-devbox openrouter status
 Die Einrichtung fragt den Key verdeckt und ein OpenRouter-Modell ab. Ohne
 Modellangabe wird `~openai/gpt-latest` verwendet. Der Key liegt ausschließlich
 in `~/.config/codex-devbox/openrouter.env` mit Dateimodus `0600`; Statusausgaben
-zeigen seinen Wert nie an. Codex wird über das Profil
+zeigen seinen Wert nie an. Der normale Aufruf `codex` nutzt weiterhin die
+ChatGPT-Anmeldung und damit zunächst das im ChatGPT-Abo enthaltene
+Codex-Kontingent. OpenRouter wird erst mit dem separaten Befehl gestartet:
+
+```bash
+codex-openrouter
+```
+
+Dieser Befehl startet Codex über das Profil
 `~/.codex/openrouter.config.toml` mit dem OpenRouter-Endpunkt und der Responses
-API gestartet.
+API. Codex unterstützt derzeit keinen nahtlosen automatischen Providerwechsel
+nach Erreichen des ChatGPT-Limits; der Wechsel erfolgt deshalb bewusst manuell.
 
 Die OpenRouter-Einrichtung lässt sich einschließlich des gespeicherten Keys
 wieder entfernen:
@@ -209,8 +218,8 @@ wieder entfernen:
 codex-devbox openrouter disable
 ```
 
-Danach nutzt `codex` wieder seine normale Konfiguration und gegebenenfalls die
-separate Codex-CLI-Anmeldung.
+Dabei werden der gespeicherte Key, das Profil und `codex-openrouter` entfernt.
+Der normale `codex`-Aufruf und seine ChatGPT-Anmeldung bleiben unverändert.
 
 ## ChatGPT auf iPhone oder iPad
 
