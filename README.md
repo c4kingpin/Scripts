@@ -26,6 +26,7 @@ Framework.
 | Architektur | amd64 |
 | Benutzer | `dev` |
 | Workspace | `/home/dev/workspace` |
+| Codex-Autonomie | ausgewogen |
 
 Installiert werden unter anderem Codex CLI, Node.js 24, Git, Git LFS, GitHub
 CLI, Python, ShellCheck, ripgrep, `fd`, Erlang/OTP, Elixir, Phoenix und
@@ -55,6 +56,31 @@ Das Community-Scripts-Framework bietet die Standard- und erweiterten
 Installationsdialoge. Darin können unter anderem VMID, Hostname, Storage,
 Bridge, IP-Konfiguration, DNS und ein vorhandener SSH-Public-Key festgelegt
 werden.
+
+Vor dem Erstellen des Containers fragt das Skript zusätzlich, wie autonom Codex
+arbeiten darf:
+
+| Profil | Codex-Verhalten |
+| --- | --- |
+| Kontrolliert | Nur lesender Zugriff; Änderungen und Befehle benötigen eine Freigabe. |
+| Ausgewogen (Standard) | Codex darf den Workspace selbstständig bearbeiten und fragt für Zugriffe außerhalb des Workspace oder auf das Netzwerk. |
+| Autonom | Codex darf den Workspace bearbeiten und das Netzwerk ohne Freigabedialoge nutzen; die Workspace-Sandbox bleibt aktiv. |
+| Vollzugriff | Keine Sandbox und keine Freigabedialoge innerhalb des LXC-Containers. |
+
+Die Auswahl wird als `approval_policy` und `sandbox_mode` in
+`/home/dev/.codex/config.toml` gespeichert und kann dort später geändert werden.
+Bei einer unbeaufsichtigten Installation wird `balanced` verwendet. Alternativ
+kann das Profil vorgegeben werden:
+
+```bash
+var_codex_autonomy=autonomous \
+  CODEX_DEVBOX_SOURCE_URL="https://raw.githubusercontent.com/c4kingpin/Scripts/master" \
+  bash -c "$(curl -fsSL https://raw.githubusercontent.com/c4kingpin/Scripts/master/ct/codex-devbox.sh)"
+```
+
+Gültige Werte sind `controlled`, `balanced`, `autonomous` und `full-access`.
+`full-access` hebt nur die innere Codex-Sandbox auf; die Grenze des
+unprivilegierten LXC-Containers bleibt bestehen.
 
 ## Erster Login und Onboarding
 

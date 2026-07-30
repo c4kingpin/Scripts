@@ -19,6 +19,7 @@ NODE_VERSION="24"
 ERLANG_VERSION="28.4"
 ELIXIR_VERSION="1.20.2"
 PHOENIX_VERSION="1.8.9"
+CODEX_AUTONOMY="${CODEX_AUTONOMY:-balanced}"
 
 run_as_dev() {
   runuser -u "$DEV_USER" -- env \
@@ -154,6 +155,47 @@ cat <<'EOF' >"${DEV_HOME}/.codex/AGENTS.md"
 - Never force-push unless the user explicitly requests it.
 EOF
 
+case "$CODEX_AUTONOMY" in
+controlled)
+  codex_approval_policy="untrusted"
+  codex_sandbox_mode="read-only"
+  codex_network_access=""
+  ;;
+balanced)
+  codex_approval_policy="on-request"
+  codex_sandbox_mode="workspace-write"
+  codex_network_access="false"
+  ;;
+autonomous)
+  codex_approval_policy="never"
+  codex_sandbox_mode="workspace-write"
+  codex_network_access="true"
+  ;;
+full-access)
+  codex_approval_policy="never"
+  codex_sandbox_mode="danger-full-access"
+  codex_network_access=""
+  ;;
+*)
+  msg_error "Invalid Codex autonomy profile: ${CODEX_AUTONOMY}"
+  ;;
+esac
+
+cat <<EOF >"${DEV_HOME}/.codex/config.toml"
+# Managed by the Codex DevBox installer.
+# Change these values at any time to adjust Codex autonomy.
+approval_policy = "${codex_approval_policy}"
+sandbox_mode = "${codex_sandbox_mode}"
+EOF
+
+if [[ -n "$codex_network_access" ]]; then
+  cat <<EOF >>"${DEV_HOME}/.codex/config.toml"
+
+[sandbox_workspace_write]
+network_access = ${codex_network_access}
+EOF
+fi
+
 cat <<'EOF' >>"${DEV_HOME}/.bashrc"
 
 # Codex Dev Box
@@ -173,10 +215,12 @@ EOF
 
 chown "$DEV_USER:$DEV_USER" \
   "${DEV_HOME}/.bashrc" \
-  "${DEV_HOME}/.codex/AGENTS.md"
+  "${DEV_HOME}/.codex/AGENTS.md" \
+  "${DEV_HOME}/.codex/config.toml"
 chmod 0644 \
   "${DEV_HOME}/.bashrc" \
   "${DEV_HOME}/.codex/AGENTS.md"
+chmod 0600 "${DEV_HOME}/.codex/config.toml"
 
 run_as_dev git lfs install --skip-repo
 run_as_dev git config --global init.defaultBranch main
