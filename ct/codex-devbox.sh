@@ -1,29 +1,62 @@
 #!/usr/bin/env bash
 # shellcheck disable=SC1090,SC1091
-source "$(dirname "${BASH_SOURCE[0]}")/../misc/build.func" 2>/dev/null || source <(curl -fsSL "${COMMUNITY_SCRIPTS_URL:-https://raw.githubusercontent.com/community-scripts/ProxmoxVED/main}/misc/build.func")
 # Copyright (c) 2021-2026 community-scripts ORG
 # Author: Jörn Siedentopf (c4kingpin)
-# License: MIT | https://github.com/community-scripts/ProxmoxVED/raw/main/LICENSE
+# License: MIT | https://github.com/community-scripts/ProxmoxVE/raw/main/LICENSE
 # Source: https://github.com/openai/codex
 
-if [[ -n "${CODEX_DEVBOX_SOURCE_URL:-}" ]]; then
-  export COMMUNITY_SCRIPTS_URL="${CODEX_DEVBOX_SOURCE_URL%/}"
+readonly COMMUNITY_FRAMEWORK_URL="https://raw.githubusercontent.com/community-scripts/ProxmoxVE/main"
 
-  _cs_fetch_text() {
-    local relative_path="${1:?relative path required}"
-    local source_url="https://raw.githubusercontent.com/community-scripts/ProxmoxVED/main"
+bootstrap_framework() {
+  local local_build_func
+  local build_func=""
+  local upstream_install_base="${COMMUNITY_FRAMEWORK_URL}/install/"
+  local source_install_base=""
 
-    if [[ "$relative_path" == "install/codex-devbox-install.sh" ]]; then
-      source_url="$COMMUNITY_SCRIPTS_URL"
-    fi
-
+  local_build_func="$(dirname "${BASH_SOURCE[0]}")/../misc/build.func"
+  if [[ -r "$local_build_func" ]]; then
+    source "$local_build_func"
+  else
     if command -v curl >/dev/null 2>&1; then
-      curl -fsSL "${source_url}/${relative_path}"
+      build_func="$(
+        curl -fsSL --connect-timeout 10 --retry 5 --retry-connrefused \
+          "${COMMUNITY_FRAMEWORK_URL}/misc/build.func"
+      )" || build_func=""
+    elif command -v wget >/dev/null 2>&1; then
+      build_func="$(
+        wget -qO- --tries=5 --timeout=10 \
+          "${COMMUNITY_FRAMEWORK_URL}/misc/build.func"
+      )" || build_func=""
     else
-      wget -qO- "${source_url}/${relative_path}"
+      echo "FATAL: Neither curl nor wget is available." >&2
+      exit 115
     fi
-  }
-fi
+
+    if [[ -z "$build_func" ]]; then
+      echo "FATAL: Failed to download the Community Scripts framework." >&2
+      exit 115
+    fi
+
+    if [[ -n "${CODEX_DEVBOX_SOURCE_URL:-}" ]]; then
+      source_install_base="${CODEX_DEVBOX_SOURCE_URL%/}/install/"
+      if [[ "$build_func" != *"$upstream_install_base"* ]]; then
+        echo "FATAL: Community Scripts changed its installer download path." >&2
+        exit 115
+      fi
+      build_func="${build_func//$upstream_install_base/$source_install_base}"
+    fi
+
+    source /dev/stdin <<<"$build_func"
+  fi
+
+  if ! declare -F build_container >/dev/null; then
+    echo "FATAL: Community Scripts framework loaded incompletely." >&2
+    exit 115
+  fi
+}
+
+bootstrap_framework
+unset -f bootstrap_framework
 
 APP="Codex-DevBox"
 var_tags="${var_tags:-ai;development;codex}"
