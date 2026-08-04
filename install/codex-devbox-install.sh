@@ -77,10 +77,25 @@ random_password="$(openssl rand -hex 32)"
 password_hash="$(openssl passwd -6 "$random_password")"
 usermod --password "$password_hash" "$DEV_USER"
 unset random_password password_hash
-install -d -m 0700 -o "$DEV_USER" -g "$DEV_USER" "${DEV_HOME}/.ssh"
-install -d -m 0700 -o "$DEV_USER" -g "$DEV_USER" "${DEV_HOME}/.codex"
-install -d -m 0700 -o "$DEV_USER" -g "$DEV_USER" "${DEV_HOME}/.config/codex-devbox"
-install -d -m 0755 -o "$DEV_USER" -g "$DEV_USER" "${DEV_HOME}/workspace"
+install -d -m 0700 -o "$DEV_USER" -g "$DEV_USER" \
+  "${DEV_HOME}/.ssh" \
+  "${DEV_HOME}/.codex" \
+  "${DEV_HOME}/.config" \
+  "${DEV_HOME}/.config/codex-devbox" \
+  "${DEV_HOME}/.cache"
+install -d -m 0755 -o "$DEV_USER" -g "$DEV_USER" \
+  "${DEV_HOME}/.local" \
+  "${DEV_HOME}/.local/bin" \
+  "${DEV_HOME}/workspace"
+for developer_dir in \
+  "${DEV_HOME}/.config" \
+  "${DEV_HOME}/.cache" \
+  "${DEV_HOME}/.local"; do
+  if ! run_as_dev test -w "$developer_dir"; then
+    msg_error "Developer directory is not writable: ${developer_dir}"
+    exit 1
+  fi
+done
 msg_ok "Created Developer User"
 
 msg_info "Installing Codex CLI"
