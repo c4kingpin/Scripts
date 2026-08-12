@@ -225,6 +225,34 @@ developer_user_is_least_privilege() {
     ! grep -Eq 'NOPASSWD:[[:space:]]*ALL' "$INSTALL_SCRIPT"
 }
 
+developer_home_parents_are_writable() {
+  local config_line
+  local state_line
+  local mise_line
+  local permissions_root="${TEST_TMP}/permissions"
+
+  config_line="$(grep -nF '"${DEV_HOME}/.config"' "$INSTALL_SCRIPT" | head -n 1 | cut -d: -f1)"
+  state_line="$(grep -nF '"${DEV_HOME}/.config/codex-devbox"' "$INSTALL_SCRIPT" | head -n 1 | cut -d: -f1)"
+  mise_line="$(grep -nF 'MISE_INSTALL_PATH=' "$INSTALL_SCRIPT" | head -n 1 | cut -d: -f1)"
+
+  grep -Fq 'run_as_dev test -w "$developer_dir"' "$INSTALL_SCRIPT" &&
+    grep -Fq 'Developer directory is not writable:' "$INSTALL_SCRIPT" ||
+    return 1
+
+  [[ -n "$config_line" && -n "$state_line" && -n "$mise_line" ]] &&
+    ((config_line < state_line && state_line < mise_line)) &&
+    grep -Fq '"${DEV_HOME}/.cache"' "$INSTALL_SCRIPT" &&
+    grep -Fq '"${DEV_HOME}/.local"' "$INSTALL_SCRIPT" &&
+    grep -Fq '"${DEV_HOME}/.local/bin"' "$INSTALL_SCRIPT" || return 1
+
+  install -d -m 0500 "${permissions_root}/.config"
+  if mkdir "${permissions_root}/.config/mise" 2>/dev/null; then
+    return 1
+  fi
+  chmod 0700 "${permissions_root}/.config"
+  mkdir "${permissions_root}/.config/mise"
+}
+
 ssh_onboarding_distinguishes_key_directions() {
   grep -Fq 'A private client key must' "$INSTALL_SCRIPT" &&
     grep -Fq 'SSH_AUTHORIZED_KEY' "$INSTALL_SCRIPT" &&
@@ -389,6 +417,20 @@ update_preserves_user_state() {
       "$MANAGER"
 }
 
+installer_validates_complete_stack() {
+  grep -Fq 'msg_info "Validating Installation"' "$INSTALL_SCRIPT" &&
+    grep -Fxq 'node --version' "$INSTALL_SCRIPT" &&
+    grep -Fxq 'npm --version' "$INSTALL_SCRIPT" &&
+    grep -Fxq 'codex --version' "$INSTALL_SCRIPT" &&
+    grep -Fq 'run_as_dev "${DEV_HOME}/.local/bin/mise" --version' "$INSTALL_SCRIPT" &&
+    grep -Fq 'exec -- elixir --version' "$INSTALL_SCRIPT" &&
+    grep -Fq 'exec -- mix phx.new --version' "$INSTALL_SCRIPT" &&
+    grep -Fq 'systemctl is-active --quiet postgresql.service' "$INSTALL_SCRIPT" &&
+    grep -Fq -- '--command "SELECT 1;"' "$INSTALL_SCRIPT" &&
+    grep -Fxq '/usr/local/bin/codex-devbox doctor' "$INSTALL_SCRIPT" &&
+    grep -Fq 'msg_ok "Validated Installation"' "$INSTALL_SCRIPT"
+}
+
 extract_manager
 
 run_test "Bash syntax" scripts_have_valid_syntax
@@ -406,6 +448,7 @@ run_test "tools.func helpers" install_script_uses_tools_helpers
 run_test "Debian 13 Erlang source build" erlang_source_build_supports_debian_13
 run_test "bare-metal install" install_script_is_bare_metal
 run_test "least-privilege developer user" developer_user_is_least_privilege
+run_test "writable developer home parents" developer_home_parents_are_writable
 run_test "SSH key directions" ssh_onboarding_distinguishes_key_directions
 run_test "unsupported CLI Remote service removed" unsupported_cli_remote_service_is_absent
 run_test "supported mobile connection instructions" remote_instructions_use_supported_path
@@ -418,6 +461,7 @@ run_test "selectable Codex autonomy" codex_autonomy_is_selectable_and_persisted
 run_test "safe supported OpenRouter config" openrouter_configuration_is_safe_and_supported
 run_test "optional repeatable onboarding" first_login_onboarding_is_optional_and_repeatable
 run_test "updates preserve user state" update_preserves_user_state
+run_test "complete stack validation" installer_validates_complete_stack
 
 printf '\n%d passed, %d failed\n' "$PASSED" "$FAILED"
 ((FAILED == 0))
