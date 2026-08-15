@@ -136,10 +136,11 @@ mise_is_available_as_a_developer_tool() {
     grep -Fq 'MISE_INSTALL_PATH="${DEV_HOME}/.local/bin/mise"' "$INSTALL_SCRIPT"
 }
 
-# OTP 28 crashed on boot in this container class; 27.3.x is the verified one.
+# OTP 28 crashed on boot in this container class; 29.0.5 is the verified one
+# (confirmed running cleanly on this very devbox).
 erlang_is_pinned_to_a_verified_release() {
-  grep -Fq 'ERLANG_VERSION="${ERLANG_VERSION:-27.' "$INSTALL_SCRIPT" &&
-    ! grep -Fq 'ERLANG_VERSION="28' "$INSTALL_SCRIPT"
+  grep -Fq 'ERLANG_VERSION="${ERLANG_VERSION:-29.0.5}"' "$INSTALL_SCRIPT" &&
+    ! grep -Fq 'ERLANG_VERSION="${ERLANG_VERSION:-28' "$INSTALL_SCRIPT"
 }
 
 erlang_comes_from_the_precompiled_ubuntu_build() {

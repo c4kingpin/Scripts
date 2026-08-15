@@ -47,11 +47,12 @@ Zusätzlich legt der Installer `~/.erlang.cookie` an, den Erlang beim Start der
 
 ### Erlang-Version
 
-Voreingestellt ist **OTP 27.3.4.16**. OTP 28 stürzte in getesteten
+Voreingestellt ist **OTP 29.0.5**. OTP 28 stürzte in getesteten
 LXC-Containern beim Start reproduzierbar ab — unabhängig von Distribution,
 Installationsort, Benutzer und davon, ob vorkompiliert oder selbst gebaut.
 Vermutlich setzt der JIT von OTP 28 CPU-Instruktionen voraus, die
-konservative Hypervisor-CPU-Modelle nicht bereitstellen. Der Installer prüft
+konservative Hypervisor-CPU-Modelle nicht bereitstellen. OTP 29.0.5 läuft
+auf denselben Containern reproduzierbar sauber durch. Der Installer prüft
 die Runtime direkt nach der Installation und bricht mit klarer Meldung ab,
 falls sie nicht läuft. Eine andere Version lässt sich vorgeben:
 
