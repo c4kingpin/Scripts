@@ -47,6 +47,26 @@ extract_manager() {
   chmod 0755 "$MANAGER"
 }
 
+# install.sh and the generated manager write one argument per line (backslash
+# continuations) for readability. Fixed-string greps for a whole logical
+# command therefore need a joined-up view of the script; this produces one.
+normalize_continuations() {
+  awk '{
+    line = $0
+    if (cont) { sub(/^[ \t]+/, "", line) }
+    if (sub(/[ \t]*\\[ \t]*$/, "", line)) {
+      printf "%s ", line
+      cont = 1
+    } else {
+      print line
+      cont = 0
+    }
+  }' "$1"
+}
+
+readonly NORM_INSTALL="${TEST_TMP}/install.normalized"
+readonly NORM_MANAGER="${TEST_TMP}/devbox.normalized"
+
 scripts_have_valid_syntax() {
   bash -n "$INSTALL_SCRIPT" "$MANAGER"
 }
@@ -81,8 +101,10 @@ install_script_runs_standalone_preflight() {
 }
 
 installer_curl_pipeable_from_master() {
+  # The one-liner lives in the docs, not in a header comment inside
+  # install.sh itself.
   grep -Fq 'curl -fsSL https://raw.githubusercontent.com/c4kingpin/Scripts/master/devbox/install.sh | bash' \
-    "$INSTALL_SCRIPT"
+    "${PROJECT_ROOT}/README.md"
 }
 
 install_script_is_bare_metal() {
@@ -96,11 +118,11 @@ install_script_is_bare_metal() {
 toolchain_is_installed_outside_the_version_manager() {
   grep -Fq 'OTP_ROOT="/opt/devbox/otp"' "$INSTALL_SCRIPT" &&
     grep -Fq 'ELIXIR_ROOT="/opt/devbox/elixir"' "$INSTALL_SCRIPT" &&
-    grep -Fq './Install -minimal "$OTP_ROOT"' "$INSTALL_SCRIPT" &&
+    grep -Fq './Install -minimal "$OTP_ROOT"' "$NORM_INSTALL" &&
     grep -Fq 'ln -sfn "${OTP_ROOT}/bin/${otp_bin}" "/usr/local/bin/${otp_bin}"' \
-      "$INSTALL_SCRIPT" &&
+      "$NORM_INSTALL" &&
     grep -Fq 'ln -sfn "${ELIXIR_ROOT}/bin/${elixir_bin}" "/usr/local/bin/${elixir_bin}"' \
-      "$INSTALL_SCRIPT" &&
+      "$NORM_INSTALL" &&
     # mise must never be told to provide erlang or elixir ...
     ! grep -Eq 'mise[^\n]*(use|exec|reshim)[^\n]*(erlang|elixir)' "$INSTALL_SCRIPT" &&
     ! grep -Eq 'MISE_ERLANG|erlang@|elixir@' "$INSTALL_SCRIPT" &&
@@ -110,7 +132,7 @@ toolchain_is_installed_outside_the_version_manager() {
 
 # mise stays available for other languages a project may need.
 mise_is_available_as_a_developer_tool() {
-  grep -Fq 'curl_with_retry "https://mise.run" "$mise_installer"' "$INSTALL_SCRIPT" &&
+  grep -Fq 'curl_with_retry "https://mise.run" "$mise_installer"' "$NORM_INSTALL" &&
     grep -Fq 'MISE_INSTALL_PATH="${DEV_HOME}/.local/bin/mise"' "$INSTALL_SCRIPT"
 }
 
@@ -125,14 +147,14 @@ erlang_comes_from_the_precompiled_ubuntu_build() {
     "$INSTALL_SCRIPT" &&
     grep -Fq 'otp_arch="$(dpkg --print-architecture)"' "$INSTALL_SCRIPT" &&
     ! grep -Fq 'KERL_CONFIGURE_OPTIONS' "$INSTALL_SCRIPT" &&
-    grep -Fq "run_as_dev erl -noshell -eval 'halt(0).'" "$INSTALL_SCRIPT"
+    grep -Fq "run_as_dev erl -noshell -eval 'halt(0).'" "$NORM_INSTALL"
 }
 
 # Erlang writes ~/.erlang.cookie when the kernel application starts; an
 # unwritable HOME took the whole runtime down during the original failure.
 erlang_cookie_is_provisioned() {
   grep -Fq '"${DEV_HOME}/.erlang.cookie"' "$INSTALL_SCRIPT" &&
-    grep -Fq 'chmod 0400 "${DEV_HOME}/.erlang.cookie"' "$INSTALL_SCRIPT" &&
+    grep -Fq 'chmod 0400 "${DEV_HOME}/.erlang.cookie"' "$NORM_INSTALL" &&
     grep -Fq 'HOME="$DEV_HOME"' "$INSTALL_SCRIPT"
 }
 
@@ -141,7 +163,7 @@ installer_requires_ubuntu() {
     grep -Fxq 'require_supported_os' "$INSTALL_SCRIPT" &&
     ! grep -Fq 'require_debian_like' "$INSTALL_SCRIPT" &&
     grep -Fq 'ubuntu-24.04 | ubuntu-22.04 | ubuntu-20.04)' "$INSTALL_SCRIPT" &&
-    grep -Fq 'add-apt-repository -y universe' "$INSTALL_SCRIPT"
+    grep -Fq 'add-apt-repository -y universe' "$NORM_INSTALL"
 }
 
 elixir_is_pinned_to_the_erlang_otp_major() {
@@ -153,11 +175,13 @@ elixir_is_pinned_to_the_erlang_otp_major() {
 }
 
 claude_cli_is_installed() {
-  grep -Fq 'npm install --global @anthropic-ai/claude-code@latest' "$INSTALL_SCRIPT" &&
-    grep -Fq 'npm install --global @openai/codex@latest' "$INSTALL_SCRIPT" &&
+  grep -Fq 'npm install --global @anthropic-ai/claude-code@latest' "$NORM_INSTALL" &&
+    grep -Fq 'npm install --global @openai/codex@latest' "$NORM_INSTALL" &&
     grep -Fq 'claude' "$MANAGER" &&
-    grep -Fxq 'claude --version' "$INSTALL_SCRIPT" &&
-    grep -Fq 'run_as_dev claude --version' "$MANAGER"
+    # Agent CLIs are runtime tools for the dev account, so the installer's
+    # own final validation step runs them via run_as_dev, not bare.
+    grep -Fq 'run_as_dev claude --version' "$NORM_INSTALL" &&
+    grep -Fq 'run_as_dev claude --version' "$NORM_MANAGER"
 }
 
 doctor_checks_claude_alongside_codex() {
@@ -186,8 +210,8 @@ update_command_supports_branch_argument() {
 }
 
 update_downloads_and_reruns_installer() {
-  grep -Fq 'curl -fsSL --connect-timeout 15 --retry 5 --retry-connrefused' "$MANAGER" &&
-    grep -Fq 'bash "$installer"' "$MANAGER" &&
+  grep -Fq 'curl -fsSL --connect-timeout 15 --retry 5 --retry-connrefused' "$NORM_MANAGER" &&
+    grep -Fq 'bash "$installer"' "$NORM_MANAGER" &&
     grep -Fq 'Failed to download installer from' "$MANAGER" &&
     grep -Fq 'DEFAULT_REPO_URL="https://raw.githubusercontent.com/c4kingpin/Scripts"' "$MANAGER"
 }
@@ -247,19 +271,23 @@ EOF
 }
 
 developer_user_is_least_privilege() {
+  # SSH policy is scoped to a `Match User dev` block (not a global
+  # AllowUsers directive), so administrative/root SSH access is never
+  # touched by DevBox.
   grep -Fq 'useradd --create-home --user-group --shell /bin/bash' \
-    "$INSTALL_SCRIPT" &&
-    grep -Fq 'PermitRootLogin no' "$INSTALL_SCRIPT" &&
+    "$NORM_INSTALL" &&
+    grep -Fq 'Match User dev' "$INSTALL_SCRIPT" &&
     grep -Fq 'PasswordAuthentication no' "$INSTALL_SCRIPT" &&
-    grep -Fq 'AllowUsers ${DEV_USER}' "$INSTALL_SCRIPT" &&
+    grep -Fq 'AuthenticationMethods publickey' "$INSTALL_SCRIPT" &&
+    ! grep -Eq '^AllowUsers[[:space:]]+dev([[:space:]]|$)' "$INSTALL_SCRIPT" &&
     grep -Fq \
       '${DEV_USER} ALL=(root) NOPASSWD: /usr/local/bin/devbox ssh setup' \
-      "$INSTALL_SCRIPT" &&
+      "$NORM_INSTALL" &&
     ! grep -Eq 'NOPASSWD:[[:space:]]*ALL' "$INSTALL_SCRIPT"
 }
 
 developer_password_only_set_on_creation() {
-  python3 - "$INSTALL_SCRIPT" <<'PY'
+  python3 - "$NORM_INSTALL" <<'PY'
 import pathlib
 import re
 import sys
@@ -284,14 +312,17 @@ developer_home_parents_are_writable() {
   local toolchain_line
   local permissions_root="${TEST_TMP}/permissions"
 
-  config_line="$(grep -nF '"${DEV_HOME}/.config"' "$INSTALL_SCRIPT" | head -n 1 | cut -d: -f1)"
-  # Skip the migration lines (they name the old path too) so this anchors on
-  # the install -d entry that actually creates the directory.
-  state_line="$(grep -nF '"${DEV_HOME}/.config/devbox"' "$INSTALL_SCRIPT" |
-    grep -v codex-devbox | head -n 1 | cut -d: -f1)"
+  # Each install -d entry is one argument per line ending in a backslash;
+  # anchor on that trailing backslash so this only matches the entry that
+  # actually creates the directory, not the migration guard that also names
+  # the same path (on a line ending in "]]; then" instead).
+  # shellcheck disable=SC1003
+  config_line="$(grep -nF '"${DEV_HOME}/.config" \' "$INSTALL_SCRIPT" | head -n 1 | cut -d: -f1)"
+  # shellcheck disable=SC1003
+  state_line="$(grep -nF '"${DEV_HOME}/.config/devbox" \' "$INSTALL_SCRIPT" | head -n 1 | cut -d: -f1)"
   toolchain_line="$(grep -nF 'OTP_ROOT="/opt/devbox/otp"' "$INSTALL_SCRIPT" | head -n 1 | cut -d: -f1)"
 
-  grep -Fq 'run_as_dev test -w "$developer_dir"' "$INSTALL_SCRIPT" &&
+  grep -Fq 'run_as_dev test -w "$developer_dir"' "$NORM_INSTALL" &&
     grep -Fq 'Developer directory is not writable:' "$INSTALL_SCRIPT" ||
     return 1
 
@@ -310,13 +341,15 @@ developer_home_parents_are_writable() {
 }
 
 rerunning_installer_is_idempotent() {
-  grep -Fq 'if ! grep -Fq '\''# DevBox'\'' "${DEV_HOME}/.bashrc"' "$INSTALL_SCRIPT" &&
+  grep -Fq "if ! grep -Fq '# DevBox' \"\${DEV_HOME}/.bashrc\"" "$NORM_INSTALL" &&
     grep -Fq 'if [[ ! -f "${DEV_HOME}/.codex/config.toml" ]]; then' "$INSTALL_SCRIPT" &&
     grep -Fq 'if [[ ! -f "${DEV_HOME}/.claude/settings.json" ]]; then' "$INSTALL_SCRIPT" &&
-    grep -Fq 'elif [[ ! -s "${DEV_HOME}/.ssh/authorized_keys" ]]; then' "$INSTALL_SCRIPT" &&
+    # A re-run without SSH_AUTHORIZED_KEY or a disabled marker leaves an
+    # already-managed SSH policy alone instead of clobbering it.
+    grep -Fq 'elif [[ -e "$SSH_DISABLED_MARKER" ]]; then' "$INSTALL_SCRIPT" &&
     grep -Fq "SELECT 1 FROM pg_roles WHERE rolname = '\${PG_DB_USER}'" "$INSTALL_SCRIPT" &&
     grep -Fq "SELECT 1 FROM pg_database WHERE datname = '\${PG_DB_NAME}'" "$INSTALL_SCRIPT" &&
-    grep -Fq "grep -q '^PGPASSWORD='" "$INSTALL_SCRIPT"
+    grep -Fq "grep -q '^PGPASSWORD='" "$NORM_INSTALL"
 }
 
 # Everything the old name owned must be carried over or removed; the state
@@ -344,7 +377,7 @@ old_name_is_gone_from_the_active_surface() {
 }
 
 ssh_onboarding_distinguishes_key_directions() {
-  grep -Fq 'A private client key must' "$INSTALL_SCRIPT" &&
+  grep -Fq 'Never copy a private key here.' "$INSTALL_SCRIPT" &&
     grep -Fq 'SSH_AUTHORIZED_KEY' "$INSTALL_SCRIPT" &&
     grep -Fq 'keys generate' "$MANAGER" &&
     grep -Fq 'ssh-keygen' "$MANAGER" &&
@@ -357,16 +390,18 @@ unsupported_cli_remote_service_is_absent() {
     "$INSTALL_SCRIPT"
 }
 
+# Happy is now the primary remote/session layer (replacing the older
+# ChatGPT-desktop-as-SSH-bridge flow), so `devbox remote-info` documents
+# Happy's pairing and daemon commands instead of a host-console walkthrough.
 remote_instructions_are_platform_agnostic() {
   local output
 
   output="$("$MANAGER" remote-info)"
-  grep -Fq 'ChatGPT on iOS' <<<"$output" &&
-    grep -Fq 'ChatGPT desktop app on macOS or Windows' <<<"$output" &&
-    grep -Fq 'SSH connection' <<<"$output" &&
-    grep -Fq 'pct enter <CTID>' <<<"$output" &&
-    grep -Fq 'lxc exec' <<<"$output" &&
-    grep -Fq 'incus exec' <<<"$output"
+  grep -Fq 'Happy remote development' <<<"$output" &&
+    grep -Fq 'happy claude' <<<"$output" &&
+    grep -Fq 'happy codex' <<<"$output" &&
+    grep -Fq 'devbox auth login' <<<"$output" &&
+    grep -Fq 'devbox ssh setup' <<<"$output"
 }
 
 manager_exposes_expected_commands() {
@@ -398,12 +433,12 @@ no_hardcoded_default_credentials() {
 }
 
 managed_secrets_have_restricted_permissions() {
-  grep -Fq 'chmod 0600' "$INSTALL_SCRIPT" &&
+  grep -Fq 'chmod 0600' "$NORM_INSTALL" &&
     grep -Fq '"${DEV_HOME}/.pgpass"' "$INSTALL_SCRIPT" &&
     grep -Fq '"$PG_ENV_FILE"' "$INSTALL_SCRIPT" &&
     grep -Fq '"${DEV_HOME}/.codex/config.toml"' "$INSTALL_SCRIPT" &&
     grep -Fq '"${DEV_HOME}/.claude/settings.json"' "$INSTALL_SCRIPT" &&
-    grep -Fq 'chmod 0600 "$OPENROUTER_ENV"' "$MANAGER"
+    grep -Fq 'chmod 0600 "$OPENROUTER_ENV"' "$NORM_MANAGER"
 }
 
 # One profile must configure both agents, or they would drift apart.
@@ -430,18 +465,20 @@ autonomy_is_selectable_and_applies_to_both_agents() {
 
 openrouter_configuration_is_safe_and_supported() {
   grep -Fq 'openrouter_setup() {' "$MANAGER" &&
-    grep -Fq 'read -r -s -p "OpenRouter API key: "' "$MANAGER" &&
+    grep -Fq 'read -r -s -p "OpenRouter API key: "' "$NORM_MANAGER" &&
     grep -Fq 'OPENROUTER_WRAPPER="${DEV_HOME}/.local/bin/codex-openrouter"' \
       "$MANAGER" &&
     grep -Fq 'LEGACY_OPENROUTER_WRAPPER="${DEV_HOME}/.local/bin/codex"' \
       "$MANAGER" &&
-    grep -Fq 'rm -f "$LEGACY_OPENROUTER_WRAPPER"' "$MANAGER" &&
+    grep -Fq 'rm -f "$LEGACY_OPENROUTER_WRAPPER"' "$NORM_MANAGER" &&
     grep -Fq 'export OPENROUTER_API_KEY=%q' "$MANAGER" &&
     grep -Fq 'base_url = "https://openrouter.ai/api/v1"' "$MANAGER" &&
     grep -Fq 'env_key = "OPENROUTER_API_KEY"' "$MANAGER" &&
     grep -Fq 'wire_api = "responses"' "$MANAGER" &&
-    grep -Fq -- '--profile openrouter "$@"' "$MANAGER" &&
-    grep -Fq 'Use codex normally for ChatGPT' "$MANAGER" &&
+    grep -Fq -- '--profile openrouter "$@"' "$NORM_MANAGER" &&
+    # Happy is now the primary agent entry point, so the fallback summary
+    # names Happy/native/fallback rather than talking about ChatGPT.
+    grep -Fq 'info "Primary: happy codex"' "$NORM_MANAGER" &&
     grep -Fq 'OpenRouter fallback command: codex-openrouter' "$MANAGER" &&
     grep -Fq 'value hidden' "$MANAGER" &&
     ! grep -Fq 'cat "$OPENROUTER_ENV"' "$MANAGER"
@@ -450,7 +487,7 @@ openrouter_configuration_is_safe_and_supported() {
 first_login_onboarding_is_optional_and_repeatable() {
   grep -Fq 'onboarding-complete' "$INSTALL_SCRIPT" &&
     grep -Fq 'devbox onboard || true' "$INSTALL_SCRIPT" &&
-    grep -Fq 'codex login --device-auth' "$MANAGER" &&
+    grep -Fq 'codex login --device-auth' "$NORM_MANAGER" &&
     grep -Fq 'onboard() {' "$MANAGER"
 }
 
@@ -464,18 +501,22 @@ installer_validates_complete_stack() {
   grep -Fq 'msg_info "Validating Installation"' "$INSTALL_SCRIPT" &&
     grep -Fxq 'node --version' "$INSTALL_SCRIPT" &&
     grep -Fxq 'npm --version' "$INSTALL_SCRIPT" &&
-    grep -Fxq 'codex --version' "$INSTALL_SCRIPT" &&
-    grep -Fxq 'claude --version' "$INSTALL_SCRIPT" &&
-    grep -Fq "run_as_dev erl -noshell -eval 'halt(0).'" "$INSTALL_SCRIPT" &&
-    grep -Fxq 'run_as_dev elixir --version' "$INSTALL_SCRIPT" &&
-    grep -Fxq 'run_as_dev mix phx.new --version' "$INSTALL_SCRIPT" &&
-    grep -Fq 'systemctl is-active --quiet postgresql.service' "$INSTALL_SCRIPT" &&
+    # Agent CLIs are runtime tools for the dev account, so validation runs
+    # them via run_as_dev rather than bare as root.
+    grep -Fq 'run_as_dev codex --version' "$NORM_INSTALL" &&
+    grep -Fq 'run_as_dev claude --version' "$NORM_INSTALL" &&
+    grep -Fq "run_as_dev erl -noshell -eval 'halt(0).'" "$NORM_INSTALL" &&
+    grep -Fq 'run_as_dev elixir --version' "$NORM_INSTALL" &&
+    grep -Fq 'run_as_dev mix phx.new --version' "$NORM_INSTALL" &&
+    grep -Fq 'systemctl is-active --quiet postgresql.service' "$NORM_INSTALL" &&
     grep -Fq -- '--command "SELECT 1;"' "$INSTALL_SCRIPT" &&
     grep -Fxq '/usr/local/bin/devbox doctor' "$INSTALL_SCRIPT" &&
     grep -Fq 'msg_ok "Validated Installation"' "$INSTALL_SCRIPT"
 }
 
 extract_manager
+normalize_continuations "$INSTALL_SCRIPT" >"$NORM_INSTALL"
+normalize_continuations "$MANAGER" >"$NORM_MANAGER"
 
 run_test "Bash syntax" scripts_have_valid_syntax
 run_test "standalone, no Proxmox/community-scripts framework" standalone_no_proxmox_framework
