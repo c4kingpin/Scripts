@@ -1,15 +1,101 @@
 #!/usr/bin/env bash
-
-# Copyright (c) 2021-2026 community-scripts ORG
+# Copyright (c) 2021-2026 c4kingpin
 # Author: Jörn Siedentopf (c4kingpin)
-# License: MIT | https://github.com/community-scripts/ProxmoxVE/raw/main/LICENSE
-# Source: https://github.com/openai/codex
+# License: MIT
+# Source: https://github.com/openai/codex, https://github.com/anthropics/claude-code
 
-source /dev/stdin <<<"$FUNCTIONS_FILE_PATH"
-color
-verb_ip6
-catch_errors
-setting_up_container
+# Codex DevBox - standalone LXC installer
+#
+# Run this script as root directly inside an already provisioned LXC
+# container (Proxmox, LXD/Incus, or any other platform). It does not create
+# or configure the container itself and has no dependency on the Proxmox
+# host or the community-scripts framework.
+#
+#   curl -fsSL https://raw.githubusercontent.com/c4kingpin/Scripts/master/install.sh | bash
+
+set -Eeuo pipefail
+umask 022
+
+RD=$'\033[01;31m'
+GN=$'\033[1;92m'
+YW=$'\033[33m'
+CL=$'\033[m'
+
+msg_info() { printf '%b\n' "${YW}➜ $*${CL}"; }
+msg_ok() { printf '%b\n' "${GN}✓ $*${CL}"; }
+msg_error() { printf '%b\n' "${RD}✗ $*${CL}" >&2; }
+
+error_handler() {
+  local exit_code=$?
+  local line="${1:-${LINENO}}"
+  msg_error "Installation failed at line ${line} (exit code ${exit_code})."
+  exit "$exit_code"
+}
+trap 'error_handler ${LINENO}' ERR
+
+LOG_FILE="$(mktemp /tmp/codex-devbox-install.XXXXXX.log)"
+readonly LOG_FILE
+silent() {
+  if ! "$@" >>"$LOG_FILE" 2>&1; then
+    msg_error "Command failed: $*"
+    printf '%s\n' "--- last 40 log lines (${LOG_FILE}) ---" >&2
+    tail -n 40 "$LOG_FILE" >&2
+    return 1
+  fi
+}
+
+require_root() {
+  [[ "$(id -u)" -eq 0 ]] || {
+    msg_error "This installer must run as root inside the LXC container."
+    exit 1
+  }
+}
+
+require_debian_like() {
+  command -v apt-get >/dev/null 2>&1 || {
+    msg_error "This installer requires a Debian- or Ubuntu-based container (apt-get not found)."
+    exit 1
+  }
+}
+
+network_check() {
+  msg_info "Checking network connectivity"
+  if ! curl -fsSL --connect-timeout 5 --max-time 10 https://github.com >/dev/null 2>&1; then
+    msg_error "No network connectivity to github.com."
+    exit 1
+  fi
+  msg_ok "Network connectivity confirmed"
+}
+
+update_os() {
+  msg_info "Updating OS package lists"
+  export DEBIAN_FRONTEND=noninteractive
+  silent apt-get update
+  silent apt-get -y upgrade
+  msg_ok "Updated OS packages"
+}
+
+curl_with_retry() {
+  local url="$1"
+  local destination="$2"
+  curl \
+    --proto '=https' \
+    --tlsv1.2 \
+    --connect-timeout 15 \
+    --max-time 300 \
+    --retry 5 \
+    --retry-all-errors \
+    --retry-connrefused \
+    --fail \
+    --silent \
+    --show-error \
+    --location \
+    --output "$destination" \
+    "$url"
+}
+
+require_root
+require_debian_like
 network_check
 update_os
 
@@ -19,7 +105,7 @@ NODE_VERSION="24"
 ERLANG_VERSION="28.4"
 ELIXIR_VERSION="1.20.2"
 PHOENIX_VERSION="1.8.9"
-CODEX_AUTONOMY="${CODEX_AUTONOMY:-balanced}"
+CODEX_DEVBOX_REPO_URL="${CODEX_DEVBOX_REPO_URL:-https://raw.githubusercontent.com/c4kingpin/Scripts}"
 
 run_as_dev() {
   runuser -u "$DEV_USER" -- env \
@@ -30,8 +116,53 @@ run_as_dev() {
     "$@"
 }
 
+select_codex_autonomy() {
+  local requested="${CODEX_AUTONOMY:-}"
+
+  if [[ -f "${DEV_HOME}/.codex/config.toml" ]]; then
+    CODEX_AUTONOMY="${requested:-balanced}"
+    msg_ok "Existing ~/.codex/config.toml preserved; skipping autonomy prompt"
+    return
+  fi
+
+  case "$requested" in
+  controlled | balanced | autonomous | full-access)
+    CODEX_AUTONOMY="$requested"
+    ;;
+  "")
+    if [[ -t 0 && -t 1 ]]; then
+      cat <<'EOF'
+How autonomously may Codex work?
+  1) Controlled   - read-only; approve edits and commands
+  2) Balanced     - edit workspace; approve external access (recommended)
+  3) Autonomous   - workspace and network without approval prompts
+  4) Full access  - no sandbox or prompts (LXC boundary only)
+EOF
+      local choice=""
+      read -r -p "Choice [2]: " choice
+      case "${choice:-2}" in
+      1) CODEX_AUTONOMY="controlled" ;;
+      2) CODEX_AUTONOMY="balanced" ;;
+      3) CODEX_AUTONOMY="autonomous" ;;
+      4) CODEX_AUTONOMY="full-access" ;;
+      *) CODEX_AUTONOMY="balanced" ;;
+      esac
+    else
+      CODEX_AUTONOMY="balanced"
+    fi
+    ;;
+  *)
+    msg_error "Invalid CODEX_AUTONOMY: ${requested}"
+    exit 1
+    ;;
+  esac
+
+  msg_ok "Codex autonomy profile: ${CODEX_AUTONOMY}"
+}
+select_codex_autonomy
+
 msg_info "Installing Dependencies"
-$STD apt install -y --no-install-recommends \
+silent apt-get install -y --no-install-recommends \
   autoconf \
   bash-completion \
   build-essential \
@@ -41,6 +172,7 @@ $STD apt install -y --no-install-recommends \
   git \
   git-lfs \
   gh \
+  gnupg \
   inotify-tools \
   jq \
   less \
@@ -50,6 +182,7 @@ $STD apt install -y --no-install-recommends \
   openssh-server \
   openssl \
   pipx \
+  postgresql \
   python3 \
   python3-pip \
   python3-venv \
@@ -66,17 +199,32 @@ $STD apt install -y --no-install-recommends \
   zip
 msg_ok "Installed Dependencies"
 
-NODE_VERSION="$NODE_VERSION" setup_nodejs
-setup_postgresql
+msg_info "Installing Node.js ${NODE_VERSION}"
+if [[ "$(node --version 2>/dev/null || true)" != "v${NODE_VERSION}."* ]]; then
+  nodesource_setup="$(mktemp)"
+  curl_with_retry "https://deb.nodesource.com/setup_${NODE_VERSION}.x" "$nodesource_setup"
+  silent bash "$nodesource_setup"
+  rm -f "$nodesource_setup"
+  silent apt-get install -y --no-install-recommends nodejs
+fi
+[[ "$(node --version)" == "v${NODE_VERSION}."* ]] || {
+  msg_error "Unexpected Node.js version: $(node --version 2>/dev/null || echo none)"
+  exit 1
+}
+msg_ok "Installed Node.js $(node --version)"
+
+msg_info "Enabling PostgreSQL"
+systemctl enable --now postgresql.service
+msg_ok "Enabled PostgreSQL"
 
 msg_info "Creating Developer User"
 if ! id "$DEV_USER" >/dev/null 2>&1; then
   useradd --create-home --user-group --shell /bin/bash "$DEV_USER"
+  random_password="$(openssl rand -hex 32)"
+  password_hash="$(openssl passwd -6 "$random_password")"
+  usermod --password "$password_hash" "$DEV_USER"
+  unset random_password password_hash
 fi
-random_password="$(openssl rand -hex 32)"
-password_hash="$(openssl passwd -6 "$random_password")"
-usermod --password "$password_hash" "$DEV_USER"
-unset random_password password_hash
 install -d -m 0700 -o "$DEV_USER" -g "$DEV_USER" \
   "${DEV_HOME}/.ssh" \
   "${DEV_HOME}/.codex" \
@@ -99,13 +247,16 @@ done
 msg_ok "Created Developer User"
 
 msg_info "Installing Codex CLI"
-$STD npm install --global @openai/codex@latest
+silent npm install --global @openai/codex@latest
 msg_ok "Installed Codex CLI"
+
+msg_info "Installing Claude CLI"
+silent npm install --global @anthropic-ai/claude-code@latest
+msg_ok "Installed Claude CLI"
 
 msg_info "Installing Erlang, Elixir and Phoenix"
 mise_installer="/tmp/codex-devbox-mise-install.sh"
-CURL_RETRIES=5 CURL_TIMEOUT=300 CURL_CONNECT_TO=15 \
-  curl_with_retry "https://mise.run" "$mise_installer"
+curl_with_retry "https://mise.run" "$mise_installer"
 chmod 0755 "$mise_installer"
 run_as_dev env MISE_INSTALL_PATH="${DEV_HOME}/.local/bin/mise" sh "$mise_installer"
 rm -f "$mise_installer"
@@ -123,17 +274,35 @@ msg_ok "Installed Erlang, Elixir and Phoenix"
 
 PG_DB_NAME="devbox"
 PG_DB_USER="dev"
-setup_postgresql_db
+PG_ENV_FILE="${DEV_HOME}/.config/codex-devbox/postgres.env"
 
 msg_info "Configuring PostgreSQL Development Access"
-runuser -u postgres -- psql \
-  --set ON_ERROR_STOP=on \
-  --command "ALTER ROLE ${PG_DB_USER} CREATEDB;"
+if [[ -r "$PG_ENV_FILE" ]] && grep -q '^PGPASSWORD=' "$PG_ENV_FILE"; then
+  PG_DB_PASS="$(sed -n 's/^PGPASSWORD=//p' "$PG_ENV_FILE")"
+else
+  PG_DB_PASS="$(openssl rand -hex 24)"
+fi
+if runuser -u postgres -- psql --tuples-only --no-align \
+  --command "SELECT 1 FROM pg_roles WHERE rolname = '${PG_DB_USER}';" | grep -q '^1$'; then
+  runuser -u postgres -- psql \
+    --set ON_ERROR_STOP=on \
+    --command "ALTER ROLE ${PG_DB_USER} WITH PASSWORD '${PG_DB_PASS}' CREATEDB;"
+else
+  runuser -u postgres -- psql \
+    --set ON_ERROR_STOP=on \
+    --command "CREATE ROLE ${PG_DB_USER} WITH LOGIN PASSWORD '${PG_DB_PASS}' CREATEDB;"
+fi
+if ! runuser -u postgres -- psql --tuples-only --no-align \
+  --command "SELECT 1 FROM pg_database WHERE datname = '${PG_DB_NAME}';" | grep -q '^1$'; then
+  runuser -u postgres -- psql \
+    --set ON_ERROR_STOP=on \
+    --command "CREATE DATABASE ${PG_DB_NAME} OWNER ${PG_DB_USER};"
+fi
 cat <<EOF >"${DEV_HOME}/.pgpass"
 127.0.0.1:5432:*:${PG_DB_USER}:${PG_DB_PASS}
 localhost:5432:*:${PG_DB_USER}:${PG_DB_PASS}
 EOF
-cat <<EOF >"${DEV_HOME}/.config/codex-devbox/postgres.env"
+cat <<EOF >"$PG_ENV_FILE"
 PGHOST=127.0.0.1
 PGPORT=5432
 PGUSER=${PG_DB_USER}
@@ -141,12 +310,9 @@ PGPASSWORD=${PG_DB_PASS}
 PGDATABASE=${PG_DB_NAME}
 DATABASE_URL=ecto://${PG_DB_USER}:${PG_DB_PASS}@127.0.0.1/${PG_DB_NAME}
 EOF
-chown "$DEV_USER:$DEV_USER" \
-  "${DEV_HOME}/.pgpass" \
-  "${DEV_HOME}/.config/codex-devbox/postgres.env"
-chmod 0600 \
-  "${DEV_HOME}/.pgpass" \
-  "${DEV_HOME}/.config/codex-devbox/postgres.env"
+chown "$DEV_USER:$DEV_USER" "${DEV_HOME}/.pgpass" "$PG_ENV_FILE"
+chmod 0600 "${DEV_HOME}/.pgpass" "$PG_ENV_FILE"
+unset PG_DB_PASS
 msg_ok "Configured PostgreSQL Development Access"
 
 msg_info "Configuring Development Environment"
@@ -175,48 +341,50 @@ cat <<'EOF' >"${DEV_HOME}/.codex/AGENTS.md"
 - Never force-push unless the user explicitly requests it.
 EOF
 
-case "$CODEX_AUTONOMY" in
-controlled)
-  codex_approval_policy="untrusted"
-  codex_sandbox_mode="read-only"
-  codex_network_access=""
-  ;;
-balanced)
-  codex_approval_policy="on-request"
-  codex_sandbox_mode="workspace-write"
-  codex_network_access="false"
-  ;;
-autonomous)
-  codex_approval_policy="never"
-  codex_sandbox_mode="workspace-write"
-  codex_network_access="true"
-  ;;
-full-access)
-  codex_approval_policy="never"
-  codex_sandbox_mode="danger-full-access"
-  codex_network_access=""
-  ;;
-*)
-  msg_error "Invalid Codex autonomy profile: ${CODEX_AUTONOMY}"
-  ;;
-esac
+if [[ ! -f "${DEV_HOME}/.codex/config.toml" ]]; then
+  case "$CODEX_AUTONOMY" in
+  controlled)
+    codex_approval_policy="untrusted"
+    codex_sandbox_mode="read-only"
+    codex_network_access=""
+    ;;
+  balanced)
+    codex_approval_policy="on-request"
+    codex_sandbox_mode="workspace-write"
+    codex_network_access="false"
+    ;;
+  autonomous)
+    codex_approval_policy="never"
+    codex_sandbox_mode="workspace-write"
+    codex_network_access="true"
+    ;;
+  full-access)
+    codex_approval_policy="never"
+    codex_sandbox_mode="danger-full-access"
+    codex_network_access=""
+    ;;
+  esac
 
-cat <<EOF >"${DEV_HOME}/.codex/config.toml"
+  cat <<EOF >"${DEV_HOME}/.codex/config.toml"
 # Managed by the Codex DevBox installer.
 # Change these values at any time to adjust Codex autonomy.
 approval_policy = "${codex_approval_policy}"
 sandbox_mode = "${codex_sandbox_mode}"
 EOF
 
-if [[ -n "$codex_network_access" ]]; then
-  cat <<EOF >>"${DEV_HOME}/.codex/config.toml"
+  if [[ -n "$codex_network_access" ]]; then
+    cat <<EOF >>"${DEV_HOME}/.codex/config.toml"
 
 [sandbox_workspace_write]
 network_access = ${codex_network_access}
 EOF
+  fi
+else
+  msg_info "Preserving existing ~/.codex/config.toml"
 fi
 
-cat <<'EOF' >>"${DEV_HOME}/.bashrc"
+if ! grep -Fq '# Codex Dev Box' "${DEV_HOME}/.bashrc" 2>/dev/null; then
+  cat <<'EOF' >>"${DEV_HOME}/.bashrc"
 
 # Codex Dev Box
 export PATH="$HOME/.local/share/mise/shims:$HOME/.local/bin:/usr/local/bin:$PATH"
@@ -232,6 +400,7 @@ if [[ $- == *i* && -t 0 && -t 1 ]] &&
   codex-devbox onboard || true
 fi
 EOF
+fi
 
 chown "$DEV_USER:$DEV_USER" \
   "${DEV_HOME}/.bashrc" \
@@ -266,9 +435,8 @@ readonly OPENROUTER_PROFILE="${DEV_HOME}/.codex/openrouter.config.toml"
 readonly OPENROUTER_WRAPPER="${DEV_HOME}/.local/bin/codex-openrouter"
 readonly LEGACY_OPENROUTER_WRAPPER="${DEV_HOME}/.local/bin/codex"
 readonly NODE_MAJOR="24"
-readonly ERLANG_VERSION="28.4"
-readonly ELIXIR_VERSION="1.20.2"
-readonly PHOENIX_VERSION="1.8.9"
+readonly DEFAULT_UPDATE_BRANCH="master"
+readonly DEFAULT_REPO_URL="https://raw.githubusercontent.com/c4kingpin/Scripts"
 
 info() {
   printf '==> %s\n' "$*"
@@ -309,7 +477,9 @@ Commands:
   keys upload-github  Upload the identity key to the authenticated GitHub account
   remote-info         Explain the supported ChatGPT mobile connection path
   doctor              Validate the installed development environment
-  update              Update OS packages, Codex CLI and the managed toolchain
+  update [branch]     Re-run the installer from GitHub to update everything
+                       (Codex CLI, Claude CLI, OS packages, toolchain).
+                       Defaults to the "master" branch.
   help                Show this help
 EOF
 }
@@ -718,10 +888,12 @@ Remote setup starts in the ChatGPT desktop app. It cannot be started from the
 Codex CLI. Add this Dev Box under Settings > Connections > SSH and select a
 project below /home/dev/workspace.
 
-Without SSH the Dev Box remains available from Proxmox:
+Without SSH the Dev Box remains reachable from your LXC host's console tool,
+for example:
 
-  pct enter <CTID>
-  sudo -iu dev
+  pct enter <CTID>            # Proxmox VE
+  lxc exec <name> -- bash      # LXD
+  incus exec <name> -- bash    # Incus
 EOF
 }
 
@@ -729,6 +901,7 @@ doctor() {
   local command
   local status=0
   local commands=(
+    claude
     codex
     elixir
     erl
@@ -766,6 +939,7 @@ doctor() {
   fi
 
   run_as_dev codex --version || status=1
+  run_as_dev claude --version || status=1
   run_as_dev "${DEV_HOME}/.local/bin/mise" exec -- elixir --version ||
     status=1
   run_as_dev "${DEV_HOME}/.local/bin/mise" exec -- mix phx.new --version ||
@@ -776,33 +950,24 @@ doctor() {
 
 update_devbox() {
   require_root
-  export DEBIAN_FRONTEND=noninteractive
+  local branch="${1:-$DEFAULT_UPDATE_BRANCH}"
+  local repo_url="${CODEX_DEVBOX_REPO_URL:-$DEFAULT_REPO_URL}"
+  local installer_url="${repo_url%/}/${branch}/install.sh"
+  local installer
 
-  info "Updating operating system"
-  apt-get update
-  apt-get -y full-upgrade
+  installer="$(mktemp)"
+  info "Downloading installer from branch '${branch}'"
+  if ! curl -fsSL --connect-timeout 15 --retry 5 --retry-connrefused \
+    --retry-delay 3 -o "$installer" "$installer_url"; then
+    rm -f "$installer"
+    die "Failed to download installer from ${installer_url}"
+  fi
+  chmod 0755 "$installer"
 
-  info "Updating Codex CLI"
-  npm install --global @openai/codex@latest
-
-  info "Ensuring managed Erlang, Elixir and Phoenix versions"
-  apt-get install -y --no-install-recommends \
-    autoconf \
-    build-essential \
-    libncurses-dev \
-    libssl-dev
-  run_as_dev env \
-    MISE_ERLANG_COMPILE=true \
-    KERL_CONFIGURE_OPTIONS="--without-javac --without-wx --without-odbc" \
-    "${DEV_HOME}/.local/bin/mise" use --global "erlang@${ERLANG_VERSION}"
-  run_as_dev "${DEV_HOME}/.local/bin/mise" use --global \
-    "elixir@${ELIXIR_VERSION}"
-  run_as_dev "${DEV_HOME}/.local/bin/mise" exec -- \
-    mix archive.install hex phx_new "$PHOENIX_VERSION" --force
-  run_as_dev "${DEV_HOME}/.local/bin/mise" reshim
-
-  apt-get -y autoremove
-  apt-get clean
+  info "Re-running the installer to apply updates"
+  CODEX_DEVBOX_REPO_URL="$repo_url" bash "$installer"
+  rm -f "$installer"
+  ok "Updated from branch '${branch}'"
   doctor
 }
 
@@ -905,8 +1070,8 @@ main() {
     doctor:)
       doctor
       ;;
-    update:)
-      update_devbox
+    update:*)
+      update_devbox "$subcommand"
       ;;
     help:|-h:|--help:)
       usage
@@ -963,7 +1128,7 @@ if [[ -n "${SSH_AUTHORIZED_KEY:-}" ]]; then
   chmod 0600 "${DEV_HOME}/.ssh/authorized_keys"
   systemctl disable --now ssh.socket >/dev/null 2>&1 || true
   systemctl enable --now ssh.service
-else
+elif [[ ! -s "${DEV_HOME}/.ssh/authorized_keys" ]]; then
   systemctl disable --now ssh.socket >/dev/null 2>&1 || true
   systemctl disable --now ssh.service >/dev/null 2>&1 || true
 fi
@@ -981,6 +1146,7 @@ msg_info "Validating Installation"
 node --version
 npm --version
 codex --version
+claude --version
 run_as_dev "${DEV_HOME}/.local/bin/mise" --version
 run_as_dev "${DEV_HOME}/.local/bin/mise" exec -- elixir --version
 run_as_dev "${DEV_HOME}/.local/bin/mise" exec -- mix phx.new --version
@@ -994,6 +1160,14 @@ run_as_dev psql \
 /usr/local/bin/codex-devbox doctor
 msg_ok "Validated Installation"
 
-motd_ssh
-customize
-cleanup_lxc
+msg_info "Cleaning Up"
+apt-get -y autoremove >>"$LOG_FILE" 2>&1 || true
+apt-get clean >>"$LOG_FILE" 2>&1 || true
+rm -f "$LOG_FILE"
+msg_ok "Cleaned Up"
+
+msg_ok "Completed Successfully!"
+echo -e "${GN}Codex DevBox setup has been successfully initialized!${CL}"
+echo -e "${YW}From the LXC host, enter the container's console (e.g. 'pct enter <CTID>' on Proxmox VE, or 'lxc exec <name> -- bash' on LXD/Incus), then run:${CL}"
+echo -e "  sudo -iu dev"
+echo -e "  codex-devbox onboard"

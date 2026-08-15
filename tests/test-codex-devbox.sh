@@ -5,9 +5,7 @@ set -Eeuo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 readonly REPO_ROOT
-readonly CT_SCRIPT="${REPO_ROOT}/ct/codex-devbox.sh"
-readonly INSTALL_SCRIPT="${REPO_ROOT}/install/codex-devbox-install.sh"
-readonly METADATA="${REPO_ROOT}/json/codex-devbox.json"
+readonly INSTALL_SCRIPT="${REPO_ROOT}/install.sh"
 TEST_TMP="$(mktemp -d /tmp/codex-devbox-tests.XXXXXX)"
 readonly TEST_TMP
 readonly MANAGER="${TEST_TMP}/codex-devbox"
@@ -50,167 +48,140 @@ extract_manager() {
 }
 
 scripts_have_valid_syntax() {
-  bash -n "$CT_SCRIPT" "$INSTALL_SCRIPT" "$MANAGER"
+  bash -n "$INSTALL_SCRIPT" "$MANAGER"
 }
 
-metadata_is_valid_json() {
-  python3 -m json.tool "$METADATA" >/dev/null
+standalone_no_proxmox_framework() {
+  [[ -f "$INSTALL_SCRIPT" ]] &&
+    [[ ! -d "${REPO_ROOT}/ct" ]] &&
+    [[ ! -d "${REPO_ROOT}/json" ]] &&
+    [[ ! -d "${REPO_ROOT}/install" ]] &&
+    ! grep -Eq \
+      'FUNCTIONS_FILE_PATH|build_container\(\)|COMMUNITY_FRAMEWORK_URL|ProxmoxVED|whiptail|pct create|pveam|pvesm|pvesh get /cluster/nextid|create_container\(' \
+      "$INSTALL_SCRIPT"
 }
 
-uses_community_file_layout() {
-  [[ -f "$CT_SCRIPT" ]] &&
-    [[ -f "$INSTALL_SCRIPT" ]] &&
-    [[ -f "$METADATA" ]] &&
-    [[ ! -e "${REPO_ROOT}/codex-devbox.sh" ]] &&
-    grep -Fq 'COMMUNITY_FRAMEWORK_URL="https://raw.githubusercontent.com/community-scripts/ProxmoxVE/main"' \
-      "$CT_SCRIPT" &&
-    grep -Fq 'CODEX_DEVBOX_SOURCE_URL' "$CT_SCRIPT" &&
-    ! grep -Fq 'community-scripts/ProxmoxVED' "$CT_SCRIPT" &&
-    grep -Fq 'source /dev/stdin <<<"$FUNCTIONS_FILE_PATH"' "$INSTALL_SCRIPT"
-}
-
-ct_script_has_standard_defaults() {
-  grep -Fq 'APP="Codex-DevBox"' "$CT_SCRIPT" &&
-    grep -Fq 'var_cpu="${var_cpu:-4}"' "$CT_SCRIPT" &&
-    grep -Fq 'var_ram="${var_ram:-8192}"' "$CT_SCRIPT" &&
-    grep -Fq 'var_disk="${var_disk:-32}"' "$CT_SCRIPT" &&
-    grep -Fq 'var_os="${var_os:-debian}"' "$CT_SCRIPT" &&
-    grep -Fq 'var_version="${var_version:-13}"' "$CT_SCRIPT" &&
-    grep -Fq 'var_arm64="${var_arm64:-no}"' "$CT_SCRIPT" &&
-    grep -Fq 'var_unprivileged="${var_unprivileged:-1}"' "$CT_SCRIPT"
-}
-
-ct_app_name_maps_to_installer() {
-  local app
-  local installer_slug
-
-  app="$(sed -n 's/^APP="\([^"]*\)"$/\1/p' "$CT_SCRIPT")"
-  installer_slug="$(tr '[:upper:]' '[:lower:]' <<<"$app" | tr -d ' ')"
-
-  [[ "${installer_slug}-install.sh" == "$(basename "$INSTALL_SCRIPT")" ]]
-}
-
-preview_source_routes_framework_and_installer() {
-  local preview_root="${TEST_TMP}/preview"
-  local preview_log="${preview_root}/fetch.log"
-
-  mkdir -p "${preview_root}/bin" "${preview_root}/ct"
-  cp "$CT_SCRIPT" "${preview_root}/ct/codex-devbox.sh"
-  printf '%s\n' \
-    '#!/usr/bin/env bash' \
-    'printf "%s\n" "$*" >>"$PREVIEW_LOG"' \
-    'cat <<'\''BUILD_FUNC'\''' \
-    'header_info() { :; }' \
-    'variables() { var_install="codex-devbox-install"; }' \
-    'color() { :; }' \
-    'catch_errors() { :; }' \
-    'msg_ok() { :; }' \
-    'start() { :; }' \
-    'description() { :; }' \
-    'build_container() {' \
-    '  curl -fsSL "https://raw.githubusercontent.com/community-scripts/ProxmoxVE/main/misc/install.func" >/dev/null' \
-    '  curl -fsSL "https://raw.githubusercontent.com/community-scripts/ProxmoxVE/main/install/${var_install}.sh" >/dev/null' \
-    '}' \
-    'BUILD_FUNC' >"${preview_root}/bin/curl"
-  chmod 0755 "${preview_root}/bin/curl"
-
-  CODEX_DEVBOX_SOURCE_URL="https://example.test/codex-devbox" \
-    PREVIEW_LOG="$preview_log" \
-    PATH="${preview_root}/bin:/usr/bin:/bin" \
-    bash "${preview_root}/ct/codex-devbox.sh" >/dev/null
-
-  grep -Fq \
-    'https://raw.githubusercontent.com/community-scripts/ProxmoxVE/main/misc/build.func' \
-    "$preview_log" &&
-    grep -Fq \
-    'https://raw.githubusercontent.com/community-scripts/ProxmoxVE/main/misc/install.func' \
-    "$preview_log" &&
-    grep -Fq \
-      'https://example.test/codex-devbox/install/codex-devbox-install.sh' \
-      "$preview_log"
-}
-
-framework_download_failure_is_explicit() {
-  local preview_root="${TEST_TMP}/download-failure"
-  local output_file="${preview_root}/output.log"
-  local status=0
-
-  mkdir -p "${preview_root}/bin" "${preview_root}/ct"
-  cp "$CT_SCRIPT" "${preview_root}/ct/codex-devbox.sh"
-  printf '%s\n' \
-    '#!/usr/bin/env bash' \
-    'exit 22' >"${preview_root}/bin/curl"
-  chmod 0755 "${preview_root}/bin/curl"
-
-  PATH="${preview_root}/bin:/usr/bin:/bin" \
-    bash "${preview_root}/ct/codex-devbox.sh" \
-    >"$output_file" 2>&1 || status=$?
-
-  [[ "$status" -eq 115 ]] &&
-    grep -Fq \
-      'FATAL: Failed to download the Community Scripts framework.' \
-      "$output_file" &&
-    ! grep -Fq 'command not found' "$output_file"
-}
-
-ct_script_uses_standard_orchestration() {
-  grep -Fq 'header_info "$APP"' "$CT_SCRIPT" &&
-    grep -Fxq 'variables' "$CT_SCRIPT" &&
-    grep -Fxq 'color' "$CT_SCRIPT" &&
-    grep -Fxq 'catch_errors' "$CT_SCRIPT" &&
-    grep -Fxq 'start' "$CT_SCRIPT" &&
-    grep -Fxq 'select_codex_autonomy' "$CT_SCRIPT" &&
-    grep -Fxq 'build_container' "$CT_SCRIPT" &&
-    grep -Fxq 'description' "$CT_SCRIPT"
-}
-
-ct_script_has_update_path() {
-  grep -Fq 'function update_script()' "$CT_SCRIPT" &&
-    grep -Fq 'check_container_storage' "$CT_SCRIPT" &&
-    grep -Fq 'check_container_resources' "$CT_SCRIPT" &&
-    grep -Fq '/usr/local/bin/codex-devbox update' "$CT_SCRIPT"
-}
-
-ct_script_does_not_duplicate_proxmox_core() {
-  ! grep -Eq \
-    'whiptail|pct create|pveam|pvesm|pvesh get /cluster/nextid|create_container\(' \
-    "$CT_SCRIPT"
-}
-
-install_script_uses_community_lifecycle() {
-  grep -Fxq 'color' "$INSTALL_SCRIPT" &&
-    grep -Fxq 'verb_ip6' "$INSTALL_SCRIPT" &&
-    grep -Fxq 'catch_errors' "$INSTALL_SCRIPT" &&
-    grep -Fxq 'setting_up_container' "$INSTALL_SCRIPT" &&
+install_script_runs_standalone_preflight() {
+  grep -Fq 'require_root() {' "$INSTALL_SCRIPT" &&
+    grep -Fq 'require_debian_like() {' "$INSTALL_SCRIPT" &&
+    grep -Fq 'network_check() {' "$INSTALL_SCRIPT" &&
+    grep -Fq 'update_os() {' "$INSTALL_SCRIPT" &&
+    grep -Fxq 'require_root' "$INSTALL_SCRIPT" &&
+    grep -Fxq 'require_debian_like' "$INSTALL_SCRIPT" &&
     grep -Fxq 'network_check' "$INSTALL_SCRIPT" &&
-    grep -Fxq 'update_os' "$INSTALL_SCRIPT" &&
-    grep -Fxq 'motd_ssh' "$INSTALL_SCRIPT" &&
-    grep -Fxq 'customize' "$INSTALL_SCRIPT" &&
-    grep -Fxq 'cleanup_lxc' "$INSTALL_SCRIPT" &&
-    [[ "$(tail -n 3 "$INSTALL_SCRIPT")" == $'motd_ssh\ncustomize\ncleanup_lxc' ]]
+    grep -Fxq 'update_os' "$INSTALL_SCRIPT"
 }
 
-install_script_uses_tools_helpers() {
-  grep -Fq 'setup_nodejs' "$INSTALL_SCRIPT" &&
-    grep -Fq 'setup_postgresql' "$INSTALL_SCRIPT" &&
-    grep -Fq 'setup_postgresql_db' "$INSTALL_SCRIPT" &&
-    grep -Fq 'curl_with_retry "https://mise.run"' "$INSTALL_SCRIPT" &&
-    ! grep -Fq 'deb.nodesource.com' "$INSTALL_SCRIPT"
-}
-
-erlang_source_build_supports_debian_13() {
-  grep -Fq autoconf "$INSTALL_SCRIPT" &&
-    grep -Fq libncurses-dev "$INSTALL_SCRIPT" &&
-    grep -Fq libssl-dev "$INSTALL_SCRIPT" &&
-    [[ "$(grep -Fc 'MISE_ERLANG_COMPILE=true' "$INSTALL_SCRIPT")" -eq 2 ]] &&
-    [[ "$(grep -Fc 'KERL_CONFIGURE_OPTIONS="--without-javac --without-wx --without-odbc"' \
-      "$INSTALL_SCRIPT")" -eq 2 ]] &&
-    ! grep -Fq 'MISE_ERLANG_COMPILE=false' "$INSTALL_SCRIPT" &&
-    ! grep -Fq 'community-scripts/ProxmoxVED' "$INSTALL_SCRIPT"
+installer_curl_pipeable_from_master() {
+  grep -Fq 'curl -fsSL https://raw.githubusercontent.com/c4kingpin/Scripts/master/install.sh | bash' \
+    "$INSTALL_SCRIPT"
 }
 
 install_script_is_bare_metal() {
   ! grep -Eq 'setup_docker|docker (run|compose|pull)|podman' "$INSTALL_SCRIPT"
+}
+
+erlang_toolchain_supports_debian_13() {
+  grep -Fq autoconf "$INSTALL_SCRIPT" &&
+    grep -Fq libncurses-dev "$INSTALL_SCRIPT" &&
+    grep -Fq libssl-dev "$INSTALL_SCRIPT" &&
+    grep -Fq 'MISE_ERLANG_COMPILE=true' "$INSTALL_SCRIPT" &&
+    grep -Fq 'KERL_CONFIGURE_OPTIONS="--without-javac --without-wx --without-odbc"' \
+      "$INSTALL_SCRIPT"
+}
+
+claude_cli_is_installed() {
+  grep -Fq 'npm install --global @anthropic-ai/claude-code@latest' "$INSTALL_SCRIPT" &&
+    grep -Fq 'npm install --global @openai/codex@latest' "$INSTALL_SCRIPT" &&
+    grep -Fq 'claude' "$MANAGER" &&
+    grep -Fxq 'claude --version' "$INSTALL_SCRIPT" &&
+    grep -Fq 'run_as_dev claude --version' "$MANAGER"
+}
+
+doctor_checks_claude_alongside_codex() {
+  python3 - "$MANAGER" <<'PY'
+import pathlib
+import re
+import sys
+
+manager = pathlib.Path(sys.argv[1]).read_text()
+match = re.search(r"local commands=\((.*?)\)", manager, re.S)
+assert match, "doctor() commands array not found"
+commands = match.group(1).split()
+assert "claude" in commands, commands
+assert "codex" in commands, commands
+PY
+}
+
+update_command_supports_branch_argument() {
+  grep -Fq 'update_devbox() {' "$MANAGER" &&
+    grep -Fq 'readonly DEFAULT_UPDATE_BRANCH="master"' "$MANAGER" &&
+    grep -Fq 'local branch="${1:-$DEFAULT_UPDATE_BRANCH}"' "$MANAGER" &&
+    grep -Fq 'local installer_url="${repo_url%/}/${branch}/install.sh"' "$MANAGER" &&
+    grep -Fq 'update:*)' "$MANAGER" &&
+    grep -Fq 'update_devbox "$subcommand"' "$MANAGER" &&
+    grep -Fq 'update [branch]' "$MANAGER"
+}
+
+update_downloads_and_reruns_installer() {
+  grep -Fq 'curl -fsSL --connect-timeout 15 --retry 5 --retry-connrefused' "$MANAGER" &&
+    grep -Fq 'bash "$installer"' "$MANAGER" &&
+    grep -Fq 'Failed to download installer from' "$MANAGER" &&
+    grep -Fq 'DEFAULT_REPO_URL="https://raw.githubusercontent.com/c4kingpin/Scripts"' "$MANAGER"
+}
+
+update_branch_argument_is_honored() {
+  local fake_repo="${TEST_TMP}/fake-repo"
+  local output_file="${TEST_TMP}/update-output.log"
+  local bin_dir="${TEST_TMP}/bin"
+  local manager_functions="${TEST_TMP}/manager-functions.sh"
+
+  mkdir -p "$fake_repo" "$bin_dir"
+  cat <<'EOF' >"${fake_repo}/install.sh"
+#!/usr/bin/env bash
+echo "ran fake installer"
+EOF
+  chmod 0755 "${fake_repo}/install.sh"
+
+  cat <<EOF >"${bin_dir}/curl"
+#!/usr/bin/env bash
+out=""
+prev=""
+for arg in "\$@"; do
+  if [[ "\$prev" == "-o" ]]; then
+    out="\$arg"
+  fi
+  prev="\$arg"
+done
+url="\${!#}"
+case "\$url" in
+*/feature-branch/install.sh)
+  cp "${fake_repo}/install.sh" "\$out"
+  ;;
+*)
+  exit 22
+  ;;
+esac
+EOF
+  chmod 0755 "${bin_dir}/curl"
+
+  # Drop the trailing "main \"\$@\"" call so sourcing only defines functions.
+  head -n -1 "$MANAGER" >"$manager_functions"
+
+  (
+    set -Eeuo pipefail
+    PATH="${bin_dir}:/usr/bin:/bin"
+    # shellcheck source=/dev/null
+    source "$manager_functions"
+    # shellcheck disable=SC2329 # invoked indirectly by update_devbox below
+    require_root() { :; }
+    # shellcheck disable=SC2329 # invoked indirectly by update_devbox below
+    doctor() { :; }
+    update_devbox feature-branch
+  ) >"$output_file" 2>&1 || true
+
+  grep -Fq "ran fake installer" "$output_file" &&
+    grep -Fq "Downloading installer from branch 'feature-branch'" "$output_file"
 }
 
 developer_user_is_least_privilege() {
@@ -223,6 +194,26 @@ developer_user_is_least_privilege() {
       '${DEV_USER} ALL=(root) NOPASSWD: /usr/local/bin/codex-devbox ssh setup' \
       "$INSTALL_SCRIPT" &&
     ! grep -Eq 'NOPASSWD:[[:space:]]*ALL' "$INSTALL_SCRIPT"
+}
+
+developer_password_only_set_on_creation() {
+  python3 - "$INSTALL_SCRIPT" <<'PY'
+import pathlib
+import re
+import sys
+
+install = pathlib.Path(sys.argv[1]).read_text()
+match = re.search(
+    r'if ! id "\$DEV_USER".*?\n(.*?)\nfi\n',
+    install,
+    re.S,
+)
+assert match, "user-creation guard block not found"
+block = match.group(1)
+assert "useradd" in block
+assert "random_password" in block
+assert "usermod --password" in block
+PY
 }
 
 developer_home_parents_are_writable() {
@@ -253,28 +244,40 @@ developer_home_parents_are_writable() {
   mkdir "${permissions_root}/.config/mise"
 }
 
+rerunning_installer_is_idempotent() {
+  grep -Fq 'if ! grep -Fq '\''# Codex Dev Box'\'' "${DEV_HOME}/.bashrc"' "$INSTALL_SCRIPT" &&
+    grep -Fq 'if [[ ! -f "${DEV_HOME}/.codex/config.toml" ]]; then' "$INSTALL_SCRIPT" &&
+    grep -Fq 'if [[ -f "${DEV_HOME}/.codex/config.toml" ]]; then' "$INSTALL_SCRIPT" &&
+    grep -Fq 'elif [[ ! -s "${DEV_HOME}/.ssh/authorized_keys" ]]; then' "$INSTALL_SCRIPT" &&
+    grep -Fq "SELECT 1 FROM pg_roles WHERE rolname = '\${PG_DB_USER}'" "$INSTALL_SCRIPT" &&
+    grep -Fq "SELECT 1 FROM pg_database WHERE datname = '\${PG_DB_NAME}'" "$INSTALL_SCRIPT" &&
+    grep -Fq "grep -q '^PGPASSWORD='" "$INSTALL_SCRIPT"
+}
+
 ssh_onboarding_distinguishes_key_directions() {
   grep -Fq 'A private client key must' "$INSTALL_SCRIPT" &&
     grep -Fq 'SSH_AUTHORIZED_KEY' "$INSTALL_SCRIPT" &&
-    grep -Fq 'keys generate' "$INSTALL_SCRIPT" &&
-    grep -Fq 'ssh-keygen' "$INSTALL_SCRIPT" &&
-    grep -Fq 'keys upload-github' "$INSTALL_SCRIPT"
+    grep -Fq 'keys generate' "$MANAGER" &&
+    grep -Fq 'ssh-keygen' "$MANAGER" &&
+    grep -Fq 'keys upload-github' "$MANAGER"
 }
 
 unsupported_cli_remote_service_is_absent() {
   ! grep -Eq \
     'codex remote-control|codex-remote-control\.service|app-server-control\.sock' \
-    "$CT_SCRIPT" "$INSTALL_SCRIPT"
+    "$INSTALL_SCRIPT"
 }
 
-remote_instructions_use_supported_path() {
+remote_instructions_are_platform_agnostic() {
   local output
 
   output="$("$MANAGER" remote-info)"
   grep -Fq 'ChatGPT on iOS' <<<"$output" &&
     grep -Fq 'ChatGPT desktop app on macOS or Windows' <<<"$output" &&
     grep -Fq 'SSH connection' <<<"$output" &&
-    grep -Fq 'pct enter <CTID>' <<<"$output"
+    grep -Fq 'pct enter <CTID>' <<<"$output" &&
+    grep -Fq 'lxc exec' <<<"$output" &&
+    grep -Fq 'incus exec' <<<"$output"
 }
 
 manager_exposes_expected_commands() {
@@ -289,7 +292,7 @@ manager_exposes_expected_commands() {
     grep -Fq 'keys generate' <<<"$output" &&
     grep -Fq 'remote-info' <<<"$output" &&
     grep -Fq 'doctor' <<<"$output" &&
-    grep -Fq 'update' <<<"$output"
+    grep -Fq 'update [branch]' <<<"$output"
 }
 
 manager_rejects_unknown_commands() {
@@ -299,78 +302,25 @@ manager_rejects_unknown_commands() {
   [[ "$status" -eq 2 ]]
 }
 
-metadata_matches_scripts() {
-  python3 - "$METADATA" "$CT_SCRIPT" <<'PY'
-import json
-import pathlib
-import sys
-
-metadata = json.loads(pathlib.Path(sys.argv[1]).read_text())
-ct_script = pathlib.Path(sys.argv[2]).read_text()
-
-resources = metadata["install_methods"][0]["resources"]
-assert metadata["name"] == "Codex DevBox"
-assert metadata["slug"] == "codex-devbox"
-assert metadata["type"] == "ct"
-assert metadata["updateable"] is True
-assert metadata["privileged"] is False
-assert metadata["has_arm"] is False
-assert metadata["interface_port"] is None
-assert metadata["categories"] == [20]
-assert metadata["config_path"] == "/home/dev/.config/codex-devbox"
-assert metadata["install_methods"][0]["script"] == "ct/codex-devbox.sh"
-assert resources == {
-    "cpu": 4,
-    "ram": 8192,
-    "hdd": 32,
-    "os": "Debian",
-    "version": "13",
-}
-for value in ('var_cpu="${var_cpu:-4}"',
-              'var_ram="${var_ram:-8192}"',
-              'var_disk="${var_disk:-32}"',
-              'var_os="${var_os:-debian}"',
-              'var_version="${var_version:-13}"',
-              'var_arm64="${var_arm64:-no}"'):
-    assert value in ct_script
-PY
-}
-
 no_hardcoded_default_credentials() {
-  python3 - "$METADATA" <<'PY'
-import json
-import pathlib
-import sys
-
-metadata = json.loads(pathlib.Path(sys.argv[1]).read_text())
-assert metadata["default_credentials"] == {
-    "username": None,
-    "password": None,
-}
-PY
   ! grep -Eq \
     'PASSWORD=(postgres|password|changeme)|password["'\'']?[[:space:]]*[:=][[:space:]]*["'\'']?(postgres|password|changeme)' \
-    "$CT_SCRIPT" "$INSTALL_SCRIPT"
+    "$INSTALL_SCRIPT"
 }
 
 managed_secrets_have_restricted_permissions() {
   grep -Fq 'chmod 0600' "$INSTALL_SCRIPT" &&
     grep -Fq '"${DEV_HOME}/.pgpass"' "$INSTALL_SCRIPT" &&
-    grep -Fq '"${DEV_HOME}/.config/codex-devbox/postgres.env"' \
-      "$INSTALL_SCRIPT" &&
+    grep -Fq '"$PG_ENV_FILE"' "$INSTALL_SCRIPT" &&
     grep -Fq 'chmod 0600 "${DEV_HOME}/.codex/config.toml"' \
       "$INSTALL_SCRIPT" &&
     grep -Fq 'chmod 0600 "$OPENROUTER_ENV"' "$MANAGER"
 }
 
 codex_autonomy_is_selectable_and_persisted() {
-  grep -Fq 'select_codex_autonomy() {' "$CT_SCRIPT" &&
-    grep -Fq 'var_codex_autonomy' "$CT_SCRIPT" &&
-    grep -Fq '"How autonomously may Codex work?"' "$CT_SCRIPT" &&
-    grep -Fq 'CODEX_AUTONOMY="balanced"' "$CT_SCRIPT" &&
-    grep -Fq 'export CODEX_AUTONOMY' "$CT_SCRIPT" &&
-    grep -Fq 'CODEX_AUTONOMY="${CODEX_AUTONOMY:-balanced}"' \
-      "$INSTALL_SCRIPT" &&
+  grep -Fq 'select_codex_autonomy() {' "$INSTALL_SCRIPT" &&
+    grep -Fq 'CODEX_AUTONOMY' "$INSTALL_SCRIPT" &&
+    grep -Fq 'How autonomously may Codex work?' "$INSTALL_SCRIPT" &&
     grep -Fq 'approval_policy = "${codex_approval_policy}"' \
       "$INSTALL_SCRIPT" &&
     grep -Fq 'sandbox_mode = "${codex_sandbox_mode}"' "$INSTALL_SCRIPT" &&
@@ -410,11 +360,9 @@ first_login_onboarding_is_optional_and_repeatable() {
 }
 
 update_preserves_user_state() {
-  grep -Fq 'Updating Codex CLI' "$MANAGER" &&
-    grep -Fq 'Ensuring managed Erlang, Elixir and Phoenix versions' "$MANAGER" &&
-    ! grep -Eq \
-      'rm -rf[[:space:]]+("?)(/home/dev/workspace|/home/dev/\.codex|/home/dev/\.ssh)' \
-      "$MANAGER"
+  ! grep -Eq \
+    'rm -rf[[:space:]]+("?)(/home/dev/workspace|/home/dev/\.codex|/home/dev/\.ssh)' \
+    "$MANAGER" "$INSTALL_SCRIPT"
 }
 
 installer_validates_complete_stack() {
@@ -422,6 +370,7 @@ installer_validates_complete_stack() {
     grep -Fxq 'node --version' "$INSTALL_SCRIPT" &&
     grep -Fxq 'npm --version' "$INSTALL_SCRIPT" &&
     grep -Fxq 'codex --version' "$INSTALL_SCRIPT" &&
+    grep -Fxq 'claude --version' "$INSTALL_SCRIPT" &&
     grep -Fq 'run_as_dev "${DEV_HOME}/.local/bin/mise" --version' "$INSTALL_SCRIPT" &&
     grep -Fq 'exec -- elixir --version' "$INSTALL_SCRIPT" &&
     grep -Fq 'exec -- mix phx.new --version' "$INSTALL_SCRIPT" &&
@@ -434,27 +383,25 @@ installer_validates_complete_stack() {
 extract_manager
 
 run_test "Bash syntax" scripts_have_valid_syntax
-run_test "metadata JSON" metadata_is_valid_json
-run_test "Community file layout" uses_community_file_layout
-run_test "standard CT defaults" ct_script_has_standard_defaults
-run_test "APP maps to installer filename" ct_app_name_maps_to_installer
-run_test "preview source routing" preview_source_routes_framework_and_installer
-run_test "explicit framework download failure" framework_download_failure_is_explicit
-run_test "standard CT orchestration" ct_script_uses_standard_orchestration
-run_test "standard update path" ct_script_has_update_path
-run_test "no duplicated Proxmox core" ct_script_does_not_duplicate_proxmox_core
-run_test "install lifecycle" install_script_uses_community_lifecycle
-run_test "tools.func helpers" install_script_uses_tools_helpers
-run_test "Debian 13 Erlang source build" erlang_source_build_supports_debian_13
+run_test "standalone, no Proxmox/community-scripts framework" standalone_no_proxmox_framework
+run_test "standalone preflight checks" install_script_runs_standalone_preflight
+run_test "curl-pipeable from master" installer_curl_pipeable_from_master
 run_test "bare-metal install" install_script_is_bare_metal
+run_test "Debian 13 Erlang toolchain" erlang_toolchain_supports_debian_13
+run_test "Claude CLI installed alongside Codex CLI" claude_cli_is_installed
+run_test "doctor checks Claude CLI" doctor_checks_claude_alongside_codex
+run_test "update command supports branch argument" update_command_supports_branch_argument
+run_test "update downloads and reruns installer" update_downloads_and_reruns_installer
+run_test "update honors the requested branch" update_branch_argument_is_honored
 run_test "least-privilege developer user" developer_user_is_least_privilege
+run_test "developer password only set on creation" developer_password_only_set_on_creation
 run_test "writable developer home parents" developer_home_parents_are_writable
+run_test "rerunning the installer is idempotent" rerunning_installer_is_idempotent
 run_test "SSH key directions" ssh_onboarding_distinguishes_key_directions
 run_test "unsupported CLI Remote service removed" unsupported_cli_remote_service_is_absent
-run_test "supported mobile connection instructions" remote_instructions_use_supported_path
+run_test "platform-agnostic remote instructions" remote_instructions_are_platform_agnostic
 run_test "manager command surface" manager_exposes_expected_commands
 run_test "manager rejects unknown commands" manager_rejects_unknown_commands
-run_test "metadata matches scripts" metadata_matches_scripts
 run_test "no hardcoded default credentials" no_hardcoded_default_credentials
 run_test "managed secret permissions" managed_secrets_have_restricted_permissions
 run_test "selectable Codex autonomy" codex_autonomy_is_selectable_and_persisted

@@ -1,64 +1,59 @@
-# Codex DevBox für Proxmox
+# Codex DevBox für LXC
 
-Dieses Repository enthält einen Community-Scripts-kompatiblen LXC-Installer
-für eine isolierte Codex-Entwicklungsumgebung. Die Struktur entspricht dem
-aktuellen Entwicklungsrepository
-[ProxmoxVED](https://github.com/community-scripts/ProxmoxVED):
+Dieses Repository enthält einen eigenständigen Installer für eine isolierte
+Codex- und Claude-Entwicklungsumgebung. Das Skript läuft direkt **innerhalb**
+eines bereits vorhandenen, unprivilegierten LXC-Containers (Proxmox VE,
+LXD/Incus oder jede andere Plattform) und hat keine Abhängigkeit zu Proxmox
+selbst oder zum Community-Scripts-Framework:
 
-- `ct/codex-devbox.sh` – Proxmox-Dialog, Container-Erstellung und Updates
-- `install/codex-devbox-install.sh` – Installation innerhalb des Containers
-- `json/codex-devbox.json` – Community-Scripts-Metadaten
+- `install.sh` – der eigenständige Installer; wird als `root` im Container
+  ausgeführt und richtet auch den `codex-devbox`-Manager ein.
 
-Der frühere eigenständige Proxmox-Monolith wurde durch die zentralen
-Community-Scripts-Funktionen ersetzt. Storage-, Netzwerk-, Template-,
-Ressourcen- und Container-Dialoge kommen dadurch direkt aus dem Upstream-
-Framework.
+Das Skript erstellt oder konfiguriert den Container selbst nicht. Storage,
+Netzwerk, Template und Ressourcen des Containers müssen vor dem Aufruf bereits
+über das jeweilige Hypervisor-Tooling (`pct create`, `lxc launch`,
+`incus launch`, …) vorhanden sein.
 
 ## Standardkonfiguration
 
 | Einstellung | Standard |
 | --- | --- |
-| Betriebssystem | Debian 13 |
-| Container | unprivilegiert |
-| CPU | 4 Kerne |
-| RAM | 8192 MiB |
-| Speicher | 32 GiB |
-| Architektur | amd64 |
 | Benutzer | `dev` |
 | Workspace | `/home/dev/workspace` |
 | Codex-Autonomie | ausgewogen |
 
-Installiert werden unter anderem Codex CLI, Node.js 24, Git, Git LFS, GitHub
-CLI, Python, ShellCheck, ripgrep, `fd`, Erlang/OTP, Elixir, Phoenix und
-PostgreSQL. Erlang, Elixir und Phoenix werden für den Benutzer `dev` über
-`mise` verwaltet.
+Installiert werden unter anderem Codex CLI, Claude CLI, Node.js 24, Git, Git
+LFS, GitHub CLI, Python, ShellCheck, ripgrep, `fd`, Erlang/OTP, Elixir,
+Phoenix und PostgreSQL. Erlang, Elixir und Phoenix werden für den Benutzer
+`dev` über `mise` verwaltet.
+
+Empfohlene Containergröße: 4 CPU-Kerne, 8192 MiB RAM, 32 GiB Speicher, Debian
+13 (amd64), unprivilegiert. Kleinere Container funktionieren ebenfalls, der
+Erlang-Quellbuild profitiert aber von mehr CPU-Kernen.
 
 ## Installation
 
-Das Skript wird in der Proxmox-VE-Shell als `root` gestartet.
-
-Solange die Dateien in diesem eigenständigen Repository liegen:
-
-```bash
-CODEX_DEVBOX_SOURCE_URL="https://raw.githubusercontent.com/c4kingpin/Scripts/master" \
-  bash -c "$(curl -fsSL https://raw.githubusercontent.com/c4kingpin/Scripts/master/ct/codex-devbox.sh)"
-```
-
-`CODEX_DEVBOX_SOURCE_URL` sorgt dafür, dass das offizielle Community-Framework
-den zugehörigen Installer aus diesem Repository lädt. Nach einer Aufnahme in
-`community-scripts/ProxmoxVED` genügt der normale Community-Aufruf:
+Zuerst einen unprivilegierten LXC-Container mit Debian 13 (oder einem anderen
+Debian-/Ubuntu-Derivat mit `apt`) über das jeweilige Hypervisor-Tooling
+anlegen und starten. Danach das Skript als `root` **innerhalb** des
+Containers ausführen:
 
 ```bash
-bash -c "$(curl -fsSL https://raw.githubusercontent.com/community-scripts/ProxmoxVED/main/ct/codex-devbox.sh)"
+curl -fsSL https://raw.githubusercontent.com/c4kingpin/Scripts/master/install.sh | bash
 ```
 
-Das Community-Scripts-Framework bietet die Standard- und erweiterten
-Installationsdialoge. Darin können unter anderem VMID, Hostname, Storage,
-Bridge, IP-Konfiguration, DNS und ein vorhandener SSH-Public-Key festgelegt
-werden.
+Auf Proxmox VE zum Beispiel über die Konsole des Containers:
 
-Vor dem Erstellen des Containers fragt das Skript zusätzlich, wie autonom Codex
-arbeiten darf:
+```bash
+pct enter <CTID>
+curl -fsSL https://raw.githubusercontent.com/c4kingpin/Scripts/master/install.sh | bash
+```
+
+Auf LXD/Incus entsprechend über `lxc exec <name> -- bash` bzw.
+`incus exec <name> -- bash`.
+
+Vor der eigentlichen Installation fragt das Skript in einer interaktiven
+Sitzung, wie autonom Codex arbeiten darf:
 
 | Profil | Codex-Verhalten |
 | --- | --- |
@@ -67,28 +62,32 @@ arbeiten darf:
 | Autonom | Codex darf den Workspace bearbeiten und das Netzwerk ohne Freigabedialoge nutzen; die Workspace-Sandbox bleibt aktiv. |
 | Vollzugriff | Keine Sandbox und keine Freigabedialoge innerhalb des LXC-Containers. |
 
-Die Auswahl wird als `approval_policy` und `sandbox_mode` in
-`/home/dev/.codex/config.toml` gespeichert und kann dort später geändert werden.
-Bei einer unbeaufsichtigten Installation wird `balanced` verwendet. Alternativ
-kann das Profil vorgegeben werden:
+Ohne interaktives Terminal (z. B. bei automatisierten Aufrufen) wird
+`balanced` verwendet. Das Profil lässt sich auch vorgeben:
 
 ```bash
-var_codex_autonomy=autonomous \
-  CODEX_DEVBOX_SOURCE_URL="https://raw.githubusercontent.com/c4kingpin/Scripts/master" \
-  bash -c "$(curl -fsSL https://raw.githubusercontent.com/c4kingpin/Scripts/master/ct/codex-devbox.sh)"
+CODEX_AUTONOMY=autonomous \
+  curl -fsSL https://raw.githubusercontent.com/c4kingpin/Scripts/master/install.sh | bash
 ```
 
 Gültige Werte sind `controlled`, `balanced`, `autonomous` und `full-access`.
 `full-access` hebt nur die innere Codex-Sandbox auf; die Grenze des
 unprivilegierten LXC-Containers bleibt bestehen.
 
+Die Auswahl wird als `approval_policy` und `sandbox_mode` in
+`/home/dev/.codex/config.toml` gespeichert und kann dort später jederzeit
+geändert werden. Ein späterer `codex-devbox update` überschreibt eine bereits
+vorhandene `config.toml` nicht.
+
 ## Erster Login und Onboarding
 
-Die Devbox ist immer über die Proxmox-Konsole nutzbar; SSH ist keine
+Die Devbox ist immer über die Konsole des LXC-Hosts nutzbar; SSH ist keine
 Voraussetzung:
 
 ```bash
-pct enter <CTID>
+pct enter <CTID>            # Proxmox VE
+lxc exec <name> -- bash     # LXD
+incus exec <name> -- bash   # Incus
 sudo -iu dev
 ```
 
@@ -114,9 +113,13 @@ trotzdem jederzeit erneut aufgerufen werden.
 
 ## SSH sicher einrichten
 
-SSH bleibt deaktiviert, solange kein Public Key hinterlegt ist. Wurde im
-erweiterten Proxmox-Dialog bereits ein SSH-Key angegeben, übernimmt der
-Installer diesen für `dev` und aktiviert den Dienst.
+SSH bleibt deaktiviert, solange kein Public Key hinterlegt ist. Ein Key kann
+entweder vorab beim Installationsaufruf übergeben werden:
+
+```bash
+SSH_AUTHORIZED_KEY="ssh-ed25519 AAAA... client" \
+  curl -fsSL https://raw.githubusercontent.com/c4kingpin/Scripts/master/install.sh | bash
+```
 
 Andernfalls wird der Zugriff später eingerichtet. Der private Schlüssel wird
 auf dem Mac, Windows-PC oder sonstigen SSH-Client erzeugt, der sich mit der
@@ -181,9 +184,7 @@ codex-devbox auth logout
 ```
 
 Codex verwaltet seine Anmeldung selbst unter `~/.codex`. Dieser Ordner darf
-nicht kopiert, veröffentlicht oder eingecheckt werden. Die CLI-Anmeldung ist
-von der Einrichtung einer ChatGPT-Remote-Verbindung in der Desktop-App
-getrennt.
+nicht kopiert, veröffentlicht oder eingecheckt werden.
 
 ## OpenRouter für Codex
 
@@ -221,6 +222,20 @@ codex-devbox openrouter disable
 Dabei werden der gespeicherte Key, das Profil und `codex-openrouter` entfernt.
 Der normale `codex`-Aufruf und seine ChatGPT-Anmeldung bleiben unverändert.
 
+## Claude CLI
+
+Neben Codex installiert der Installer auch die Claude-CLI
+(`@anthropic-ai/claude-code`) für den Benutzer `dev`:
+
+```bash
+claude --version
+claude
+```
+
+Der erste Aufruf von `claude` führt durch die Anmeldung (Browser-Login oder
+ein hinterlegter `ANTHROPIC_API_KEY`). Die Anmeldedaten verwaltet die CLI
+selbst; sie werden vom Installer weder ausgegeben noch verändert.
+
 ## ChatGPT auf iPhone oder iPad
 
 Die unterstützte Verbindung läuft über einen gekoppelten Desktop-Rechner:
@@ -243,8 +258,8 @@ Die aktuellen Hinweise zeigt auch:
 codex-devbox remote-info
 ```
 
-Ohne SSH bleibt die Devbox vollständig über `pct enter` und `sudo -iu dev`
-nutzbar.
+Ohne SSH bleibt die Devbox vollständig über die Konsole des LXC-Hosts (z. B.
+`pct enter`, `lxc exec`, `incus exec`) und `sudo -iu dev` nutzbar.
 
 ## PostgreSQL
 
@@ -266,6 +281,9 @@ source ~/.config/codex-devbox/postgres.env
 set +a
 ```
 
+Ein `codex-devbox update` ändert das gespeicherte Datenbankpasswort nicht,
+solange `postgres.env` bereits existiert.
+
 ## Betrieb und Updates
 
 Diagnose:
@@ -274,55 +292,64 @@ Diagnose:
 codex-devbox doctor
 ```
 
-Der offizielle Updatepfad wird über `update_script()` im CT-Wrapper
-bereitgestellt. Auf dem Proxmox-Host kann derselbe Installationsaufruf erneut
-gestartet und der vorhandene Container zum Update ausgewählt werden. Innerhalb
-des Containers steht zusätzlich der Manager zur Verfügung:
+Update auf den aktuellen Stand des `master`-Branches:
 
 ```bash
 sudo codex-devbox update
 ```
 
-Das Update aktualisiert Debian-Pakete, Codex CLI und die verwaltete
-Erlang-/Elixir-/Phoenix-Toolchain. Workspace, SSH-Schlüssel, Codex-
-Anmeldedaten, Git-Konfiguration und PostgreSQL-Daten werden nicht gelöscht.
+Optional lässt sich auch ein anderer Branch installieren, zum Beispiel um
+eine Vorabversion zu testen:
+
+```bash
+sudo codex-devbox update feature/mein-branch
+```
+
+`codex-devbox update [branch]` lädt `install.sh` vom angegebenen (oder
+standardmäßig dem `master`-) Branch aus dem GitHub-Repository herunter und
+führt es erneut aus. Der Installer ist für wiederholte Ausführungen
+ausgelegt: Betriebssystempakete, Codex CLI, Claude CLI und die verwaltete
+Erlang-/Elixir-/Phoenix-Toolchain werden aktualisiert, während Workspace,
+SSH-Schlüssel, Codex-Anmeldedaten, Git-Konfiguration, eine bereits vorhandene
+`~/.codex/config.toml` und die PostgreSQL-Daten unverändert erhalten bleiben.
+
+Um von einem eigenen Fork oder Spiegel zu aktualisieren, kann die
+Repository-URL überschrieben werden:
+
+```bash
+CODEX_DEVBOX_REPO_URL="https://raw.githubusercontent.com/<fork>/Scripts" \
+  sudo -E codex-devbox update <branch>
+```
 
 Automatische Sicherheitsupdates sind aktiviert. Da `dev` bewusst kein
-allgemeines passwortloses `sudo` besitzt, erfolgen Systemänderungen entweder
-über den eingeschränkten SSH-Onboarding-Befehl oder über die Proxmox-
-Root-Konsole.
+allgemeines passwortloses `sudo` besitzt, erfolgen weitergehende
+Systemänderungen entweder über den eingeschränkten SSH-Onboarding-Befehl oder
+über `sudo codex-devbox update` als `root`.
 
 ## Tests
 
 Lokale Prüfungen:
 
 ```bash
-bash -n \
-  ct/codex-devbox.sh \
-  install/codex-devbox-install.sh \
-  tests/test-codex-devbox.sh
+bash -n install.sh tests/test-codex-devbox.sh
 
-python3 -m json.tool json/codex-devbox.json >/dev/null
 bash tests/test-codex-devbox.sh
 
-shellcheck -x \
-  ct/codex-devbox.sh \
-  install/codex-devbox-install.sh \
+shellcheck -x --exclude=SC1090,SC1091,SC2086,SC2154 \
+  install.sh \
   tests/test-codex-devbox.sh
 ```
 
 Diese Prüfungen laufen bei Pushes und Pull Requests über GitHub Actions. Ein
-vollständiger End-to-End-Test erfordert weiterhin einen Proxmox-VE-Testhost,
-weil Container-, Storage- und Netzwerkoperationen lokal nicht realistisch
+vollständiger End-to-End-Test erfordert weiterhin einen echten LXC-Container,
+weil Paketinstallation, Systemd-Dienste und PostgreSQL lokal nicht realistisch
 simuliert werden können.
 
 ## Upstream-Dokumentation
 
-- [Community-Scripts: CT detailed guide](https://community-scripts.org/docs/ct/detailed_guide)
-- [Community-Scripts: Install detailed guide](https://community-scripts.org/docs/install/detailed_guide)
-- [Community-Scripts: Contribution workflow](https://github.com/community-scripts/ProxmoxVE/blob/main/CONTRIBUTING.md)
 - [Codex CLI](https://developers.openai.com/codex/cli/)
-- [ChatGPT Remote connections](https://learn.chatgpt.com/docs/remote-connections)
 - [Codex `AGENTS.md`](https://developers.openai.com/codex/guides/agents-md/)
+- [Claude Code](https://docs.claude.com/en/docs/claude-code/overview)
+- [ChatGPT Remote connections](https://learn.chatgpt.com/docs/remote-connections)
 - [mise](https://mise.jdx.dev/)
 - [Phoenix installation](https://hexdocs.pm/phoenix/installation.html)
