@@ -8,35 +8,41 @@
 #   https://github.com/anthropics/claude-code
 #   https://github.com/slopus/happy
 #
-# DevBox - standalone LXC installer
+# DevBox - standalone Ubuntu LTS LXC installer
 #
-# Architecture:
+# Runtime architecture:
 #
 #   root
-#     -> OS/package/toolchain administration only
+#     - OS/package administration
+#     - system services
+#     - system toolchain
 #
 #   postgres
-#     -> PostgreSQL service
+#     - PostgreSQL
 #
 #   dev
-#     -> Happy
-#     -> Claude Code
-#     -> Codex
-#     -> Git/GitHub
-#     -> project workspaces
-#     -> agent credentials
+#     - Happy
+#     - Claude Code
+#     - Codex
+#     - Git/GitHub
+#     - project workspaces
+#     - agent credentials
 #
-# Happy is the primary session and remote-control layer. Claude Code and
-# Codex remain installed as native backend CLIs.
+# Happy is the primary session/remote layer:
 #
-# IMPORTANT:
-# Happy asking to pair/connect on the first real use is expected.
-# The installer itself deliberately does NOT execute `happy --version`,
-# because current Happy versions continue from --version into their normal
-# startup/authentication flow. The installed Happy version is therefore
-# validated through npm without starting Happy itself.
+#   happy
+#   happy claude
+#   happy codex
 #
-# Run as root inside an already provisioned Ubuntu LTS LXC:
+# Native Claude and Codex remain installed as backends:
+#
+#   claude
+#   codex
+#
+# Existing administrative SSH/root access is deliberately NOT restricted.
+# DevBox SSH configuration applies only to the "dev" user.
+#
+# Run as root:
 #
 #   curl -fsSL \
 #     https://raw.githubusercontent.com/c4kingpin/Scripts/master/devbox/install.sh \
@@ -125,6 +131,39 @@ require_supported_os() {
   esac
 }
 
+# Older DevBox revisions wrote a global SSH policy containing:
+#
+#   PermitRootLogin no
+#   AllowUsers dev
+#
+# That could block new administrative root SSH sessions. Remove only a file
+# that clearly matches the legacy DevBox policy. Other SSH configuration is
+# never modified here.
+repair_legacy_ssh_policy() {
+  local ssh_config="/etc/ssh/sshd_config.d/00-devbox.conf"
+
+  [[ -f "$ssh_config" ]] || return 0
+
+  if grep -Eq \
+    '^(PermitRootLogin no|AllowUsers dev|AuthenticationMethods publickey)$' \
+    "$ssh_config"; then
+
+    msg_info "Removing legacy global DevBox SSH restrictions"
+
+    rm -f "$ssh_config"
+
+    if command -v sshd >/dev/null 2>&1; then
+      /usr/sbin/sshd -t
+
+      if systemctl is-active --quiet ssh.service 2>/dev/null; then
+        systemctl reload ssh.service
+      fi
+    fi
+
+    msg_ok "Removed legacy SSH restrictions; administrative SSH policy preserved"
+  fi
+}
+
 network_check() {
   msg_info "Checking network connectivity"
 
@@ -175,6 +214,7 @@ curl_with_retry() {
 
 require_root
 require_supported_os
+repair_legacy_ssh_policy
 network_check
 update_os
 
@@ -186,10 +226,7 @@ ERLANG_VERSION="${ERLANG_VERSION:-29.0.5}"
 ELIXIR_VERSION="${ELIXIR_VERSION:-1.20.3}"
 PHOENIX_VERSION="${PHOENIX_VERSION:-1.8.9}"
 
-DEVBOX_REPO_URL="${
-  DEVBOX_REPO_URL:-
-  https://raw.githubusercontent.com/c4kingpin/Scripts
-}"
+DEVBOX_REPO_URL="${DEVBOX_REPO_URL:-https://raw.githubusercontent.com/c4kingpin/Scripts}"
 
 run_as_dev() (
   cd "$DEV_HOME"
@@ -253,21 +290,11 @@ EOF
           choice
 
         case "${choice:-2}" in
-          1)
-            DEVBOX_AUTONOMY="controlled"
-            ;;
-          2)
-            DEVBOX_AUTONOMY="balanced"
-            ;;
-          3)
-            DEVBOX_AUTONOMY="autonomous"
-            ;;
-          4)
-            DEVBOX_AUTONOMY="full-access"
-            ;;
-          *)
-            DEVBOX_AUTONOMY="balanced"
-            ;;
+          1) DEVBOX_AUTONOMY="controlled" ;;
+          2) DEVBOX_AUTONOMY="balanced" ;;
+          3) DEVBOX_AUTONOMY="autonomous" ;;
+          4) DEVBOX_AUTONOMY="full-access" ;;
+          *) DEVBOX_AUTONOMY="balanced" ;;
         esac
       else
         DEVBOX_AUTONOMY="balanced"
@@ -413,7 +440,6 @@ fi
 rm -f \
   /usr/local/bin/codex-devbox \
   /etc/sudoers.d/90-codex-devbox \
-  /etc/ssh/sshd_config.d/00-codex-devbox.conf \
   /etc/profile.d/codex-devbox.sh
 
 if [[ -d "${DEV_HOME}/.local/share/mise" ]]; then
@@ -477,9 +503,7 @@ for developer_dir in \
   "${DEV_HOME}/.happy" \
   "${DEV_HOME}/workspace"; do
 
-  if ! run_as_dev test \
-    -w "$developer_dir"; then
-
+  if ! run_as_dev test -w "$developer_dir"; then
     msg_error "Developer directory is not writable: ${developer_dir}"
     exit 1
   fi
@@ -509,8 +533,8 @@ silent npm install \
   --global \
   happy@latest
 
-# Never run `happy --version` here. Current Happy continues from the version
-# output into its normal authentication/session startup path.
+# Do NOT call `happy` or `happy --version` here. Happy can enter its normal
+# first-use authentication/pairing path. Validate installation via npm only.
 if ! npm list \
   --global \
   --depth=0 \
@@ -579,6 +603,7 @@ rm -f "$otp_tarball"
 
 (
   cd "$OTP_ROOT"
+
   ./Install \
     -minimal \
     "$OTP_ROOT"
@@ -899,12 +924,8 @@ else
     jq '
       .permissions = (.permissions // {}) |
       .permissions.deny = (
-        (
-          .permissions.deny // []
-        )
-        + [
-          "Read(~/.happy/access.key)"
-        ]
+        (.permissions.deny // [])
+        + ["Read(~/.happy/access.key)"]
         | unique
       )
     ' \
@@ -975,15 +996,14 @@ if ! grep \
 #
 # Happy is the primary session layer.
 #
-# Native `claude` and `codex` are deliberately NOT shadowed. Happy needs them
-# as backends, and the native commands remain useful for authentication,
-# diagnostics and recovery.
+# Native `claude` and `codex` remain untouched because Happy uses them as
+# backends and they remain useful for authentication, diagnostics and recovery.
 
 alias hclaude='happy claude'
 alias hcodex='happy codex'
 
-# Restart Happy's daemon after a reboot, but only after Happy has already been
-# paired. Merely opening a shell must never trigger first-time Happy pairing.
+# Restart the Happy daemon after a reboot only if Happy was already paired.
+# Merely opening a shell must never initiate first-time pairing.
 if [[ $- == *i* ]] &&
   [[ -z "${HAPPY_DAEMON_CHECKED:-}" ]] &&
   command -v happy >/dev/null 2>&1; then
@@ -1015,10 +1035,7 @@ if [[ $- == *i* ]] &&
       )"
 
       if [[ ! "$pid" =~ ^[0-9]+$ ]] ||
-        ! kill \
-          -0 \
-          "$pid" \
-          2>/dev/null; then
+        ! kill -0 "$pid" 2>/dev/null; then
 
         happy daemon start \
           >/dev/null 2>&1 \
@@ -1088,7 +1105,9 @@ readonly STATE_DIR="${DEV_HOME}/.config/devbox"
 readonly ONBOARDING_MARKER="${STATE_DIR}/onboarding-complete"
 
 readonly SSH_CONFIG="/etc/ssh/sshd_config.d/00-devbox.conf"
-readonly SSH_KEY_FILE="${DEV_HOME}/.ssh/authorized_keys"
+readonly SSH_KEY_FILE="${DEV_HOME}/.ssh/authorized_keys.devbox"
+readonly SSH_STANDARD_KEY_FILE="${DEV_HOME}/.ssh/authorized_keys"
+readonly SSH_DISABLED_MARKER="${STATE_DIR}/ssh-disabled"
 
 readonly HAPPY_HOME="${DEV_HOME}/.happy"
 readonly HAPPY_ACCESS_KEY="${HAPPY_HOME}/access.key"
@@ -1132,13 +1151,14 @@ Commands:
       Run interactive first-login onboarding.
 
   ssh status
-      Show inbound SSH status.
+      Show DevBox SSH status for the dev user.
 
   ssh setup
-      Import a client public key and enable SSH.
+      Configure public-key SSH login for the dev user.
 
   ssh disable
-      Disable inbound SSH.
+      Disable SSH login for the dev user only.
+      Existing administrative/root SSH configuration is untouched.
 
   auth status
       Show Happy, Codex and Claude authentication status.
@@ -1262,9 +1282,7 @@ validate_public_key() {
 
   key_file="$(mktemp)"
 
-  chmod \
-    0600 \
-    "$key_file"
+  chmod 0600 "$key_file"
 
   printf '%s\n' \
     "$key" \
@@ -1285,54 +1303,101 @@ validate_public_key() {
   return "$status"
 }
 
-write_ssh_config() {
+# Only the dev user's SSH behaviour is managed here.
+#
+# enabled:
+#   - dev may authenticate using public keys
+#   - passwords and keyboard-interactive auth are disabled for dev
+#   - root and every other account inherit the existing server policy
+#
+# disabled:
+#   - DenyUsers dev
+#   - root and every other account remain untouched
+write_dev_ssh_policy() {
   require_root
+
+  local mode="${1:-enabled}"
 
   install \
     -d \
     -m 0755 \
     /etc/ssh/sshd_config.d
 
-  cat <<EOF >"$SSH_CONFIG"
-PermitRootLogin no
-PasswordAuthentication no
-PermitEmptyPasswords no
-KbdInteractiveAuthentication no
-PubkeyAuthentication yes
-AuthenticationMethods publickey
-AllowUsers ${DEV_USER}
-AllowAgentForwarding no
-AllowTcpForwarding no
-AllowStreamLocalForwarding no
-X11Forwarding no
-PermitTunnel no
-PermitUserEnvironment no
-GatewayPorts no
-UseDNS no
-LoginGraceTime 30
-MaxAuthTries 3
-ClientAliveInterval 60
-ClientAliveCountMax 3
+  case "$mode" in
+    enabled)
+      cat <<'EOF' >"$SSH_CONFIG"
+# Managed by DevBox.
+# This file intentionally applies only to user "dev".
+# Administrative/root SSH configuration is not modified.
+
+Match User dev
+    PubkeyAuthentication yes
+    PasswordAuthentication no
+    KbdInteractiveAuthentication no
+    AuthenticationMethods publickey
+    AuthorizedKeysFile .ssh/authorized_keys .ssh/authorized_keys.devbox
+
+Match all
 EOF
+      ;;
+
+    disabled)
+      cat <<'EOF' >"$SSH_CONFIG"
+# Managed by DevBox.
+# Disable SSH login for user "dev" only.
+# Administrative/root SSH configuration is not modified.
+
+DenyUsers dev
+EOF
+      ;;
+
+    *)
+      die "Unknown SSH policy mode: ${mode}"
+      ;;
+  esac
 
   chmod \
     0644 \
     "$SSH_CONFIG"
 
-  install \
-    -d \
-    -m 0755 \
-    /run/sshd
-
   /usr/sbin/sshd -t
 }
 
-ssh_status() {
-  local key_status="not configured"
-  local listener_status="disabled"
+apply_sshd_config() {
+  require_root
 
-  [[ -s "$SSH_KEY_FILE" ]] &&
-    key_status="configured"
+  local activate_if_inactive="${1:-no}"
+
+  /usr/sbin/sshd -t
+
+  if systemctl is-active \
+    --quiet \
+    ssh.service; then
+
+    # Reload does not terminate established SSH sessions.
+    systemctl reload ssh.service
+
+  elif systemctl is-active \
+    --quiet \
+    ssh.socket; then
+
+    # Socket-activated sshd processes read the current configuration for new
+    # connections. Nothing needs to be restarted here.
+    :
+
+  elif [[ "$activate_if_inactive" == "yes" ]]; then
+
+    systemctl enable \
+      --now \
+      ssh.service
+  fi
+}
+
+ssh_status() {
+  local listener_status="inactive"
+  local dev_policy="unmanaged"
+  local managed_key="not configured"
+  local standard_key="not configured"
 
   if systemctl is-active \
     --quiet \
@@ -1341,16 +1406,48 @@ ssh_status() {
       --quiet \
       ssh.socket; then
 
-    listener_status="enabled"
+    listener_status="active"
   fi
 
-  printf 'Public key: %s\n' \
-    "$key_status"
+  if [[ -f "$SSH_CONFIG" ]]; then
+    if grep \
+      -Eq \
+      '^DenyUsers[[:space:]]+dev([[:space:]]|$)' \
+      "$SSH_CONFIG"; then
+
+      dev_policy="disabled"
+    elif grep \
+      -Eq \
+      '^Match[[:space:]]+User[[:space:]]+dev([[:space:]]|$)' \
+      "$SSH_CONFIG"; then
+
+      dev_policy="public-key only"
+    fi
+  fi
+
+  [[ -s "$SSH_KEY_FILE" ]] &&
+    managed_key="configured"
+
+  [[ -s "$SSH_STANDARD_KEY_FILE" ]] &&
+    standard_key="configured"
 
   printf 'SSH listener: %s\n' \
     "$listener_status"
 
+  printf 'DevBox dev-user SSH policy: %s\n' \
+    "$dev_policy"
+
+  printf 'Managed DevBox key: %s\n' \
+    "$managed_key"
+
+  printf 'Standard dev authorized_keys: %s\n' \
+    "$standard_key"
+
+  printf 'Administrative/root SSH policy: untouched by DevBox\n'
+
   if [[ -s "$SSH_KEY_FILE" ]]; then
+    printf '\nManaged DevBox SSH key:\n'
+
     ssh-keygen \
       -l \
       -f "$SSH_KEY_FILE"
@@ -1364,6 +1461,10 @@ ssh_setup() {
     die "SSH setup requires an interactive terminal."
 
   cat <<'EOF'
+Configure SSH access for the "dev" account.
+
+This does NOT modify or disable administrative/root SSH access.
+
 Create the private key on the Mac, Windows PC, or other SSH client that will
 access this DevBox.
 
@@ -1400,19 +1501,15 @@ EOF
     0600 \
     "$SSH_KEY_FILE"
 
-  write_ssh_config
+  rm \
+    -f \
+    "$SSH_DISABLED_MARKER"
 
-  systemctl disable \
-    --now \
-    ssh.socket \
-    >/dev/null 2>&1 \
-    || true
+  write_dev_ssh_policy enabled
+  apply_sshd_config yes
 
-  systemctl enable \
-    --now \
-    ssh.service
-
-  ok "SSH enabled for ${DEV_USER}"
+  ok "SSH public-key login enabled for ${DEV_USER}"
+  ok "Administrative/root SSH policy was not changed"
 
   ssh-keygen \
     -l \
@@ -1422,19 +1519,28 @@ EOF
 ssh_disable() {
   require_root
 
-  systemctl disable \
-    --now \
-    ssh.socket \
-    >/dev/null 2>&1 \
-    || true
+  install \
+    -d \
+    -m 0700 \
+    -o "$DEV_USER" \
+    -g "$DEV_USER" \
+    "$STATE_DIR"
 
-  systemctl disable \
-    --now \
-    ssh.service \
-    >/dev/null 2>&1 \
-    || true
+  : >"$SSH_DISABLED_MARKER"
 
-  ok "SSH listener disabled; authorized_keys retained."
+  chown \
+    "$DEV_USER:$DEV_USER" \
+    "$SSH_DISABLED_MARKER"
+
+  chmod \
+    0600 \
+    "$SSH_DISABLED_MARKER"
+
+  write_dev_ssh_policy disabled
+  apply_sshd_config no
+
+  ok "SSH login disabled for ${DEV_USER}"
+  ok "Administrative/root SSH policy was not changed"
 }
 
 codex_is_authenticated() {
@@ -1574,7 +1680,6 @@ agents_auth_login() {
     ok "Claude CLI is already authenticated"
   else
     info "Signing in to Claude"
-
     info "Open the printed URL on another device if necessary."
 
     claude auth login
@@ -2078,9 +2183,6 @@ Native backends remain installed
   claude
   codex
 
-They are intentionally not replaced or aliased because Happy uses them as
-backends and they are useful for authentication, recovery and diagnostics.
-
 
 Happy management
 
@@ -2104,26 +2206,40 @@ Happy's pairing flow.
 
 Happy asking you to connect/pair during that step is expected.
 
-Simply installing or validating the DevBox does NOT invoke Happy's pairing
-flow.
+Simply installing or validating the DevBox does NOT intentionally launch
+Happy's pairing flow.
 
 
 SSH
 
-Inbound SSH is optional and independent from Happy. It can be used for direct
-shell access or as a recovery path.
+DevBox manages SSH policy only for user "dev".
 
-Without SSH, use the LXC host console, for example:
+It does NOT set:
 
-  pct enter <CTID>             # Proxmox VE
-  lxc exec <name> -- bash      # LXD
-  incus exec <name> -- bash    # Incus
+  PermitRootLogin no
+  AllowUsers dev
+
+and therefore does not intentionally restrict existing administrative/root
+SSH access.
+
+Configure dev SSH:
+
+  devbox ssh setup
+
+Disable dev SSH only:
+
+  devbox ssh disable
+
+Inspect:
+
+  devbox ssh status
 EOF
 }
 
 doctor() {
   local command
   local status=0
+  local happy_version=""
 
   local commands=(
     claude
@@ -2183,26 +2299,14 @@ doctor() {
     status=1
   fi
 
-  if run_as_dev codex \
-    --version; then
-    :
-  else
-    status=1
-  fi
+  run_as_dev codex --version \
+    || status=1
 
-  if run_as_dev claude \
-    --version; then
-    :
-  else
-    status=1
-  fi
+  run_as_dev claude --version \
+    || status=1
 
-  # IMPORTANT:
-  # Do not run `happy --version`.
-  #
-  # Happy currently prints its version and then continues into normal startup,
-  # which can trigger first-time pairing. Validate the npm installation
-  # without starting Happy.
+  # Never invoke Happy merely to discover its version. Validate its globally
+  # installed npm package instead so doctor cannot initiate first-use pairing.
   if run_as_dev npm list \
     --global \
     --depth=0 \
@@ -2226,22 +2330,14 @@ doctor() {
     status=1
   fi
 
-  if run_as_dev elixir \
-    --version; then
-    :
-  else
-    status=1
-  fi
+  run_as_dev elixir --version \
+    || status=1
 
-  if run_as_dev mix phx.new \
-    --version; then
-    :
-  else
-    status=1
-  fi
+  run_as_dev mix phx.new --version \
+    || status=1
 
-  # Authentication is informational and intentionally does not make doctor
-  # fail on a freshly installed box.
+  # Authentication state is informational and does not make a fresh,
+  # not-yet-onboarded installation fail.
 
   if run_as_dev \
     bash \
@@ -2349,6 +2445,19 @@ doctor() {
     status=1
   fi
 
+  # Explicitly detect the unsafe SSH policy used by older versions.
+  if [[ -f "$SSH_CONFIG" ]] &&
+    grep \
+      -Eq \
+      '^(PermitRootLogin no|AllowUsers dev)$' \
+      "$SSH_CONFIG"; then
+
+    warn "Legacy global DevBox SSH restriction detected"
+    status=1
+  else
+    ok "No DevBox global root SSH restriction"
+  fi
+
   ssh_status
 
   return "$status"
@@ -2375,25 +2484,19 @@ update_devbox() {
     -o "$installer" \
     "$installer_url"; then
 
-    rm \
-      -f \
-      "$installer"
+    rm -f "$installer"
 
     die "Failed to download installer from ${installer_url}"
   fi
 
-  chmod \
-    0755 \
-    "$installer"
+  chmod 0755 "$installer"
 
   info "Re-running installer"
 
   DEVBOX_REPO_URL="$repo_url" \
     bash "$installer"
 
-  rm \
-    -f \
-    "$installer"
+  rm -f "$installer"
 
   ok "Updated from branch '${branch}'"
 
@@ -2415,7 +2518,7 @@ onboard() {
 
 DevBox onboarding
 
-1. Optional inbound SSH access
+1. Optional SSH access for the dev account
 2. Authenticate Codex and Claude and pair Happy
 3. Optional OpenRouter Codex fallback
 4. GitHub authentication and Git identity
@@ -2434,10 +2537,12 @@ Native backends remain available as:
   claude
   codex
 
+Configuring dev SSH does NOT disable or alter administrative/root SSH access.
+
 EOF
 
   if prompt_yes_no \
-    "Configure inbound SSH now?"; then
+    "Configure SSH access for the dev account now?"; then
 
     sudo \
       -n \
@@ -2605,84 +2710,114 @@ visudo \
 
 msg_ok "Installed DevBox Manager"
 
-msg_info "Securing SSH"
+msg_info "Configuring dev-only SSH policy"
+
+readonly SSH_CONFIG="/etc/ssh/sshd_config.d/00-devbox.conf"
+readonly SSH_MANAGED_KEY="${DEV_HOME}/.ssh/authorized_keys.devbox"
+readonly SSH_STANDARD_KEY="${DEV_HOME}/.ssh/authorized_keys"
+readonly SSH_DISABLED_MARKER="${DEV_HOME}/.config/devbox/ssh-disabled"
+
+write_outer_dev_ssh_policy_enabled() {
+  cat <<'EOF' >"$SSH_CONFIG"
+# Managed by DevBox.
+# This file intentionally applies only to user "dev".
+# Administrative/root SSH configuration is not modified.
+
+Match User dev
+    PubkeyAuthentication yes
+    PasswordAuthentication no
+    KbdInteractiveAuthentication no
+    AuthenticationMethods publickey
+    AuthorizedKeysFile .ssh/authorized_keys .ssh/authorized_keys.devbox
+
+Match all
+EOF
+
+  chmod 0644 "$SSH_CONFIG"
+}
+
+write_outer_dev_ssh_policy_disabled() {
+  cat <<'EOF' >"$SSH_CONFIG"
+# Managed by DevBox.
+# Disable SSH login for user "dev" only.
+# Administrative/root SSH configuration is not modified.
+
+DenyUsers dev
+EOF
+
+  chmod 0644 "$SSH_CONFIG"
+}
 
 install \
   -d \
   -m 0755 \
   /etc/ssh/sshd_config.d
 
-cat <<EOF >/etc/ssh/sshd_config.d/00-devbox.conf
-PermitRootLogin no
-PasswordAuthentication no
-PermitEmptyPasswords no
-KbdInteractiveAuthentication no
-PubkeyAuthentication yes
-AuthenticationMethods publickey
-AllowUsers ${DEV_USER}
-AllowAgentForwarding no
-AllowTcpForwarding no
-AllowStreamLocalForwarding no
-X11Forwarding no
-PermitTunnel no
-PermitUserEnvironment no
-GatewayPorts no
-UseDNS no
-LoginGraceTime 30
-MaxAuthTries 3
-ClientAliveInterval 60
-ClientAliveCountMax 3
-EOF
-
-chmod \
-  0644 \
-  /etc/ssh/sshd_config.d/00-devbox.conf
-
-install \
-  -d \
-  -m 0755 \
-  /run/sshd
-
-/usr/sbin/sshd -t
-
 if [[ -n "${SSH_AUTHORIZED_KEY:-}" ]]; then
+  key_file_tmp="$(mktemp)"
+
+  chmod 0600 "$key_file_tmp"
+
   printf '%s\n' \
     "$SSH_AUTHORIZED_KEY" \
-    >"${DEV_HOME}/.ssh/authorized_keys"
+    >"$key_file_tmp"
+
+  if ! ssh-keygen \
+    -l \
+    -f "$key_file_tmp" \
+    >/dev/null 2>&1; then
+
+    rm -f "$key_file_tmp"
+
+    msg_error "SSH_AUTHORIZED_KEY is not a valid SSH public key."
+    exit 1
+  fi
+
+  rm -f "$key_file_tmp"
+
+  printf '%s\n' \
+    "$SSH_AUTHORIZED_KEY" \
+    >"$SSH_MANAGED_KEY"
 
   chown \
     "$DEV_USER:$DEV_USER" \
-    "${DEV_HOME}/.ssh/authorized_keys"
+    "$SSH_MANAGED_KEY"
 
   chmod \
     0600 \
-    "${DEV_HOME}/.ssh/authorized_keys"
+    "$SSH_MANAGED_KEY"
 
-  systemctl disable \
-    --now \
-    ssh.socket \
-    >/dev/null 2>&1 \
-    || true
+  rm \
+    -f \
+    "$SSH_DISABLED_MARKER"
 
-  systemctl enable \
-    --now \
-    ssh.service
+  write_outer_dev_ssh_policy_enabled
 
-elif [[ ! -s "${DEV_HOME}/.ssh/authorized_keys" ]]; then
-  systemctl disable \
-    --now \
-    ssh.socket \
-    >/dev/null 2>&1 \
-    || true
+elif [[ -e "$SSH_DISABLED_MARKER" ]]; then
+  write_outer_dev_ssh_policy_disabled
 
-  systemctl disable \
-    --now \
-    ssh.service \
-    >/dev/null 2>&1 \
-    || true
+elif [[ -s "$SSH_MANAGED_KEY" ||
+        -s "$SSH_STANDARD_KEY" ]]; then
+  write_outer_dev_ssh_policy_enabled
+
+else
+  # Fresh DevBox: deny SSH login for dev until explicitly configured.
+  # This restriction applies only to dev and does not affect root/admin SSH.
+  write_outer_dev_ssh_policy_disabled
 fi
 
-msg_ok "Secured SSH"
+/usr/sbin/sshd -t
+
+if systemctl is-active \
+  --quiet \
+  ssh.service; then
+
+  # Reload preserves existing SSH sessions.
+  systemctl reload ssh.service
+fi
+
+msg_ok "Configured dev-only SSH policy"
+msg_ok "Existing administrative/root SSH policy was not restricted"
 
 msg_info "Enabling Security Updates"
 
@@ -2703,16 +2838,11 @@ msg_info "Validating Installation"
 node --version
 npm --version
 
-# Agent CLIs are runtime tools for the dev account, so validate them as dev.
 run_as_dev codex --version
 run_as_dev claude --version
 
-# IMPORTANT:
-# Never execute `happy --version` during installation.
-#
-# Current Happy versions print the version and then continue into normal
-# startup, which can launch first-time pairing. Verify the installed npm
-# package without running Happy itself.
+# Do not execute Happy during unattended installation/validation. Current
+# Happy behaviour can enter normal startup/pairing after invocation.
 run_as_dev npm list \
   --global \
   --depth=0 \
