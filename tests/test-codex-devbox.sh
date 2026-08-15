@@ -173,9 +173,9 @@ EOF
     PATH="${bin_dir}:/usr/bin:/bin"
     # shellcheck source=/dev/null
     source "$manager_functions"
-    # shellcheck disable=SC2329 # invoked indirectly by update_devbox below
+    # shellcheck disable=SC2317,SC2329 # invoked indirectly by update_devbox below
     require_root() { :; }
-    # shellcheck disable=SC2329 # invoked indirectly by update_devbox below
+    # shellcheck disable=SC2317,SC2329 # invoked indirectly by update_devbox below
     doctor() { :; }
     update_devbox feature-branch
   ) >"$output_file" 2>&1 || true
