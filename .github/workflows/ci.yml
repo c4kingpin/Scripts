@@ -26,18 +26,18 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends shellcheck
 
+      # Every script in the repository is checked, so a new project directory
+      # is covered without touching this workflow.
       - name: Validate Bash syntax
-        run: >-
-          bash -n
-          install.sh
-          tests/test-devbox.sh
-
-      - name: Run regression tests
-        run: bash tests/test-devbox.sh
+        run: |
+          find . -name '*.sh' -not -path './.git/*' -print0 |
+            xargs -0 -r -n1 bash -n
 
       - name: Run ShellCheck
-        run: >-
-          shellcheck -x
-          --exclude=SC1090,SC1091,SC2086,SC2154
-          install.sh
-          tests/test-devbox.sh
+        run: |
+          find . -name '*.sh' -not -path './.git/*' -print0 |
+            xargs -0 -r shellcheck -x \
+              --exclude=SC1090,SC1091,SC2086,SC2154
+
+      - name: Run devbox regression tests
+        run: bash devbox/tests/test-devbox.sh

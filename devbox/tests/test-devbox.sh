@@ -3,9 +3,9 @@
 
 set -Eeuo pipefail
 
-REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-readonly REPO_ROOT
-readonly INSTALL_SCRIPT="${REPO_ROOT}/install.sh"
+PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+readonly PROJECT_ROOT
+readonly INSTALL_SCRIPT="${PROJECT_ROOT}/install.sh"
 TEST_TMP="$(mktemp -d /tmp/devbox-tests.XXXXXX)"
 readonly TEST_TMP
 readonly MANAGER="${TEST_TMP}/devbox"
@@ -53,12 +53,20 @@ scripts_have_valid_syntax() {
 
 standalone_no_proxmox_framework() {
   [[ -f "$INSTALL_SCRIPT" ]] &&
-    [[ ! -d "${REPO_ROOT}/ct" ]] &&
-    [[ ! -d "${REPO_ROOT}/json" ]] &&
-    [[ ! -d "${REPO_ROOT}/install" ]] &&
     ! grep -Eq \
       'FUNCTIONS_FILE_PATH|build_container\(\)|COMMUNITY_FRAMEWORK_URL|ProxmoxVED|whiptail|pct create|pveam|pvesm|pvesh get /cluster/nextid|create_container\(' \
       "$INSTALL_SCRIPT"
+}
+
+# The repository holds several scripts, so this project keeps everything it
+# owns inside devbox/ and the download URLs must point at that path.
+project_is_self_contained() {
+  [[ "$(basename "$PROJECT_ROOT")" == "devbox" ]] &&
+    [[ -f "${PROJECT_ROOT}/install.sh" ]] &&
+    [[ -f "${PROJECT_ROOT}/README.md" ]] &&
+    [[ -f "${PROJECT_ROOT}/tests/test-devbox.sh" ]] &&
+    grep -Fq '${repo_url%/}/${branch}/devbox/install.sh' "$INSTALL_SCRIPT" &&
+    ! grep -Eq 'Scripts/(master|\$\{branch\})/install\.sh' "$INSTALL_SCRIPT"
 }
 
 install_script_runs_standalone_preflight() {
@@ -73,7 +81,7 @@ install_script_runs_standalone_preflight() {
 }
 
 installer_curl_pipeable_from_master() {
-  grep -Fq 'curl -fsSL https://raw.githubusercontent.com/c4kingpin/Scripts/master/install.sh | bash' \
+  grep -Fq 'curl -fsSL https://raw.githubusercontent.com/c4kingpin/Scripts/master/devbox/install.sh | bash' \
     "$INSTALL_SCRIPT"
 }
 
@@ -81,10 +89,11 @@ install_script_is_bare_metal() {
   ! grep -Eq 'setup_docker|docker (run|compose|pull)|podman' "$INSTALL_SCRIPT"
 }
 
-# Routing the toolchain through mise's shims produced a BEAM that died during
-# kernel startup; the same release run directly from /opt works. No version
-# manager may come back, and no interpreter may live under the developer home.
-toolchain_is_installed_without_a_version_manager() {
+# mise is installed as a general-purpose version manager, but the BEAM
+# toolchain must not go through it: its shims produced a runtime that died
+# during kernel startup. Erlang and Elixir live in /opt and are reached by
+# plain symlinks in /usr/local/bin.
+toolchain_is_installed_outside_the_version_manager() {
   grep -Fq 'OTP_ROOT="/opt/devbox/otp"' "$INSTALL_SCRIPT" &&
     grep -Fq 'ELIXIR_ROOT="/opt/devbox/elixir"' "$INSTALL_SCRIPT" &&
     grep -Fq './Install -minimal "$OTP_ROOT"' "$INSTALL_SCRIPT" &&
@@ -92,8 +101,23 @@ toolchain_is_installed_without_a_version_manager() {
       "$INSTALL_SCRIPT" &&
     grep -Fq 'ln -sfn "${ELIXIR_ROOT}/bin/${elixir_bin}" "/usr/local/bin/${elixir_bin}"' \
       "$INSTALL_SCRIPT" &&
-    ! grep -Eq 'mise (use|exec|reshim|unuse)|MISE_[A-Z_]+=|mise\.run|mise activate|mise/shims' \
-      "$INSTALL_SCRIPT"
+    # mise must never be told to provide erlang or elixir ...
+    ! grep -Eq 'mise[^\n]*(use|exec|reshim)[^\n]*(erlang|elixir)' "$INSTALL_SCRIPT" &&
+    ! grep -Eq 'MISE_ERLANG|erlang@|elixir@' "$INSTALL_SCRIPT" &&
+    # ... and its shims must stay off the PATH the installer hands to dev.
+    ! grep -Fq 'mise/shims:' "$INSTALL_SCRIPT"
+}
+
+# mise stays available for other languages a project may need.
+mise_is_available_as_a_developer_tool() {
+  grep -Fq 'curl_with_retry "https://mise.run" "$mise_installer"' "$INSTALL_SCRIPT" &&
+    grep -Fq 'MISE_INSTALL_PATH="${DEV_HOME}/.local/bin/mise"' "$INSTALL_SCRIPT"
+}
+
+# OTP 28 crashed on boot in this container class; 27.3.x is the verified one.
+erlang_is_pinned_to_a_verified_release() {
+  grep -Fq 'ERLANG_VERSION="${ERLANG_VERSION:-27.' "$INSTALL_SCRIPT" &&
+    ! grep -Fq 'ERLANG_VERSION="28' "$INSTALL_SCRIPT"
 }
 
 erlang_comes_from_the_precompiled_ubuntu_build() {
@@ -155,7 +179,7 @@ update_command_supports_branch_argument() {
   grep -Fq 'update_devbox() {' "$MANAGER" &&
     grep -Fq 'readonly DEFAULT_UPDATE_BRANCH="master"' "$MANAGER" &&
     grep -Fq 'local branch="${1:-$DEFAULT_UPDATE_BRANCH}"' "$MANAGER" &&
-    grep -Fq 'local installer_url="${repo_url%/}/${branch}/install.sh"' "$MANAGER" &&
+    grep -Fq 'local installer_url="${repo_url%/}/${branch}/devbox/install.sh"' "$MANAGER" &&
     grep -Fq 'update:*)' "$MANAGER" &&
     grep -Fq 'update_devbox "$subcommand"' "$MANAGER" &&
     grep -Fq 'update [branch]' "$MANAGER"
@@ -193,7 +217,7 @@ for arg in "\$@"; do
 done
 url="\${!#}"
 case "\$url" in
-*/feature-branch/install.sh)
+*/feature-branch/devbox/install.sh)
   cp "${fake_repo}/install.sh" "\$out"
   ;;
 *)
@@ -457,8 +481,11 @@ run_test "Bash syntax" scripts_have_valid_syntax
 run_test "standalone, no Proxmox/community-scripts framework" standalone_no_proxmox_framework
 run_test "standalone preflight checks" install_script_runs_standalone_preflight
 run_test "curl-pipeable from master" installer_curl_pipeable_from_master
+run_test "project is self-contained under devbox/" project_is_self_contained
 run_test "bare-metal install" install_script_is_bare_metal
-run_test "toolchain without a version manager" toolchain_is_installed_without_a_version_manager
+run_test "BEAM toolchain outside the version manager" toolchain_is_installed_outside_the_version_manager
+run_test "mise available as a developer tool" mise_is_available_as_a_developer_tool
+run_test "Erlang pinned to a verified release" erlang_is_pinned_to_a_verified_release
 run_test "precompiled Ubuntu Erlang build" erlang_comes_from_the_precompiled_ubuntu_build
 run_test "Erlang cookie provisioned" erlang_cookie_is_provisioned
 run_test "installer requires Ubuntu" installer_requires_ubuntu

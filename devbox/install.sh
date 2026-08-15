@@ -11,7 +11,7 @@
 # create or configure the container itself and has no dependency on the
 # Proxmox host or the community-scripts framework.
 #
-#   curl -fsSL https://raw.githubusercontent.com/c4kingpin/Scripts/master/install.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/c4kingpin/Scripts/master/devbox/install.sh | bash
 
 set -Eeuo pipefail
 umask 022
@@ -126,9 +126,15 @@ update_os
 DEV_USER="dev"
 DEV_HOME="/home/${DEV_USER}"
 NODE_VERSION="24"
-ERLANG_VERSION="28.4"
-ELIXIR_VERSION="1.20.2"
-PHOENIX_VERSION="1.8.9"
+# OTP 28 crashes on boot in this class of container -- every 28.x build tried
+# (precompiled and from source, on Debian and Ubuntu, in $HOME and in /opt,
+# as root and as the developer) died with persistent_term:get(code_server)
+# badarg, while 27.3.x runs everywhere. The likely cause is the OTP 28 JIT
+# requiring CPU features a conservative hypervisor CPU model does not expose.
+# Override with ERLANG_VERSION=... to try a newer release.
+ERLANG_VERSION="${ERLANG_VERSION:-27.3.4.16}"
+ELIXIR_VERSION="${ELIXIR_VERSION:-1.20.2}"
+PHOENIX_VERSION="${PHOENIX_VERSION:-1.8.9}"
 DEVBOX_REPO_URL="${DEVBOX_REPO_URL:-https://raw.githubusercontent.com/c4kingpin/Scripts}"
 
 run_as_dev() {
@@ -277,20 +283,25 @@ rm -f \
   /etc/ssh/sshd_config.d/00-codex-devbox.conf \
   /etc/profile.d/codex-devbox.sh
 
-# Earlier revisions managed Erlang and Elixir with mise inside the developer's
-# home. Remove it: its shims precede /usr/local/bin on PATH and would keep
-# shadowing the /opt toolchain installed below.
-if [[ -d "${DEV_HOME}/.local/share/mise" || -x "${DEV_HOME}/.local/bin/mise" ]]; then
-  msg_info "Removing the previous mise-managed toolchain"
+# Earlier revisions let mise manage Erlang and Elixir. mise itself stays (it
+# is useful for other languages), but its BEAM installs and shims must go:
+# the shims would shadow the /opt toolchain installed further down.
+if [[ -d "${DEV_HOME}/.local/share/mise" ]]; then
+  msg_info "Removing the previously mise-managed BEAM toolchain"
   rm -rf \
-    "${DEV_HOME}/.local/share/mise" \
-    "${DEV_HOME}/.local/bin/mise" \
-    "${DEV_HOME}/.local/share/elixir" \
-    "${DEV_HOME}/.config/mise"
+    "${DEV_HOME}/.local/share/mise/installs/erlang" \
+    "${DEV_HOME}/.local/share/mise/installs/elixir" \
+    "${DEV_HOME}/.local/share/elixir"
   for stale_bin in elixir elixirc iex mix erl erlc escript; do
-    rm -f "${DEV_HOME}/.local/bin/${stale_bin}"
+    rm -f \
+      "${DEV_HOME}/.local/share/mise/shims/${stale_bin}" \
+      "${DEV_HOME}/.local/bin/${stale_bin}"
   done
-  msg_ok "Removed the previous mise-managed toolchain"
+  # Drop the erlang/elixir pins so mise stops trying to reinstall them.
+  if [[ -f "${DEV_HOME}/.config/mise/config.toml" ]]; then
+    sed -i '/^\(erlang\|elixir\) *=/d' "${DEV_HOME}/.config/mise/config.toml"
+  fi
+  msg_ok "Removed the previously mise-managed BEAM toolchain"
 fi
 
 install -d -m 0700 -o "$DEV_USER" -g "$DEV_USER" \
@@ -322,6 +333,18 @@ msg_ok "Installed Codex CLI"
 msg_info "Installing Claude CLI"
 silent npm install --global @anthropic-ai/claude-code@latest
 msg_ok "Installed Claude CLI"
+
+# mise is available as a general-purpose version manager for whatever a
+# project needs (Go, Rust, extra Node versions, ...). It deliberately does
+# NOT manage Erlang or Elixir: those are installed below under /opt, and
+# mise's shims are kept off PATH so they cannot shadow them.
+msg_info "Installing mise"
+mise_installer="/tmp/devbox-mise-install.sh"
+curl_with_retry "https://mise.run" "$mise_installer"
+chmod 0755 "$mise_installer"
+run_as_dev env MISE_INSTALL_PATH="${DEV_HOME}/.local/bin/mise" sh "$mise_installer" >>"$LOG_FILE" 2>&1
+rm -f "$mise_installer"
+msg_ok "Installed mise"
 
 # Erlang and Elixir are installed system-wide under /opt/devbox and exposed
 # through plain symlinks in /usr/local/bin -- no version manager, no shims.
@@ -1184,7 +1207,7 @@ update_devbox() {
   require_root
   local branch="${1:-$DEFAULT_UPDATE_BRANCH}"
   local repo_url="${DEVBOX_REPO_URL:-$DEFAULT_REPO_URL}"
-  local installer_url="${repo_url%/}/${branch}/install.sh"
+  local installer_url="${repo_url%/}/${branch}/devbox/install.sh"
   local installer
 
   installer="$(mktemp)"
