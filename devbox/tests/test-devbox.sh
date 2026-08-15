@@ -176,8 +176,8 @@ elixir_is_pinned_to_the_erlang_otp_major() {
 }
 
 claude_cli_is_installed() {
-  grep -Fq 'npm install --global @anthropic-ai/claude-code@latest' "$NORM_INSTALL" &&
-    grep -Fq 'npm install --global @openai/codex@latest' "$NORM_INSTALL" &&
+  grep -Fq 'npm install --global "@anthropic-ai/claude-code@${CLAUDE_VERSION}"' "$NORM_INSTALL" &&
+    grep -Fq 'npm install --global "@openai/codex@${CODEX_VERSION}"' "$NORM_INSTALL" &&
     grep -Fq 'claude' "$MANAGER" &&
     # Agent CLIs are runtime tools for the dev account, so the installer's
     # own final validation step runs them via run_as_dev, not bare.
@@ -269,6 +269,45 @@ EOF
 
   grep -Fq "ran fake installer" "$output_file" &&
     grep -Fq "Downloading installer from branch 'feature-branch'" "$output_file"
+}
+
+# P0.1: dev must control OS package installs through a validated DevBox
+# command instead of a generic passwordless apt/apt-get/dpkg grant.
+no_generic_passwordless_package_management() {
+  ! grep -Eq 'NOPASSWD:.*(/usr/bin/apt-get|/usr/bin/apt\b|/usr/bin/dpkg)' \
+    "$INSTALL_SCRIPT" &&
+    grep -Fq \
+      '${DEV_USER} ALL=(root) NOPASSWD: /usr/local/bin/devbox packages install *' \
+      "$NORM_INSTALL"
+}
+
+package_name_validation_accepts_and_rejects_expected_input() {
+  bash -c '
+    set -Eeuo pipefail
+    source <(head -n -1 "$1")
+
+    accept=(imagemagick libvips ffmpeg-x sqlite3 a pkg-config redis-tools)
+    reject=("../evil" "-o" "--force" "pkg;rm -rf /" "UPPER" "" "./foo.deb" "pkg=1.0")
+
+    for pkg in "${accept[@]}"; do
+      validate_package_name "$pkg" || exit 1
+    done
+
+    for pkg in "${reject[@]}"; do
+      validate_package_name "$pkg" && exit 1
+    done
+
+    exit 0
+  ' _ "$MANAGER"
+}
+
+packages_install_requires_root_and_at_least_one_package() {
+  grep -Fq 'packages_install() {' "$MANAGER" &&
+    grep -Fq 'require_root' "$NORM_MANAGER" &&
+    grep -Fq 'Usage: devbox packages install <package...>' "$MANAGER" &&
+    grep -Fq 'packages:install)' "$MANAGER" &&
+    grep -Fq 'packages_install "${@:3}"' "$NORM_MANAGER" &&
+    grep -Fq -- '-- "${packages[@]}"' "$NORM_MANAGER"
 }
 
 developer_user_is_least_privilege() {
@@ -498,6 +537,119 @@ update_preserves_user_state() {
     "$MANAGER" "$INSTALL_SCRIPT"
 }
 
+# P0.2: no actively managed npm component may float on @latest.
+managed_agent_clis_are_pinned_not_latest() {
+  ! grep -Eq '(@openai/codex|@anthropic-ai/claude-code|[[:space:]]happy)@latest' \
+    "$INSTALL_SCRIPT" &&
+    grep -Fq '"@openai/codex@${CODEX_VERSION}"' "$INSTALL_SCRIPT" &&
+    grep -Fq '"@anthropic-ai/claude-code@${CLAUDE_VERSION}"' "$INSTALL_SCRIPT" &&
+    grep -Fq '"happy@${HAPPY_VERSION}"' "$INSTALL_SCRIPT"
+}
+
+# install.sh must stay a single, standalone, curl-pipeable file, so it embeds
+# its own defaults instead of sourcing versions.env at runtime. This keeps
+# devbox/versions.env (the documented source of truth) from silently
+# drifting away from what install.sh and the generated manager actually use.
+versions_env_matches_embedded_defaults() {
+  python3 - "$PROJECT_ROOT" "$MANAGER" <<'PY'
+import pathlib
+import re
+import sys
+
+project_root, manager_path = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2])
+versions_env = (project_root / "versions.env").read_text()
+install_sh = (project_root / "install.sh").read_text()
+manager = manager_path.read_text()
+
+manifest = dict(re.findall(r'^([A-Z_]+)="([^"]*)"$', versions_env, re.M))
+expected_keys = {
+    "DEVBOX_VERSION", "NODE_VERSION", "ERLANG_VERSION", "ELIXIR_VERSION",
+    "PHOENIX_VERSION", "CODEX_VERSION", "CLAUDE_VERSION", "HAPPY_VERSION",
+}
+assert expected_keys <= manifest.keys(), manifest
+
+for key, value in manifest.items():
+    pattern = re.compile(
+        rf'{key}="\$\{{{key}:-{re.escape(value)}\}}"'
+    )
+    assert pattern.search(install_sh), \
+        f"install.sh default for {key} does not match versions.env ({value})"
+
+# The generated manager embeds its own literal copies (NODE_VERSION becomes
+# NODE_MAJOR there) for the `devbox version` command.
+manager_expected = {
+    "DEVBOX_VERSION": manifest["DEVBOX_VERSION"],
+    "NODE_MAJOR": manifest["NODE_VERSION"],
+    "ERLANG_VERSION": manifest["ERLANG_VERSION"],
+    "ELIXIR_VERSION": manifest["ELIXIR_VERSION"],
+    "PHOENIX_VERSION": manifest["PHOENIX_VERSION"],
+    "CODEX_VERSION": manifest["CODEX_VERSION"],
+    "CLAUDE_VERSION": manifest["CLAUDE_VERSION"],
+    "HAPPY_VERSION": manifest["HAPPY_VERSION"],
+}
+
+for key, value in manager_expected.items():
+    pattern = re.compile(rf'readonly {key}="{re.escape(value)}"')
+    assert pattern.search(manager), \
+        f"manager embedded value for {key} does not match versions.env ({value})"
+PY
+}
+
+devbox_version_command_reports_the_manifest() {
+  local output
+
+  output="$("$MANAGER" version)"
+  grep -Fq 'DevBox:' <<<"$output" &&
+    grep -Fq 'Codex CLI:' <<<"$output" &&
+    grep -Fq 'Claude Code:' <<<"$output" &&
+    grep -Fq 'Happy:' <<<"$output" &&
+    grep -Fq 'version:)' "$MANAGER" &&
+    grep -Fq 'show_version' "$NORM_MANAGER"
+}
+
+# P0.3: versioned binary artifacts are verified against a known checksum
+# before being unpacked; a missing or wrong checksum aborts the install.
+downloaded_toolchain_artifacts_are_checksum_verified() {
+  local otp_verify_line otp_extract_line
+
+  grep -Fq 'verify_checksum() {' "$INSTALL_SCRIPT" &&
+    grep -Fq 'Checksum mismatch for' "$INSTALL_SCRIPT" &&
+    grep -Fq 'No known checksum for' "$INSTALL_SCRIPT" &&
+    grep -Fq 'rm -f "$file"' "$NORM_INSTALL" &&
+    grep -Fq 'DEVBOX_CHECKSUMS["otp:${ERLANG_VERSION}:${otp_os}:${otp_arch}"]' \
+      "$INSTALL_SCRIPT" &&
+    grep -Fq 'DEVBOX_CHECKSUMS["elixir:${ELIXIR_VERSION}:${ERLANG_OTP_MAJOR}"]' \
+      "$INSTALL_SCRIPT" ||
+    return 1
+
+  # Verified before the archive is extracted, not after.
+  otp_verify_line="$(grep -n 'verify_checksum ' "$INSTALL_SCRIPT" | head -n1 | cut -d: -f1)"
+  otp_extract_line="$(grep -n 'rm -rf "$OTP_ROOT"' "$INSTALL_SCRIPT" | head -n1 | cut -d: -f1)"
+
+  [[ -n "$otp_verify_line" && -n "$otp_extract_line" ]] &&
+    ((otp_verify_line < otp_extract_line))
+}
+
+# Every hash checked into checksums.env must actually be the one install.sh
+# uses, or a checksum update to one file could silently stop being enforced.
+checksums_env_matches_embedded_checksums() {
+  python3 - "$PROJECT_ROOT" <<'PY'
+import pathlib
+import re
+import sys
+
+project_root = pathlib.Path(sys.argv[1])
+checksums_env = (project_root / "checksums.env").read_text()
+install_sh = (project_root / "install.sh").read_text()
+
+hashes = re.findall(r'_SHA256="([0-9a-f]{64})"', checksums_env)
+assert len(hashes) >= 5, hashes
+
+for digest in hashes:
+    assert digest in install_sh, f"checksum {digest} missing from install.sh"
+PY
+}
+
 installer_validates_complete_stack() {
   grep -Fq 'msg_info "Validating Installation"' "$INSTALL_SCRIPT" &&
     grep -Fxq 'node --version' "$INSTALL_SCRIPT" &&
@@ -537,6 +689,9 @@ run_test "doctor checks Claude CLI" doctor_checks_claude_alongside_codex
 run_test "update command supports branch argument" update_command_supports_branch_argument
 run_test "update downloads and reruns installer" update_downloads_and_reruns_installer
 run_test "update honors the requested branch" update_branch_argument_is_honored
+run_test "no generic passwordless package management" no_generic_passwordless_package_management
+run_test "package name validation accepts/rejects expected input" package_name_validation_accepts_and_rejects_expected_input
+run_test "packages install requires root and a package" packages_install_requires_root_and_at_least_one_package
 run_test "least-privilege developer user" developer_user_is_least_privilege
 run_test "developer password only set on creation" developer_password_only_set_on_creation
 run_test "writable developer home parents" developer_home_parents_are_writable
@@ -552,6 +707,11 @@ run_test "autonomy applies to both agents" autonomy_is_selectable_and_applies_to
 run_test "safe supported OpenRouter config" openrouter_configuration_is_safe_and_supported
 run_test "optional repeatable onboarding" first_login_onboarding_is_optional_and_repeatable
 run_test "updates preserve user state" update_preserves_user_state
+run_test "managed agent CLIs are pinned, not @latest" managed_agent_clis_are_pinned_not_latest
+run_test "versions.env matches embedded defaults" versions_env_matches_embedded_defaults
+run_test "devbox version reports the manifest" devbox_version_command_reports_the_manifest
+run_test "toolchain artifacts are checksum-verified" downloaded_toolchain_artifacts_are_checksum_verified
+run_test "checksums.env matches embedded checksums" checksums_env_matches_embedded_checksums
 run_test "complete stack validation" installer_validates_complete_stack
 
 printf '\n%d passed, %d failed\n' "$PASSED" "$FAILED"
