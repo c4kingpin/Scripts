@@ -153,6 +153,7 @@ repair_legacy_ssh_policy() {
     rm -f "$ssh_config"
 
     if command -v sshd >/dev/null 2>&1; then
+      install -d -m 0755 /run/sshd
       /usr/sbin/sshd -t
 
       if systemctl is-active --quiet ssh.service 2>/dev/null; then
@@ -1360,6 +1361,7 @@ EOF
     0644 \
     "$SSH_CONFIG"
 
+  install -d -m 0755 /run/sshd
   /usr/sbin/sshd -t
 }
 
@@ -1368,6 +1370,7 @@ apply_sshd_config() {
 
   local activate_if_inactive="${1:-no}"
 
+  install -d -m 0755 /run/sshd
   /usr/sbin/sshd -t
 
   if systemctl is-active \
@@ -2806,6 +2809,7 @@ else
   write_outer_dev_ssh_policy_disabled
 fi
 
+install -d -m 0755 /run/sshd
 /usr/sbin/sshd -t
 
 if systemctl is-active \
