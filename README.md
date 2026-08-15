@@ -1,13 +1,11 @@
 # Codex DevBox für LXC
 
-Dieses Repository enthält einen eigenständigen Installer für eine isolierte
-Codex- und Claude-Entwicklungsumgebung. Das Skript läuft direkt **innerhalb**
-eines bereits vorhandenen, unprivilegierten LXC-Containers (Proxmox VE,
-LXD/Incus oder jede andere Plattform) und hat keine Abhängigkeit zu Proxmox
-selbst oder zum Community-Scripts-Framework:
-
-- `install.sh` – der eigenständige Installer; wird als `root` im Container
-  ausgeführt und richtet auch den `codex-devbox`-Manager ein.
+Dieses Repository enthält [`install.sh`](install.sh), einen eigenständigen
+Installer für eine isolierte Codex- und Claude-Entwicklungsumgebung. Das
+Skript läuft direkt **innerhalb** eines bereits vorhandenen, unprivilegierten
+LXC-Containers (Proxmox VE, LXD/Incus oder jede andere Plattform), wird als
+`root` ausgeführt und richtet dabei auch den `codex-devbox`-Manager ein. Es
+hat keine Abhängigkeit zu Proxmox selbst oder zum Community-Scripts-Framework.
 
 Das Skript erstellt oder konfiguriert den Container selbst nicht. Storage,
 Netzwerk, Template und Ressourcen des Containers müssen vor dem Aufruf bereits
@@ -52,8 +50,20 @@ curl -fsSL https://raw.githubusercontent.com/c4kingpin/Scripts/master/install.sh
 Auf LXD/Incus entsprechend über `lxc exec <name> -- bash` bzw.
 `incus exec <name> -- bash`.
 
-Vor der eigentlichen Installation fragt das Skript in einer interaktiven
-Sitzung, wie autonom Codex arbeiten darf:
+> **Hinweis zum Autonomie-Dialog:** Bei `curl | bash` ist die Standardeingabe
+> mit der Pipe belegt, daher kann das Skript in diesem Fall **nicht**
+> interaktiv nachfragen und verwendet automatisch `balanced`. Für den
+> interaktiven Dialog das Skript zuerst herunterladen und dann als Datei
+> ausführen:
+>
+> ```bash
+> curl -fsSL -o install.sh \
+>   https://raw.githubusercontent.com/c4kingpin/Scripts/master/install.sh
+> bash install.sh
+> ```
+
+Ausgeführt in einem echten Terminal fragt das Skript dann vor der eigentlichen
+Installation, wie autonom Codex arbeiten darf:
 
 | Profil | Codex-Verhalten |
 | --- | --- |
@@ -62,8 +72,8 @@ Sitzung, wie autonom Codex arbeiten darf:
 | Autonom | Codex darf den Workspace bearbeiten und das Netzwerk ohne Freigabedialoge nutzen; die Workspace-Sandbox bleibt aktiv. |
 | Vollzugriff | Keine Sandbox und keine Freigabedialoge innerhalb des LXC-Containers. |
 
-Ohne interaktives Terminal (z. B. bei automatisierten Aufrufen) wird
-`balanced` verwendet. Das Profil lässt sich auch vorgeben:
+Ohne interaktives Terminal (also auch beim `curl | bash`-Einzeiler) wird
+`balanced` verwendet, sofern nicht explizit ein Profil vorgegeben wird:
 
 ```bash
 CODEX_AUTONOMY=autonomous \
@@ -292,17 +302,21 @@ Diagnose:
 codex-devbox doctor
 ```
 
-Update auf den aktuellen Stand des `master`-Branches:
+`update` muss als `root` laufen, nicht über `sudo` als `dev` – der Benutzer
+`dev` besitzt bewusst kein allgemeines passwortloses `sudo`, sondern nur für
+`ssh setup`/`ssh disable` (siehe oben). Auf der Root-Konsole des Containers
+(z. B. direkt nach `pct enter <CTID>`, ohne vorheriges `sudo -iu dev`) auf den
+aktuellen Stand des `master`-Branches aktualisieren:
 
 ```bash
-sudo codex-devbox update
+codex-devbox update
 ```
 
 Optional lässt sich auch ein anderer Branch installieren, zum Beispiel um
 eine Vorabversion zu testen:
 
 ```bash
-sudo codex-devbox update feature/mein-branch
+codex-devbox update feature/mein-branch
 ```
 
 `codex-devbox update [branch]` lädt `install.sh` vom angegebenen (oder
@@ -318,13 +332,11 @@ Repository-URL überschrieben werden:
 
 ```bash
 CODEX_DEVBOX_REPO_URL="https://raw.githubusercontent.com/<fork>/Scripts" \
-  sudo -E codex-devbox update <branch>
+  codex-devbox update <branch>
 ```
 
-Automatische Sicherheitsupdates sind aktiviert. Da `dev` bewusst kein
-allgemeines passwortloses `sudo` besitzt, erfolgen weitergehende
-Systemänderungen entweder über den eingeschränkten SSH-Onboarding-Befehl oder
-über `sudo codex-devbox update` als `root`.
+Automatische Sicherheitsupdates sind zusätzlich aktiviert, sodass
+Betriebssystem-Patches auch ohne manuelles `codex-devbox update` einlaufen.
 
 ## Tests
 
