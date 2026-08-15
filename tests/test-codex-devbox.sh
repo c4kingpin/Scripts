@@ -90,6 +90,18 @@ erlang_toolchain_supports_debian_13() {
       "$INSTALL_SCRIPT"
 }
 
+elixir_is_pinned_to_the_erlang_otp_major() {
+  # mise's core Elixir plugin ships one OTP-unpinned build from builds.hex.pm,
+  # which crashes at boot against the from-source Erlang built above. Elixir
+  # must come from its own OTP-major-tagged GitHub release instead.
+  grep -Fq 'ERLANG_OTP_MAJOR="${ERLANG_VERSION%%.*}"' "$INSTALL_SCRIPT" &&
+    grep -Fq 'releases/download/v${ELIXIR_VERSION}/elixir-otp-${ERLANG_OTP_MAJOR}.zip' \
+      "$INSTALL_SCRIPT" &&
+    ! grep -Eq 'mise" use --global "elixir@|mise use --global "elixir@' "$INSTALL_SCRIPT" &&
+    ! grep -Eq 'mise" exec -- (elixir|mix|iex)|mise exec -- (elixir|mix|iex)' \
+      "$INSTALL_SCRIPT"
+}
+
 claude_cli_is_installed() {
   grep -Fq 'npm install --global @anthropic-ai/claude-code@latest' "$INSTALL_SCRIPT" &&
     grep -Fq 'npm install --global @openai/codex@latest' "$INSTALL_SCRIPT" &&
@@ -372,8 +384,8 @@ installer_validates_complete_stack() {
     grep -Fxq 'codex --version' "$INSTALL_SCRIPT" &&
     grep -Fxq 'claude --version' "$INSTALL_SCRIPT" &&
     grep -Fq 'run_as_dev "${DEV_HOME}/.local/bin/mise" --version' "$INSTALL_SCRIPT" &&
-    grep -Fq 'exec -- elixir --version' "$INSTALL_SCRIPT" &&
-    grep -Fq 'exec -- mix phx.new --version' "$INSTALL_SCRIPT" &&
+    grep -Fxq 'run_as_dev elixir --version' "$INSTALL_SCRIPT" &&
+    grep -Fxq 'run_as_dev mix phx.new --version' "$INSTALL_SCRIPT" &&
     grep -Fq 'systemctl is-active --quiet postgresql.service' "$INSTALL_SCRIPT" &&
     grep -Fq -- '--command "SELECT 1;"' "$INSTALL_SCRIPT" &&
     grep -Fxq '/usr/local/bin/codex-devbox doctor' "$INSTALL_SCRIPT" &&
@@ -388,6 +400,7 @@ run_test "standalone preflight checks" install_script_runs_standalone_preflight
 run_test "curl-pipeable from master" installer_curl_pipeable_from_master
 run_test "bare-metal install" install_script_is_bare_metal
 run_test "Debian 13 Erlang toolchain" erlang_toolchain_supports_debian_13
+run_test "Elixir pinned to the Erlang OTP major" elixir_is_pinned_to_the_erlang_otp_major
 run_test "Claude CLI installed alongside Codex CLI" claude_cli_is_installed
 run_test "doctor checks Claude CLI" doctor_checks_claude_alongside_codex
 run_test "update command supports branch argument" update_command_supports_branch_argument

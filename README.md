@@ -22,8 +22,16 @@ Netzwerk, Template und Ressourcen des Containers müssen vor dem Aufruf bereits
 
 Installiert werden unter anderem Codex CLI, Claude CLI, Node.js 24, Git, Git
 LFS, GitHub CLI, Python, ShellCheck, ripgrep, `fd`, Erlang/OTP, Elixir,
-Phoenix und PostgreSQL. Erlang, Elixir und Phoenix werden für den Benutzer
-`dev` über `mise` verwaltet.
+Phoenix und PostgreSQL.
+
+Erlang/OTP wird für den Benutzer `dev` über `mise` verwaltet und auf Debian
+aus dem Quellcode gebaut (hex.pm veröffentlicht nur Ubuntu-Builds). Elixir
+kommt bewusst **nicht** über `mise`, sondern als offizielles, auf die
+Erlang-Hauptversion abgestimmtes Release (`elixir-otp-28.zip`) nach
+`~/.local/share/elixir`, verlinkt in `~/.local/bin`. Grund: `mise` liefert nur
+einen einzelnen, nicht OTP-gebundenen Elixir-Build aus, der gegen ein selbst
+gebautes Erlang beim Start abstürzen kann
+(`Kernel pid terminated (logger)`).
 
 Empfohlene Containergröße: 4 CPU-Kerne, 8192 MiB RAM, 32 GiB Speicher, Debian
 13 (amd64), unprivilegiert. Kleinere Container funktionieren ebenfalls, der

@@ -254,7 +254,7 @@ msg_info "Installing Claude CLI"
 silent npm install --global @anthropic-ai/claude-code@latest
 msg_ok "Installed Claude CLI"
 
-msg_info "Installing Erlang, Elixir and Phoenix"
+msg_info "Installing Erlang via mise"
 mise_installer="/tmp/codex-devbox-mise-install.sh"
 curl_with_retry "https://mise.run" "$mise_installer"
 chmod 0755 "$mise_installer"
@@ -264,13 +264,43 @@ run_as_dev env \
   MISE_ERLANG_COMPILE=true \
   KERL_CONFIGURE_OPTIONS="--without-javac --without-wx --without-odbc" \
   "${DEV_HOME}/.local/bin/mise" use --global "erlang@${ERLANG_VERSION}"
-run_as_dev "${DEV_HOME}/.local/bin/mise" use --global "elixir@${ELIXIR_VERSION}"
+msg_ok "Installed Erlang ${ERLANG_VERSION}"
+
+msg_info "Installing Elixir and Phoenix"
+# mise's core Elixir plugin fetches a single, OTP-unpinned build from
+# builds.hex.pm. On Debian, hex.pm has no precompiled Erlang either (it only
+# publishes Ubuntu builds), so Erlang above is always compiled from source
+# via kerl -- and that from-source Erlang isn't guaranteed to be ABI
+# compatible with mise's Hex.pm-built Elixir, which crashes at boot
+# ("Kernel pid terminated (logger)", badarg in code_server) when the two
+# don't match. Elixir's own GitHub releases instead publish builds tagged by
+# OTP *major* version (elixir-otp-28.zip, ...), which are built to work with
+# any OTP release in that series -- install that directly instead of going
+# through mise for Elixir.
+# Drop any Elixir previously managed by mise: its shims sit ahead of
+# ~/.local/bin on PATH and would otherwise keep shadowing the install below.
+run_as_dev "${DEV_HOME}/.local/bin/mise" unuse --global elixir >/dev/null 2>&1 || true
+for elixir_bin in elixir elixirc iex mix; do
+  rm -f "${DEV_HOME}/.local/share/mise/shims/${elixir_bin}"
+done
 run_as_dev "${DEV_HOME}/.local/bin/mise" reshim
-run_as_dev "${DEV_HOME}/.local/bin/mise" exec -- mix local.hex --force
-run_as_dev "${DEV_HOME}/.local/bin/mise" exec -- mix local.rebar --force
-run_as_dev "${DEV_HOME}/.local/bin/mise" exec -- \
-  mix archive.install hex phx_new "$PHOENIX_VERSION" --force
-msg_ok "Installed Erlang, Elixir and Phoenix"
+ERLANG_OTP_MAJOR="${ERLANG_VERSION%%.*}"
+elixir_zip="/tmp/codex-devbox-elixir.zip"
+curl_with_retry \
+  "https://github.com/elixir-lang/elixir/releases/download/v${ELIXIR_VERSION}/elixir-otp-${ERLANG_OTP_MAJOR}.zip" \
+  "$elixir_zip"
+rm -rf "${DEV_HOME}/.local/share/elixir"
+install -d -m 0755 -o "$DEV_USER" -g "$DEV_USER" "${DEV_HOME}/.local/share/elixir"
+run_as_dev unzip -q "$elixir_zip" -d "${DEV_HOME}/.local/share/elixir"
+rm -f "$elixir_zip"
+for elixir_bin in elixir elixirc iex mix; do
+  ln -sfn "${DEV_HOME}/.local/share/elixir/bin/${elixir_bin}" "${DEV_HOME}/.local/bin/${elixir_bin}"
+  chown -h "$DEV_USER:$DEV_USER" "${DEV_HOME}/.local/bin/${elixir_bin}"
+done
+run_as_dev mix local.hex --force
+run_as_dev mix local.rebar --force
+run_as_dev mix archive.install hex phx_new "$PHOENIX_VERSION" --force
+msg_ok "Installed Elixir ${ELIXIR_VERSION} (OTP ${ERLANG_OTP_MAJOR}) and Phoenix ${PHOENIX_VERSION}"
 
 PG_DB_NAME="devbox"
 PG_DB_USER="dev"
@@ -940,10 +970,8 @@ doctor() {
 
   run_as_dev codex --version || status=1
   run_as_dev claude --version || status=1
-  run_as_dev "${DEV_HOME}/.local/bin/mise" exec -- elixir --version ||
-    status=1
-  run_as_dev "${DEV_HOME}/.local/bin/mise" exec -- mix phx.new --version ||
-    status=1
+  run_as_dev elixir --version || status=1
+  run_as_dev mix phx.new --version || status=1
   ssh_status
   return "$status"
 }
@@ -1148,8 +1176,8 @@ npm --version
 codex --version
 claude --version
 run_as_dev "${DEV_HOME}/.local/bin/mise" --version
-run_as_dev "${DEV_HOME}/.local/bin/mise" exec -- elixir --version
-run_as_dev "${DEV_HOME}/.local/bin/mise" exec -- mix phx.new --version
+run_as_dev elixir --version
+run_as_dev mix phx.new --version
 systemctl is-active --quiet postgresql.service
 run_as_dev psql \
   --host 127.0.0.1 \
