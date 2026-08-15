@@ -6,10 +6,10 @@
 
 # Codex DevBox - standalone LXC installer
 #
-# Run this script as root directly inside an already provisioned LXC
-# container (Proxmox, LXD/Incus, or any other platform). It does not create
-# or configure the container itself and has no dependency on the Proxmox
-# host or the community-scripts framework.
+# Run this script as root directly inside an already provisioned Ubuntu LTS
+# LXC container (Proxmox, LXD/Incus, or any other platform). It does not
+# create or configure the container itself and has no dependency on the
+# Proxmox host or the community-scripts framework.
 #
 #   curl -fsSL https://raw.githubusercontent.com/c4kingpin/Scripts/master/install.sh | bash
 
@@ -51,11 +51,38 @@ require_root() {
   }
 }
 
-require_debian_like() {
+# Erlang/OTP is installed from the precompiled builds on builds.hex.pm, which
+# are published for Ubuntu LTS only -- there are no Debian builds. On anything
+# else mise falls back to compiling OTP from source with kerl, and that
+# from-source runtime has proven broken (plain `erl` dies at boot with
+# `persistent_term:get(code_server)` badarg). So require Ubuntu up front and
+# say why, instead of failing much later with an opaque BEAM crash.
+require_supported_os() {
+  local os_id=""
+  local os_version=""
+
   command -v apt-get >/dev/null 2>&1 || {
-    msg_error "This installer requires a Debian- or Ubuntu-based container (apt-get not found)."
+    msg_error "This installer requires an Ubuntu LTS container (apt-get not found)."
     exit 1
   }
+
+  if [[ -r /etc/os-release ]]; then
+    os_id="$(. /etc/os-release && printf '%s' "${ID:-}")"
+    os_version="$(. /etc/os-release && printf '%s' "${VERSION_ID:-}")"
+  fi
+
+  case "${os_id}-${os_version}" in
+  ubuntu-24.04 | ubuntu-22.04 | ubuntu-20.04)
+    msg_ok "Supported OS: Ubuntu ${os_version}"
+    ;;
+  *)
+    msg_error "Unsupported OS: ${os_id:-unknown} ${os_version:-unknown}"
+    msg_error "Ubuntu 24.04 LTS is required (22.04 and 20.04 also work)."
+    msg_error "Precompiled Erlang/OTP is published for Ubuntu only; on other"
+    msg_error "distributions it would be compiled from source and end up broken."
+    exit 1
+    ;;
+  esac
 }
 
 network_check() {
@@ -95,7 +122,7 @@ curl_with_retry() {
 }
 
 require_root
-require_debian_like
+require_supported_os
 network_check
 update_os
 
@@ -161,9 +188,21 @@ EOF
 }
 select_codex_autonomy
 
+# gh, ripgrep, fd-find, git-lfs and shellcheck all live in Ubuntu's universe
+# component. Stock Ubuntu images enable it, minimal ones do not always, and a
+# missing component surfaces only as "Unable to locate package" further down.
+msg_info "Ensuring the universe component is enabled"
+if apt-cache policy 2>/dev/null | grep -q universe; then
+  msg_ok "universe component already enabled"
+else
+  silent apt-get install -y --no-install-recommends software-properties-common
+  silent add-apt-repository -y universe
+  silent apt-get update
+  msg_ok "Enabled the universe component"
+fi
+
 msg_info "Installing Dependencies"
 silent apt-get install -y --no-install-recommends \
-  autoconf \
   bash-completion \
   build-essential \
   ca-certificates \
@@ -176,7 +215,6 @@ silent apt-get install -y --no-install-recommends \
   inotify-tools \
   jq \
   less \
-  libncurses-dev \
   libssl-dev \
   nano \
   openssh-server \
@@ -260,23 +298,29 @@ curl_with_retry "https://mise.run" "$mise_installer"
 chmod 0755 "$mise_installer"
 run_as_dev env MISE_INSTALL_PATH="${DEV_HOME}/.local/bin/mise" sh "$mise_installer"
 rm -f "$mise_installer"
+# MISE_ERLANG_COMPILE=false forces the precompiled builds.hex.pm build and
+# makes mise fail loudly if none exists for this Ubuntu release, rather than
+# silently compiling a broken OTP from source (see require_supported_os).
 run_as_dev env \
-  MISE_ERLANG_COMPILE=true \
-  KERL_CONFIGURE_OPTIONS="--without-javac --without-wx --without-odbc" \
+  MISE_ERLANG_COMPILE=false \
   "${DEV_HOME}/.local/bin/mise" use --global "erlang@${ERLANG_VERSION}"
+run_as_dev "${DEV_HOME}/.local/bin/mise" reshim
+
+# Fail here, with a readable message, if the runtime is unusable -- rather
+# than several steps later inside an Elixir or mix invocation.
+if ! run_as_dev erl -noshell -eval 'halt(0).'; then
+  msg_error "Erlang ${ERLANG_VERSION} was installed but cannot execute BEAM code."
+  exit 1
+fi
 msg_ok "Installed Erlang ${ERLANG_VERSION}"
 
 msg_info "Installing Elixir and Phoenix"
 # mise's core Elixir plugin fetches a single, OTP-unpinned build from
-# builds.hex.pm. On Debian, hex.pm has no precompiled Erlang either (it only
-# publishes Ubuntu builds), so Erlang above is always compiled from source
-# via kerl -- and that from-source Erlang isn't guaranteed to be ABI
-# compatible with mise's Hex.pm-built Elixir, which crashes at boot
-# ("Kernel pid terminated (logger)", badarg in code_server) when the two
-# don't match. Elixir's own GitHub releases instead publish builds tagged by
-# OTP *major* version (elixir-otp-28.zip, ...), which are built to work with
-# any OTP release in that series -- install that directly instead of going
-# through mise for Elixir.
+# builds.hex.pm, so nothing ties it to the OTP release installed above.
+# Elixir's own GitHub releases are instead published per OTP *major* version
+# (elixir-otp-28.zip, ...) and work with any OTP release in that series, so
+# derive the artifact from ERLANG_VERSION and install it directly. This keeps
+# the two from drifting apart on future version bumps.
 # Drop any Elixir previously managed by mise: its shims sit ahead of
 # ~/.local/bin on PATH and would otherwise keep shadowing the install below.
 run_as_dev "${DEV_HOME}/.local/bin/mise" unuse --global elixir >/dev/null 2>&1 || true

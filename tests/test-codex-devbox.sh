@@ -63,11 +63,11 @@ standalone_no_proxmox_framework() {
 
 install_script_runs_standalone_preflight() {
   grep -Fq 'require_root() {' "$INSTALL_SCRIPT" &&
-    grep -Fq 'require_debian_like() {' "$INSTALL_SCRIPT" &&
+    grep -Fq 'require_supported_os() {' "$INSTALL_SCRIPT" &&
     grep -Fq 'network_check() {' "$INSTALL_SCRIPT" &&
     grep -Fq 'update_os() {' "$INSTALL_SCRIPT" &&
     grep -Fxq 'require_root' "$INSTALL_SCRIPT" &&
-    grep -Fxq 'require_debian_like' "$INSTALL_SCRIPT" &&
+    grep -Fxq 'require_supported_os' "$INSTALL_SCRIPT" &&
     grep -Fxq 'network_check' "$INSTALL_SCRIPT" &&
     grep -Fxq 'update_os' "$INSTALL_SCRIPT"
 }
@@ -81,13 +81,22 @@ install_script_is_bare_metal() {
   ! grep -Eq 'setup_docker|docker (run|compose|pull)|podman' "$INSTALL_SCRIPT"
 }
 
-erlang_toolchain_supports_debian_13() {
-  grep -Fq autoconf "$INSTALL_SCRIPT" &&
-    grep -Fq libncurses-dev "$INSTALL_SCRIPT" &&
-    grep -Fq libssl-dev "$INSTALL_SCRIPT" &&
-    grep -Fq 'MISE_ERLANG_COMPILE=true' "$INSTALL_SCRIPT" &&
-    grep -Fq 'KERL_CONFIGURE_OPTIONS="--without-javac --without-wx --without-odbc"' \
-      "$INSTALL_SCRIPT"
+erlang_uses_precompiled_ubuntu_builds() {
+  # builds.hex.pm publishes precompiled Erlang for Ubuntu only. Compiling OTP
+  # from source with kerl produced a runtime where even plain `erl` died with
+  # persistent_term:get(code_server) badarg, so the source path must stay off.
+  grep -Fq 'MISE_ERLANG_COMPILE=false' "$INSTALL_SCRIPT" &&
+    ! grep -Fq 'MISE_ERLANG_COMPILE=true' "$INSTALL_SCRIPT" &&
+    ! grep -Fq 'KERL_CONFIGURE_OPTIONS' "$INSTALL_SCRIPT" &&
+    grep -Fq "run_as_dev erl -noshell -eval 'halt(0).'" "$INSTALL_SCRIPT"
+}
+
+installer_requires_ubuntu() {
+  grep -Fq 'require_supported_os() {' "$INSTALL_SCRIPT" &&
+    grep -Fxq 'require_supported_os' "$INSTALL_SCRIPT" &&
+    ! grep -Fq 'require_debian_like' "$INSTALL_SCRIPT" &&
+    grep -Fq 'ubuntu-24.04 | ubuntu-22.04 | ubuntu-20.04)' "$INSTALL_SCRIPT" &&
+    grep -Fq 'add-apt-repository -y universe' "$INSTALL_SCRIPT"
 }
 
 elixir_is_pinned_to_the_erlang_otp_major() {
@@ -399,7 +408,8 @@ run_test "standalone, no Proxmox/community-scripts framework" standalone_no_prox
 run_test "standalone preflight checks" install_script_runs_standalone_preflight
 run_test "curl-pipeable from master" installer_curl_pipeable_from_master
 run_test "bare-metal install" install_script_is_bare_metal
-run_test "Debian 13 Erlang toolchain" erlang_toolchain_supports_debian_13
+run_test "precompiled Ubuntu Erlang builds" erlang_uses_precompiled_ubuntu_builds
+run_test "installer requires Ubuntu" installer_requires_ubuntu
 run_test "Elixir pinned to the Erlang OTP major" elixir_is_pinned_to_the_erlang_otp_major
 run_test "Claude CLI installed alongside Codex CLI" claude_cli_is_installed
 run_test "doctor checks Claude CLI" doctor_checks_claude_alongside_codex

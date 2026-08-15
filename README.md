@@ -24,25 +24,52 @@ Installiert werden unter anderem Codex CLI, Claude CLI, Node.js 24, Git, Git
 LFS, GitHub CLI, Python, ShellCheck, ripgrep, `fd`, Erlang/OTP, Elixir,
 Phoenix und PostgreSQL.
 
-Erlang/OTP wird für den Benutzer `dev` über `mise` verwaltet und auf Debian
-aus dem Quellcode gebaut (hex.pm veröffentlicht nur Ubuntu-Builds). Elixir
-kommt bewusst **nicht** über `mise`, sondern als offizielles, auf die
-Erlang-Hauptversion abgestimmtes Release (`elixir-otp-28.zip`) nach
-`~/.local/share/elixir`, verlinkt in `~/.local/bin`. Grund: `mise` liefert nur
-einen einzelnen, nicht OTP-gebundenen Elixir-Build aus, der gegen ein selbst
-gebautes Erlang beim Start abstürzen kann
-(`Kernel pid terminated (logger)`).
+Erlang/OTP wird für den Benutzer `dev` über `mise` verwaltet und dabei
+ausschließlich als **vorkompilierter** Build von builds.hex.pm installiert
+(`MISE_ERLANG_COMPILE=false`). Elixir kommt bewusst **nicht** über `mise`,
+sondern als offizielles, auf die Erlang-Hauptversion abgestimmtes Release
+(`elixir-otp-28.zip`) nach `~/.local/share/elixir`, verlinkt in
+`~/.local/bin` — `mise` liefert für Elixir nur einen einzelnen, nicht an eine
+OTP-Version gebundenen Build aus.
 
-Empfohlene Containergröße: 4 CPU-Kerne, 8192 MiB RAM, 32 GiB Speicher, Debian
-13 (amd64), unprivilegiert. Kleinere Container funktionieren ebenfalls, der
-Erlang-Quellbuild profitiert aber von mehr CPU-Kernen.
+Empfohlene Containergröße: 4 CPU-Kerne, 8192 MiB RAM, 32 GiB Speicher,
+unprivilegiert. Kleinere Container funktionieren ebenfalls.
+
+### Betriebssystem: Ubuntu LTS erforderlich
+
+Die DevBox setzt **Ubuntu 24.04 LTS** voraus (22.04 und 20.04 funktionieren
+ebenfalls); amd64 und arm64 werden unterstützt. Der Installer prüft das zu
+Beginn und bricht mit einer klaren Meldung ab, falls ein anderes System läuft.
+
+Der Grund ist Erlang/OTP: builds.hex.pm veröffentlicht vorkompilierte
+OTP-Builds ausschließlich für Ubuntu. Auf Debian müsste `mise` Erlang aus dem
+Quellcode übersetzen, und diese selbst gebaute Runtime erwies sich als defekt
+— schon ein einfaches `erl` brach beim Start mit
+`persistent_term:get(code_server)`-`badarg` und
+`Kernel pid terminated (logger)` ab. Mit Ubuntu entfällt der Quellbuild
+vollständig, was die Installation zusätzlich deutlich beschleunigt.
 
 ## Installation
 
-Zuerst einen unprivilegierten LXC-Container mit Debian 13 (oder einem anderen
-Debian-/Ubuntu-Derivat mit `apt`) über das jeweilige Hypervisor-Tooling
-anlegen und starten. Danach das Skript als `root` **innerhalb** des
-Containers ausführen:
+Zuerst einen unprivilegierten LXC-Container mit Ubuntu 24.04 LTS über das
+jeweilige Hypervisor-Tooling anlegen und starten, zum Beispiel:
+
+```bash
+# Proxmox VE (Template ggf. zuvor mit "pveam download local <template>" holen)
+pct create <CTID> local:vztmpl/ubuntu-24.04-standard_24.04-2_amd64.tar.zst \
+  --hostname devbox --unprivileged 1 \
+  --cores 4 --memory 8192 --rootfs local-lvm:32 \
+  --net0 name=eth0,bridge=vmbr0,ip=dhcp
+pct start <CTID>
+```
+
+```bash
+# LXD / Incus
+incus launch images:ubuntu/24.04 devbox \
+  -c limits.cpu=4 -c limits.memory=8GiB
+```
+
+Danach das Skript als `root` **innerhalb** des Containers ausführen:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/c4kingpin/Scripts/master/install.sh | bash
