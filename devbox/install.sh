@@ -136,8 +136,8 @@ NODE_VERSION="24"
 # inheriting an inaccessible working directory such as /root. Some OTP
 # releases can fail very early during kernel/logger startup in that situation.
 # run_as_dev() below therefore changes to DEV_HOME before invoking runuser.
-ERLANG_VERSION="${ERLANG_VERSION:-27.3.4.16}"
-ELIXIR_VERSION="${ELIXIR_VERSION:-1.20.2}"
+ERLANG_VERSION="${ERLANG_VERSION:-29.0.5}"
+ELIXIR_VERSION="${ELIXIR_VERSION:-1.20.3}"
 PHOENIX_VERSION="${PHOENIX_VERSION:-1.8.9}"
 DEVBOX_REPO_URL="${DEVBOX_REPO_URL:-https://raw.githubusercontent.com/c4kingpin/Scripts}"
 
