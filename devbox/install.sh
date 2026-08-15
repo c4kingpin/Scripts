@@ -2,6 +2,7 @@
 # Copyright (c) 2021-2026 c4kingpin
 # Author: Jörn Siedentopf (c4kingpin)
 # License: MIT
+#
 # Sources:
 #   https://github.com/openai/codex
 #   https://github.com/anthropics/claude-code
@@ -9,16 +10,37 @@
 #
 # DevBox - standalone LXC installer
 #
+# Architecture:
+#
+#   root
+#     -> OS/package/toolchain administration only
+#
+#   postgres
+#     -> PostgreSQL service
+#
+#   dev
+#     -> Happy
+#     -> Claude Code
+#     -> Codex
+#     -> Git/GitHub
+#     -> project workspaces
+#     -> agent credentials
+#
 # Happy is the primary session and remote-control layer. Claude Code and
-# Codex remain installed as native backend CLIs for authentication,
-# diagnostics, recovery and direct use.
+# Codex remain installed as native backend CLIs.
 #
-# Run this script as root directly inside an already provisioned Ubuntu LTS
-# LXC container (Proxmox, LXD/Incus, or any other platform). It does not
-# create or configure the container itself and has no dependency on the
-# Proxmox host or the community-scripts framework.
+# IMPORTANT:
+# Happy asking to pair/connect on the first real use is expected.
+# The installer itself deliberately does NOT execute `happy --version`,
+# because current Happy versions continue from --version into their normal
+# startup/authentication flow. The installed Happy version is therefore
+# validated through npm without starting Happy itself.
 #
-#   curl -fsSL https://raw.githubusercontent.com/c4kingpin/Scripts/master/devbox/install.sh | bash
+# Run as root inside an already provisioned Ubuntu LTS LXC:
+#
+#   curl -fsSL \
+#     https://raw.githubusercontent.com/c4kingpin/Scripts/master/devbox/install.sh \
+#     | bash
 
 set -Eeuo pipefail
 umask 022
@@ -28,9 +50,17 @@ GN=$'\033[1;92m'
 YW=$'\033[33m'
 CL=$'\033[m'
 
-msg_info() { printf '%b\n' "${YW}➜ $*${CL}"; }
-msg_ok() { printf '%b\n' "${GN}✓ $*${CL}"; }
-msg_error() { printf '%b\n' "${RD}✗ $*${CL}" >&2; }
+msg_info() {
+  printf '%b\n' "${YW}➜ $*${CL}"
+}
+
+msg_ok() {
+  printf '%b\n' "${GN}✓ $*${CL}"
+}
+
+msg_error() {
+  printf '%b\n' "${RD}✗ $*${CL}" >&2
+}
 
 error_handler() {
   local exit_code=$?
@@ -61,43 +91,50 @@ require_root() {
   }
 }
 
-# Erlang/OTP is installed from the precompiled builds on builds.hex.pm, which
-# are published for Ubuntu LTS only -- there are no Debian builds.
 require_supported_os() {
   local os_id=""
   local os_version=""
 
   command -v apt-get >/dev/null 2>&1 || {
-    msg_error "This installer requires an Ubuntu LTS container (apt-get not found)."
+    msg_error "This installer requires Ubuntu LTS (apt-get not found)."
     exit 1
   }
 
   if [[ -r /etc/os-release ]]; then
-    os_id="$(. /etc/os-release && printf '%s' "${ID:-}")"
-    os_version="$(. /etc/os-release && printf '%s' "${VERSION_ID:-}")"
+    os_id="$(
+      . /etc/os-release
+      printf '%s' "${ID:-}"
+    )"
+
+    os_version="$(
+      . /etc/os-release
+      printf '%s' "${VERSION_ID:-}"
+    )"
   fi
 
   case "${os_id}-${os_version}" in
-  ubuntu-24.04 | ubuntu-22.04 | ubuntu-20.04)
-    msg_ok "Supported OS: Ubuntu ${os_version}"
-    ;;
-  *)
-    msg_error "Unsupported OS: ${os_id:-unknown} ${os_version:-unknown}"
-    msg_error "Ubuntu 24.04 LTS is required (22.04 and 20.04 also work)."
-    msg_error "Precompiled Erlang/OTP is published for Ubuntu only; on other"
-    msg_error "distributions it would be compiled from source."
-    exit 1
-    ;;
+    ubuntu-24.04 | ubuntu-22.04 | ubuntu-20.04)
+      msg_ok "Supported OS: Ubuntu ${os_version}"
+      ;;
+    *)
+      msg_error "Unsupported OS: ${os_id:-unknown} ${os_version:-unknown}"
+      msg_error "Ubuntu 24.04 LTS is recommended."
+      msg_error "Ubuntu 22.04 and 20.04 are also supported."
+      exit 1
+      ;;
   esac
 }
 
 network_check() {
   msg_info "Checking network connectivity"
 
-  if ! curl -fsSL \
+  if ! curl \
+    -fsSL \
     --connect-timeout 5 \
     --max-time 10 \
-    https://github.com >/dev/null 2>&1; then
+    https://github.com \
+    >/dev/null 2>&1; then
+
     msg_error "No network connectivity to github.com."
     exit 1
   fi
@@ -141,79 +178,106 @@ require_supported_os
 network_check
 update_os
 
-DEV_USER="dev"
-DEV_HOME="/home/${DEV_USER}"
-NODE_VERSION="24"
+readonly DEV_USER="dev"
+readonly DEV_HOME="/home/${DEV_USER}"
+readonly NODE_VERSION="24"
 
-# Keep the default OTP release explicitly pinned so installer runs stay
-# reproducible. Override with ERLANG_VERSION=... when testing another release.
-#
-# Important: Erlang/OTP must not be started after dropping privileges while
-# inheriting an inaccessible working directory such as /root. Some OTP
-# releases can fail very early during kernel/logger startup in that situation.
 ERLANG_VERSION="${ERLANG_VERSION:-29.0.5}"
 ELIXIR_VERSION="${ELIXIR_VERSION:-1.20.3}"
 PHOENIX_VERSION="${PHOENIX_VERSION:-1.8.9}"
-DEVBOX_REPO_URL="${DEVBOX_REPO_URL:-https://raw.githubusercontent.com/c4kingpin/Scripts}"
 
-# Commands started through runuser inherit the caller's current working
-# directory. Always change to DEV_HOME before dropping privileges.
+DEVBOX_REPO_URL="${
+  DEVBOX_REPO_URL:-
+  https://raw.githubusercontent.com/c4kingpin/Scripts
+}"
+
 run_as_dev() (
   cd "$DEV_HOME"
 
-  exec runuser -u "$DEV_USER" -- env \
-    HOME="$DEV_HOME" \
-    USER="$DEV_USER" \
-    LOGNAME="$DEV_USER" \
-    PATH="${DEV_HOME}/.local/bin:/usr/local/bin:/usr/bin:/bin" \
-    "$@"
+  exec runuser \
+    -u "$DEV_USER" \
+    -- \
+    env \
+      HOME="$DEV_HOME" \
+      USER="$DEV_USER" \
+      LOGNAME="$DEV_USER" \
+      SHELL="/bin/bash" \
+      LANG="C.UTF-8" \
+      LC_ALL="C.UTF-8" \
+      PATH="${DEV_HOME}/.local/bin:/usr/local/bin:/usr/bin:/bin" \
+      "$@"
 )
 
-# One autonomy profile drives both native agents. Happy deliberately remains
-# only the session/remote layer; the actual agent security configuration stays
-# with Codex and Claude.
 select_autonomy() {
   local requested="${DEVBOX_AUTONOMY:-}"
 
   if [[ -f "${DEV_HOME}/.codex/config.toml" ||
         -f "${DEV_HOME}/.claude/settings.json" ]]; then
+
     DEVBOX_AUTONOMY="${requested:-balanced}"
+
     msg_ok "Existing agent configuration preserved; skipping autonomy prompt"
     return
   fi
 
   case "$requested" in
-  controlled | balanced | autonomous | full-access)
-    DEVBOX_AUTONOMY="$requested"
-    ;;
-  "")
-    if [[ -t 0 && -t 1 ]]; then
-      cat <<'EOF'
+    controlled | balanced | autonomous | full-access)
+      DEVBOX_AUTONOMY="$requested"
+      ;;
+
+    "")
+      if [[ -t 0 && -t 1 ]]; then
+        cat <<'EOF'
+
 How autonomously may Codex and Claude work?
-  1) Controlled   - read-only; approve edits and commands
-  2) Balanced     - edit workspace; approve external access (recommended)
-  3) Autonomous   - workspace and network without approval prompts
-  4) Full access  - no sandbox or prompts (LXC boundary only)
+
+  1) Controlled
+     Read-only; approve edits and commands.
+
+  2) Balanced
+     Workspace edits allowed; external access asks.
+     Recommended.
+
+  3) Autonomous
+     Workspace and network without approval prompts.
+
+  4) Full access
+     No agent sandbox or prompts; LXC boundary only.
+
 EOF
 
-      local choice=""
-      read -r -p "Choice [2]: " choice
+        local choice=""
 
-      case "${choice:-2}" in
-      1) DEVBOX_AUTONOMY="controlled" ;;
-      2) DEVBOX_AUTONOMY="balanced" ;;
-      3) DEVBOX_AUTONOMY="autonomous" ;;
-      4) DEVBOX_AUTONOMY="full-access" ;;
-      *) DEVBOX_AUTONOMY="balanced" ;;
-      esac
-    else
-      DEVBOX_AUTONOMY="balanced"
-    fi
-    ;;
-  *)
-    msg_error "Invalid DEVBOX_AUTONOMY: ${requested}"
-    exit 1
-    ;;
+        read -r \
+          -p "Choice [2]: " \
+          choice
+
+        case "${choice:-2}" in
+          1)
+            DEVBOX_AUTONOMY="controlled"
+            ;;
+          2)
+            DEVBOX_AUTONOMY="balanced"
+            ;;
+          3)
+            DEVBOX_AUTONOMY="autonomous"
+            ;;
+          4)
+            DEVBOX_AUTONOMY="full-access"
+            ;;
+          *)
+            DEVBOX_AUTONOMY="balanced"
+            ;;
+        esac
+      else
+        DEVBOX_AUTONOMY="balanced"
+      fi
+      ;;
+
+    *)
+      msg_error "Invalid DEVBOX_AUTONOMY: ${requested}"
+      exit 1
+      ;;
   esac
 
   msg_ok "Agent autonomy profile: ${DEVBOX_AUTONOMY}"
@@ -221,22 +285,30 @@ EOF
 
 select_autonomy
 
-# gh, ripgrep, fd-find, git-lfs and shellcheck all live in Ubuntu's universe
-# component. Stock Ubuntu images enable it, minimal ones do not always.
-msg_info "Ensuring the universe component is enabled"
+msg_info "Ensuring Ubuntu universe component is enabled"
 
 if apt-cache policy 2>/dev/null | grep -q universe; then
   msg_ok "universe component already enabled"
 else
-  silent apt-get install -y --no-install-recommends software-properties-common
-  silent add-apt-repository -y universe
+  silent apt-get install \
+    -y \
+    --no-install-recommends \
+    software-properties-common
+
+  silent add-apt-repository \
+    -y \
+    universe
+
   silent apt-get update
-  msg_ok "Enabled the universe component"
+
+  msg_ok "Enabled universe component"
 fi
 
 msg_info "Installing Dependencies"
 
-silent apt-get install -y --no-install-recommends \
+silent apt-get install \
+  -y \
+  --no-install-recommends \
   bash-completion \
   build-essential \
   ca-certificates \
@@ -285,19 +357,24 @@ if [[ "$(node --version 2>/dev/null || true)" != "v${NODE_VERSION}."* ]]; then
 
   rm -f "$nodesource_setup"
 
-  silent apt-get install -y --no-install-recommends nodejs
+  silent apt-get install \
+    -y \
+    --no-install-recommends \
+    nodejs
 fi
 
-[[ "$(node --version)" == "v${NODE_VERSION}."* ]] || {
+if [[ "$(node --version)" != "v${NODE_VERSION}."* ]]; then
   msg_error "Unexpected Node.js version: $(node --version 2>/dev/null || echo none)"
   exit 1
-}
+fi
 
 msg_ok "Installed Node.js $(node --version)"
 
 msg_info "Enabling PostgreSQL"
 
-systemctl enable --now postgresql.service
+systemctl enable \
+  --now \
+  postgresql.service
 
 msg_ok "Enabled PostgreSQL"
 
@@ -313,14 +390,17 @@ if ! id "$DEV_USER" >/dev/null 2>&1; then
   random_password="$(openssl rand -hex 32)"
   password_hash="$(openssl passwd -6 "$random_password")"
 
-  usermod --password "$password_hash" "$DEV_USER"
+  usermod \
+    --password "$password_hash" \
+    "$DEV_USER"
 
-  unset random_password password_hash
+  unset random_password
+  unset password_hash
 fi
 
-# Carry over installations made under the old codex-devbox name.
 if [[ -d "${DEV_HOME}/.config/codex-devbox" &&
       ! -d "${DEV_HOME}/.config/devbox" ]]; then
+
   msg_info "Migrating state from ~/.config/codex-devbox"
 
   mv \
@@ -336,32 +416,43 @@ rm -f \
   /etc/ssh/sshd_config.d/00-codex-devbox.conf \
   /etc/profile.d/codex-devbox.sh
 
-# Earlier revisions let mise manage Erlang and Elixir. mise itself stays, but
-# its BEAM installs and shims must go so they cannot shadow the system toolchain.
 if [[ -d "${DEV_HOME}/.local/share/mise" ]]; then
-  msg_info "Removing the previously mise-managed BEAM toolchain"
+  msg_info "Removing previously mise-managed BEAM toolchain"
 
   rm -rf \
     "${DEV_HOME}/.local/share/mise/installs/erlang" \
     "${DEV_HOME}/.local/share/mise/installs/elixir" \
     "${DEV_HOME}/.local/share/elixir"
 
-  for stale_bin in elixir elixirc iex mix erl erlc escript; do
+  for stale_bin in \
+    elixir \
+    elixirc \
+    iex \
+    mix \
+    erl \
+    erlc \
+    escript; do
+
     rm -f \
       "${DEV_HOME}/.local/share/mise/shims/${stale_bin}" \
       "${DEV_HOME}/.local/bin/${stale_bin}"
   done
 
   if [[ -f "${DEV_HOME}/.config/mise/config.toml" ]]; then
-    sed -i \
+    sed \
+      -i \
       '/^\(erlang\|elixir\) *=/d' \
       "${DEV_HOME}/.config/mise/config.toml"
   fi
 
-  msg_ok "Removed the previously mise-managed BEAM toolchain"
+  msg_ok "Removed previously mise-managed BEAM toolchain"
 fi
 
-install -d -m 0700 -o "$DEV_USER" -g "$DEV_USER" \
+install \
+  -d \
+  -m 0700 \
+  -o "$DEV_USER" \
+  -g "$DEV_USER" \
   "${DEV_HOME}/.ssh" \
   "${DEV_HOME}/.codex" \
   "${DEV_HOME}/.claude" \
@@ -370,7 +461,11 @@ install -d -m 0700 -o "$DEV_USER" -g "$DEV_USER" \
   "${DEV_HOME}/.config/devbox" \
   "${DEV_HOME}/.cache"
 
-install -d -m 0755 -o "$DEV_USER" -g "$DEV_USER" \
+install \
+  -d \
+  -m 0755 \
+  -o "$DEV_USER" \
+  -g "$DEV_USER" \
   "${DEV_HOME}/.local" \
   "${DEV_HOME}/.local/bin" \
   "${DEV_HOME}/workspace"
@@ -379,8 +474,12 @@ for developer_dir in \
   "${DEV_HOME}/.config" \
   "${DEV_HOME}/.cache" \
   "${DEV_HOME}/.local" \
-  "${DEV_HOME}/.happy"; do
-  if ! run_as_dev test -w "$developer_dir"; then
+  "${DEV_HOME}/.happy" \
+  "${DEV_HOME}/workspace"; do
+
+  if ! run_as_dev test \
+    -w "$developer_dir"; then
+
     msg_error "Developer directory is not writable: ${developer_dir}"
     exit 1
   fi
@@ -390,24 +489,40 @@ msg_ok "Created Developer User"
 
 msg_info "Installing Codex CLI"
 
-silent npm install --global @openai/codex@latest
+silent npm install \
+  --global \
+  @openai/codex@latest
 
 msg_ok "Installed Codex CLI"
 
-msg_info "Installing Claude CLI"
+msg_info "Installing Claude Code"
 
-silent npm install --global @anthropic-ai/claude-code@latest
+silent npm install \
+  --global \
+  @anthropic-ai/claude-code@latest
 
-msg_ok "Installed Claude CLI"
+msg_ok "Installed Claude Code"
 
 msg_info "Installing Happy"
 
-silent npm install --global happy@latest
+silent npm install \
+  --global \
+  happy@latest
+
+# Never run `happy --version` here. Current Happy continues from the version
+# output into its normal authentication/session startup path.
+if ! npm list \
+  --global \
+  --depth=0 \
+  happy \
+  >/dev/null 2>&1; then
+
+  msg_error "Happy npm package was not installed correctly."
+  exit 1
+fi
 
 msg_ok "Installed Happy"
 
-# mise is available as a general-purpose version manager for whatever a
-# project needs. It deliberately does NOT manage Erlang or Elixir.
 msg_info "Installing mise"
 
 mise_installer="/tmp/devbox-mise-install.sh"
@@ -418,24 +533,30 @@ curl_with_retry \
 
 chmod 0755 "$mise_installer"
 
-run_as_dev env \
+run_as_dev \
+  env \
   MISE_INSTALL_PATH="${DEV_HOME}/.local/bin/mise" \
-  sh "$mise_installer" >>"$LOG_FILE" 2>&1
+  sh "$mise_installer" \
+  >>"$LOG_FILE" 2>&1
 
 rm -f "$mise_installer"
 
 msg_ok "Installed mise"
 
-# Erlang and Elixir are installed system-wide under /opt/devbox and exposed
-# through plain symlinks in /usr/local/bin.
-OTP_ROOT="/opt/devbox/otp"
-ELIXIR_ROOT="/opt/devbox/elixir"
+readonly OTP_ROOT="/opt/devbox/otp"
+readonly ELIXIR_ROOT="/opt/devbox/elixir"
+
 ERLANG_OTP_MAJOR="${ERLANG_VERSION%%.*}"
 
 msg_info "Installing Erlang/OTP ${ERLANG_VERSION}"
 
 otp_arch="$(dpkg --print-architecture)"
-otp_os="ubuntu-$(. /etc/os-release && printf '%s' "${VERSION_ID}")"
+
+otp_os="ubuntu-$(
+  . /etc/os-release
+  printf '%s' "${VERSION_ID}"
+)"
+
 otp_tarball="/tmp/devbox-otp.tar.gz"
 
 curl_with_retry \
@@ -444,7 +565,10 @@ curl_with_retry \
 
 rm -rf "$OTP_ROOT"
 
-install -d -m 0755 "$OTP_ROOT"
+install \
+  -d \
+  -m 0755 \
+  "$OTP_ROOT"
 
 tar \
   -xzf "$otp_tarball" \
@@ -455,7 +579,9 @@ rm -f "$otp_tarball"
 
 (
   cd "$OTP_ROOT"
-  ./Install -minimal "$OTP_ROOT"
+  ./Install \
+    -minimal \
+    "$OTP_ROOT"
 ) >>"$LOG_FILE" 2>&1
 
 for otp_bin in \
@@ -468,15 +594,19 @@ for otp_bin in \
   ct_run \
   run_erl \
   to_erl; do
+
   if [[ -x "${OTP_ROOT}/bin/${otp_bin}" ]]; then
-    ln -sfn \
+    ln \
+      -sfn \
       "${OTP_ROOT}/bin/${otp_bin}" \
       "/usr/local/bin/${otp_bin}"
   fi
 done
 
 if [[ ! -f "${DEV_HOME}/.erlang.cookie" ]]; then
-  openssl rand -hex 32 >"${DEV_HOME}/.erlang.cookie"
+  openssl rand \
+    -hex 32 \
+    >"${DEV_HOME}/.erlang.cookie"
 fi
 
 chown \
@@ -487,7 +617,10 @@ chmod \
   0400 \
   "${DEV_HOME}/.erlang.cookie"
 
-if ! run_as_dev erl -noshell -eval 'halt(0).'; then
+if ! run_as_dev erl \
+  -noshell \
+  -eval 'halt(0).'; then
+
   msg_error "Erlang ${ERLANG_VERSION} was installed but cannot execute BEAM code."
   exit 1
 fi
@@ -504,7 +637,10 @@ curl_with_retry \
 
 rm -rf "$ELIXIR_ROOT"
 
-install -d -m 0755 "$ELIXIR_ROOT"
+install \
+  -d \
+  -m 0755 \
+  "$ELIXIR_ROOT"
 
 unzip \
   -q \
@@ -513,62 +649,94 @@ unzip \
 
 rm -f "$elixir_zip"
 
-chmod 0755 "$ELIXIR_ROOT"/bin/*
+chmod \
+  0755 \
+  "$ELIXIR_ROOT"/bin/*
 
-for elixir_bin in elixir elixirc iex mix; do
-  ln -sfn \
+for elixir_bin in \
+  elixir \
+  elixirc \
+  iex \
+  mix; do
+
+  ln \
+    -sfn \
     "${ELIXIR_ROOT}/bin/${elixir_bin}" \
     "/usr/local/bin/${elixir_bin}"
 done
 
 run_as_dev mix local.hex --force
 run_as_dev mix local.rebar --force
-run_as_dev mix archive.install hex phx_new "$PHOENIX_VERSION" --force
+
+run_as_dev mix archive.install \
+  hex \
+  phx_new \
+  "$PHOENIX_VERSION" \
+  --force
 
 msg_ok "Installed Elixir ${ELIXIR_VERSION} (OTP ${ERLANG_OTP_MAJOR}) and Phoenix ${PHOENIX_VERSION}"
 
-PG_DB_NAME="devbox"
-PG_DB_USER="dev"
-PG_ENV_FILE="${DEV_HOME}/.config/devbox/postgres.env"
+readonly PG_DB_NAME="devbox"
+readonly PG_DB_USER="dev"
+readonly PG_ENV_FILE="${DEV_HOME}/.config/devbox/postgres.env"
 
 msg_info "Configuring PostgreSQL Development Access"
 
 if [[ -r "$PG_ENV_FILE" ]] &&
-  grep -q '^PGPASSWORD=' "$PG_ENV_FILE"; then
-  PG_DB_PASS="$(sed -n 's/^PGPASSWORD=//p' "$PG_ENV_FILE")"
+  grep \
+    -q \
+    '^PGPASSWORD=' \
+    "$PG_ENV_FILE"; then
+
+  PG_DB_PASS="$(
+    sed \
+      -n \
+      's/^PGPASSWORD=//p' \
+      "$PG_ENV_FILE"
+  )"
 else
   PG_DB_PASS="$(openssl rand -hex 24)"
 fi
 
-if runuser -u postgres -- \
+if runuser \
+  -u postgres \
+  -- \
   psql \
-  --tuples-only \
-  --no-align \
-  --command "SELECT 1 FROM pg_roles WHERE rolname = '${PG_DB_USER}';" |
-  grep -q '^1$'; then
+    --tuples-only \
+    --no-align \
+    --command "SELECT 1 FROM pg_roles WHERE rolname = '${PG_DB_USER}';" \
+  | grep -q '^1$'; then
 
-  runuser -u postgres -- \
+  runuser \
+    -u postgres \
+    -- \
     psql \
-    --set ON_ERROR_STOP=on \
-    --command "ALTER ROLE ${PG_DB_USER} WITH PASSWORD '${PG_DB_PASS}' CREATEDB;"
+      --set ON_ERROR_STOP=on \
+      --command "ALTER ROLE ${PG_DB_USER} WITH PASSWORD '${PG_DB_PASS}' CREATEDB;"
 else
-  runuser -u postgres -- \
+  runuser \
+    -u postgres \
+    -- \
     psql \
-    --set ON_ERROR_STOP=on \
-    --command "CREATE ROLE ${PG_DB_USER} WITH LOGIN PASSWORD '${PG_DB_PASS}' CREATEDB;"
+      --set ON_ERROR_STOP=on \
+      --command "CREATE ROLE ${PG_DB_USER} WITH LOGIN PASSWORD '${PG_DB_PASS}' CREATEDB;"
 fi
 
-if ! runuser -u postgres -- \
+if ! runuser \
+  -u postgres \
+  -- \
   psql \
-  --tuples-only \
-  --no-align \
-  --command "SELECT 1 FROM pg_database WHERE datname = '${PG_DB_NAME}';" |
-  grep -q '^1$'; then
+    --tuples-only \
+    --no-align \
+    --command "SELECT 1 FROM pg_database WHERE datname = '${PG_DB_NAME}';" \
+  | grep -q '^1$'; then
 
-  runuser -u postgres -- \
+  runuser \
+    -u postgres \
+    -- \
     psql \
-    --set ON_ERROR_STOP=on \
-    --command "CREATE DATABASE ${PG_DB_NAME} OWNER ${PG_DB_USER};"
+      --set ON_ERROR_STOP=on \
+      --command "CREATE DATABASE ${PG_DB_NAME} OWNER ${PG_DB_USER};"
 fi
 
 cat <<EOF >"${DEV_HOME}/.pgpass"
@@ -605,20 +773,24 @@ fd_binary="$(command -v fdfind || true)"
 
 if [[ -z "$fd_binary" &&
       -x /usr/lib/cargo/bin/fd ]]; then
+
   fd_binary="/usr/lib/cargo/bin/fd"
 fi
 
 if [[ -z "$fd_binary" ]]; then
-  msg_error "No fd binary found"
+  msg_error "No fd binary found."
   exit 1
 fi
 
-ln -sfn \
+ln \
+  -sfn \
   "$fd_binary" \
   /usr/local/bin/fd
 
 cat <<'EOF' >/etc/profile.d/devbox.sh
 export PATH="$HOME/.local/bin:/usr/local/bin:$PATH"
+export LANG="C.UTF-8"
+export LC_ALL="C.UTF-8"
 EOF
 
 chmod \
@@ -629,10 +801,9 @@ agent_instructions() {
   cat <<'EOF'
 # DevBox working agreements
 
-- Follow repository-specific `AGENTS.md` / `CLAUDE.md` files and project
-  conventions.
+- Follow repository-specific `AGENTS.md`, `CLAUDE.md`, and project conventions.
 - Work on a task branch; never push directly to the default branch.
-- Run the relevant tests and inspect the diff before publishing changes.
+- Run relevant tests and inspect the diff before publishing changes.
 - Create focused commits and draft pull requests when GitHub is authenticated.
 - Never commit credentials, tokens, `.env` files, or generated secrets.
 - Never inspect credential stores such as `~/.ssh`, `~/.happy/access.key`,
@@ -642,40 +813,45 @@ agent_instructions() {
 EOF
 }
 
-agent_instructions >"${DEV_HOME}/.codex/AGENTS.md"
-agent_instructions >"${DEV_HOME}/.claude/CLAUDE.md"
+agent_instructions \
+  >"${DEV_HOME}/.codex/AGENTS.md"
+
+agent_instructions \
+  >"${DEV_HOME}/.claude/CLAUDE.md"
 
 case "$DEVBOX_AUTONOMY" in
-controlled)
-  codex_approval_policy="untrusted"
-  codex_sandbox_mode="read-only"
-  codex_network_access=""
-  claude_default_mode="default"
-  ;;
-balanced)
-  codex_approval_policy="on-request"
-  codex_sandbox_mode="workspace-write"
-  codex_network_access="false"
-  claude_default_mode="acceptEdits"
-  ;;
-autonomous)
-  codex_approval_policy="never"
-  codex_sandbox_mode="workspace-write"
-  codex_network_access="true"
-  claude_default_mode="auto"
-  ;;
-full-access)
-  codex_approval_policy="never"
-  codex_sandbox_mode="danger-full-access"
-  codex_network_access=""
-  claude_default_mode="bypassPermissions"
-  ;;
+  controlled)
+    codex_approval_policy="untrusted"
+    codex_sandbox_mode="read-only"
+    codex_network_access=""
+    claude_default_mode="default"
+    ;;
+
+  balanced)
+    codex_approval_policy="on-request"
+    codex_sandbox_mode="workspace-write"
+    codex_network_access="false"
+    claude_default_mode="acceptEdits"
+    ;;
+
+  autonomous)
+    codex_approval_policy="never"
+    codex_sandbox_mode="workspace-write"
+    codex_network_access="true"
+    claude_default_mode="auto"
+    ;;
+
+  full-access)
+    codex_approval_policy="never"
+    codex_sandbox_mode="danger-full-access"
+    codex_network_access=""
+    claude_default_mode="bypassPermissions"
+    ;;
 esac
 
 if [[ ! -f "${DEV_HOME}/.codex/config.toml" ]]; then
   cat <<EOF >"${DEV_HOME}/.codex/config.toml"
 # Managed by the DevBox installer.
-# Change these values at any time to adjust Codex autonomy.
 approval_policy = "${codex_approval_policy}"
 sandbox_mode = "${codex_sandbox_mode}"
 EOF
@@ -713,16 +889,22 @@ EOF
 else
   msg_info "Preserving existing ~/.claude/settings.json"
 
-  # Add the Happy machine credential to an existing valid Claude settings file
-  # without replacing the user's other settings.
-  if jq empty "${DEV_HOME}/.claude/settings.json" >/dev/null 2>&1; then
+  if jq \
+    empty \
+    "${DEV_HOME}/.claude/settings.json" \
+    >/dev/null 2>&1; then
+
     claude_settings_tmp="$(mktemp)"
 
     jq '
       .permissions = (.permissions // {}) |
       .permissions.deny = (
-        (.permissions.deny // [])
-        + ["Read(~/.happy/access.key)"]
+        (
+          .permissions.deny // []
+        )
+        + [
+          "Read(~/.happy/access.key)"
+        ]
         | unique
       )
     ' \
@@ -735,31 +917,38 @@ else
 
     rm -f "$claude_settings_tmp"
   else
-    msg_error "Existing ~/.claude/settings.json is invalid JSON; Happy deny rule was not added"
+    msg_error "Existing ~/.claude/settings.json is invalid JSON."
+    msg_error "Happy credential deny rule could not be added."
   fi
 fi
 
-# Refresh a block written under the old name in place.
-if grep -Fq \
+if grep \
+  -Fq \
   '# Codex Dev Box' \
-  "${DEV_HOME}/.bashrc" 2>/dev/null; then
+  "${DEV_HOME}/.bashrc" \
+  2>/dev/null; then
 
-  sed -i \
+  sed \
+    -i \
     -e 's/# Codex Dev Box/# DevBox/' \
     -e 's/codex-devbox/devbox/g' \
     "${DEV_HOME}/.bashrc"
 
-  msg_ok "Migrated the DevBox block in ~/.bashrc"
+  msg_ok "Migrated old DevBox block in ~/.bashrc"
 fi
 
-if ! grep -Fq \
+if ! grep \
+  -Fq \
   '# DevBox' \
-  "${DEV_HOME}/.bashrc" 2>/dev/null; then
+  "${DEV_HOME}/.bashrc" \
+  2>/dev/null; then
 
   cat <<'EOF' >>"${DEV_HOME}/.bashrc"
 
 # DevBox
 export PATH="$HOME/.local/bin:/usr/local/bin:$PATH"
+export LANG="C.UTF-8"
+export LC_ALL="C.UTF-8"
 
 if [[ $- == *i* && -d "$HOME/workspace" ]]; then
   cd "$HOME/workspace"
@@ -768,30 +957,33 @@ fi
 if [[ $- == *i* && -t 0 && -t 1 ]] &&
   [[ ! -e "$HOME/.config/devbox/onboarding-complete" ]] &&
   command -v devbox >/dev/null 2>&1; then
+
   devbox onboard || true
 fi
 EOF
 fi
 
-# Happy intentionally gets its own marker so upgrades from older DevBox
-# revisions receive the integration even when the base # DevBox block exists.
-if ! grep -Fq \
+if ! grep \
+  -Fq \
   '# DevBox Happy' \
-  "${DEV_HOME}/.bashrc" 2>/dev/null; then
+  "${DEV_HOME}/.bashrc" \
+  2>/dev/null; then
 
   cat <<'EOF' >>"${DEV_HOME}/.bashrc"
 
 # DevBox Happy
 #
-# Happy is the primary session and remote-control layer. The native `claude`
-# and `codex` commands deliberately remain untouched because Happy uses them
-# as backends and they are also needed for authentication and recovery.
+# Happy is the primary session layer.
+#
+# Native `claude` and `codex` are deliberately NOT shadowed. Happy needs them
+# as backends, and the native commands remain useful for authentication,
+# diagnostics and recovery.
+
 alias hclaude='happy claude'
 alias hcodex='happy codex'
 
-# Bring the Happy daemon back after a reboot once this machine has been paired.
-# The check is performed once per interactive shell environment and never
-# starts Happy before authentication has completed.
+# Restart Happy's daemon after a reboot, but only after Happy has already been
+# paired. Merely opening a shell must never trigger first-time Happy pairing.
 if [[ $- == *i* ]] &&
   [[ -z "${HAPPY_DAEMON_CHECKED:-}" ]] &&
   command -v happy >/dev/null 2>&1; then
@@ -799,21 +991,38 @@ if [[ $- == *i* ]] &&
   export HAPPY_DAEMON_CHECKED=1
 
   (
-    if [[ -s "$HOME/.happy/access.key" ]] &&
-      [[ -s "$HOME/.happy/settings.json" ]]; then
+    if [[ -s "$HOME/.happy/access.key" &&
+          -s "$HOME/.happy/settings.json" ]] &&
+      jq \
+        -e \
+        '
+          (.machineId? | type == "string")
+          and
+          (.machineId | length > 0)
+        ' \
+        "$HOME/.happy/settings.json" \
+        >/dev/null 2>&1; then
 
       state="$HOME/.happy/daemon.state.json"
 
       pid="$(
-        jq -r \
+        jq \
+          -r \
           '.pid // empty' \
-          "$state" 2>/dev/null ||
-          true
+          "$state" \
+          2>/dev/null \
+          || true
       )"
 
       if [[ ! "$pid" =~ ^[0-9]+$ ]] ||
-        ! kill -0 "$pid" 2>/dev/null; then
-        happy daemon start >/dev/null 2>&1 || true
+        ! kill \
+          -0 \
+          "$pid" \
+          2>/dev/null; then
+
+        happy daemon start \
+          >/dev/null 2>&1 \
+          || true
       fi
     fi
   ) >/dev/null 2>&1 &
@@ -844,10 +1053,23 @@ chmod \
   0700 \
   "${DEV_HOME}/.happy"
 
-run_as_dev git lfs install --skip-repo
-run_as_dev git config --global init.defaultBranch main
-run_as_dev git config --global pull.ff only
-run_as_dev git config --global push.autoSetupRemote true
+run_as_dev git lfs install \
+  --skip-repo
+
+run_as_dev git config \
+  --global \
+  init.defaultBranch \
+  main
+
+run_as_dev git config \
+  --global \
+  pull.ff \
+  only
+
+run_as_dev git config \
+  --global \
+  push.autoSetupRemote \
+  true
 
 msg_ok "Configured Development Environment"
 
@@ -861,6 +1083,7 @@ umask 077
 
 readonly DEV_USER="dev"
 readonly DEV_HOME="/home/${DEV_USER}"
+
 readonly STATE_DIR="${DEV_HOME}/.config/devbox"
 readonly ONBOARDING_MARKER="${STATE_DIR}/onboarding-complete"
 
@@ -878,6 +1101,7 @@ readonly OPENROUTER_WRAPPER="${DEV_HOME}/.local/bin/codex-openrouter"
 readonly LEGACY_OPENROUTER_WRAPPER="${DEV_HOME}/.local/bin/codex"
 
 readonly NODE_MAJOR="24"
+
 readonly DEFAULT_UPDATE_BRANCH="master"
 readonly DEFAULT_REPO_URL="https://raw.githubusercontent.com/c4kingpin/Scripts"
 
@@ -903,35 +1127,64 @@ usage() {
 Usage: devbox COMMAND [SUBCOMMAND]
 
 Commands:
-  onboard             Run the interactive first-login onboarding
 
-  ssh status          Show inbound SSH status
-  ssh setup           Import a client public key and enable SSH
-  ssh disable         Disable the SSH listener
+  onboard
+      Run interactive first-login onboarding.
 
-  auth status         Show Happy, Codex and Claude authentication status
-  auth login          Sign in to Codex and Claude and pair Happy
-  auth logout         Sign out of Happy, Codex and Claude
+  ssh status
+      Show inbound SSH status.
 
-  openrouter status   Show OpenRouter configuration status
-  openrouter setup    Configure codex-openrouter as a fallback
-  openrouter disable  Stop using OpenRouter and remove its stored API key
+  ssh setup
+      Import a client public key and enable SSH.
 
-  github status       Show GitHub authentication and Git identity
-  github setup        Configure GitHub authentication and Git identity
+  ssh disable
+      Disable inbound SSH.
 
-  keys status         Show the DevBox identity key
-  keys generate       Generate an Ed25519 identity key for outbound access
-  keys upload-github  Upload the identity key to the authenticated GitHub account
+  auth status
+      Show Happy, Codex and Claude authentication status.
 
-  remote-info         Explain Happy remote access and native agent commands
-  doctor              Validate the installed development environment
+  auth login
+      Authenticate Codex and Claude, pair Happy, then start Happy daemon.
 
-  update [branch]     Re-run the installer from GitHub to update everything
-                       including Happy, Codex, Claude, OS packages and toolchain.
-                       Defaults to the "master" branch.
+  auth logout
+      Sign out of Happy, Codex and Claude.
 
-  help                Show this help
+  openrouter status
+      Show OpenRouter fallback configuration.
+
+  openrouter setup
+      Configure codex-openrouter as explicit fallback.
+
+  openrouter disable
+      Remove managed OpenRouter configuration and API key.
+
+  github status
+      Show GitHub authentication and Git identity.
+
+  github setup
+      Configure GitHub and Git identity.
+
+  keys status
+      Show DevBox outbound SSH identity key.
+
+  keys generate
+      Generate an Ed25519 outbound identity key.
+
+  keys upload-github
+      Upload the public identity key to GitHub.
+
+  remote-info
+      Explain Happy remote access and native agent commands.
+
+  doctor
+      Validate the development environment.
+
+  update [branch]
+      Re-run the installer from GitHub.
+      Defaults to branch "master".
+
+  help
+      Show this help.
 EOF
 }
 
@@ -942,7 +1195,7 @@ require_root() {
 
 require_dev() {
   [[ "$EUID" -ne 0 &&
-    "$(id -un)" == "$DEV_USER" ]] ||
+     "$(id -un)" == "$DEV_USER" ]] ||
     die "Run this command as ${DEV_USER}."
 }
 
@@ -951,14 +1204,22 @@ run_as_dev() {
     (
       cd "$DEV_HOME"
 
-      exec runuser -u "$DEV_USER" -- env \
-        HOME="$DEV_HOME" \
-        USER="$DEV_USER" \
-        LOGNAME="$DEV_USER" \
-        PATH="${DEV_HOME}/.local/bin:/usr/local/bin:/usr/bin:/bin" \
-        "$@"
+      exec runuser \
+        -u "$DEV_USER" \
+        -- \
+        env \
+          HOME="$DEV_HOME" \
+          USER="$DEV_USER" \
+          LOGNAME="$DEV_USER" \
+          SHELL="/bin/bash" \
+          LANG="C.UTF-8" \
+          LC_ALL="C.UTF-8" \
+          PATH="${DEV_HOME}/.local/bin:/usr/local/bin:/usr/bin:/bin" \
+          "$@"
     )
   else
+    LANG="C.UTF-8" \
+    LC_ALL="C.UTF-8" \
     "$@"
   fi
 }
@@ -971,16 +1232,16 @@ prompt_yes_no() {
   if [[ "$default" == "yes" ]]; then
     read -r \
       -p "${prompt} [Y/n] " \
-      answer ||
-      answer="n"
+      answer \
+      || answer="n"
 
     [[ -z "$answer" ||
-      "${answer,,}" =~ ^(y|yes|j|ja)$ ]]
+       "${answer,,}" =~ ^(y|yes|j|ja)$ ]]
   else
     read -r \
       -p "${prompt} [y/N] " \
-      answer ||
-      answer="n"
+      answer \
+      || answer="n"
 
     [[ "${answer,,}" =~ ^(y|yes|j|ja)$ ]]
   fi
@@ -989,10 +1250,11 @@ prompt_yes_no() {
 validate_public_key() {
   local key="$1"
   local key_file
+  local status
 
   [[ -n "$key" &&
-    "$key" != *$'\n'* &&
-    "$key" != *$'\r'* ]] ||
+     "$key" != *$'\n'* &&
+     "$key" != *$'\r'* ]] ||
     return 1
 
   [[ "$key" =~ ^(ssh-ed25519|ssh-rsa|ecdsa-sha2-nistp(256|384|521)|sk-ssh-ed25519@openssh.com|sk-ecdsa-sha2-nistp256@openssh.com)[[:space:]] ]] ||
@@ -1008,11 +1270,11 @@ validate_public_key() {
     "$key" \
     >"$key_file"
 
-  local status
-
   if ssh-keygen \
     -l \
-    -f "$key_file" >/dev/null 2>&1; then
+    -f "$key_file" \
+    >/dev/null 2>&1; then
+
     status=0
   else
     status=$?
@@ -1072,8 +1334,13 @@ ssh_status() {
   [[ -s "$SSH_KEY_FILE" ]] &&
     key_status="configured"
 
-  if systemctl is-active --quiet ssh.service ||
-    systemctl is-active --quiet ssh.socket; then
+  if systemctl is-active \
+    --quiet \
+    ssh.service \
+    || systemctl is-active \
+      --quiet \
+      ssh.socket; then
+
     listener_status="enabled"
   fi
 
@@ -1093,14 +1360,16 @@ ssh_status() {
 ssh_setup() {
   require_root
 
-  [[ -t 0 &&
-    -t 1 ]] ||
+  [[ -t 0 && -t 1 ]] ||
     die "SSH setup requires an interactive terminal."
 
   cat <<'EOF'
-Create the private key on the Mac, Windows PC, or SSH client that will access
-this DevBox. Paste only its public .pub line here. A private client key must
-never be generated or stored on the DevBox.
+Create the private key on the Mac, Windows PC, or other SSH client that will
+access this DevBox.
+
+Paste only its public .pub line here.
+
+A private client key must never be generated or stored on the DevBox.
 EOF
 
   local public_key=""
@@ -1133,10 +1402,15 @@ EOF
 
   write_ssh_config
 
-  systemctl disable --now ssh.socket >/dev/null 2>&1 ||
-    true
+  systemctl disable \
+    --now \
+    ssh.socket \
+    >/dev/null 2>&1 \
+    || true
 
-  systemctl enable --now ssh.service
+  systemctl enable \
+    --now \
+    ssh.service
 
   ok "SSH enabled for ${DEV_USER}"
 
@@ -1148,112 +1422,103 @@ EOF
 ssh_disable() {
   require_root
 
-  systemctl disable --now ssh.socket >/dev/null 2>&1 ||
-    true
+  systemctl disable \
+    --now \
+    ssh.socket \
+    >/dev/null 2>&1 \
+    || true
 
-  systemctl disable --now ssh.service >/dev/null 2>&1 ||
-    true
+  systemctl disable \
+    --now \
+    ssh.service \
+    >/dev/null 2>&1 \
+    || true
 
-  ok "SSH listener disabled; authorized_keys was retained."
+  ok "SSH listener disabled; authorized_keys retained."
 }
 
 codex_is_authenticated() {
-  codex login status >/dev/null 2>&1
+  codex login status \
+    >/dev/null 2>&1
 }
 
 claude_is_authenticated() {
-  claude auth status >/dev/null 2>&1
+  claude auth status \
+    >/dev/null 2>&1
 }
 
 happy_is_authenticated() {
-  [[ -s "$HOME/.happy/access.key" ]] ||
+  [[ -s "$HAPPY_ACCESS_KEY" ]] ||
     return 1
 
-  [[ -s "$HOME/.happy/settings.json" ]] ||
+  [[ -s "$HAPPY_SETTINGS" ]] ||
     return 1
 
   jq \
     -e \
     '
-      (.machineId? | type == "string") and
+      (.machineId? | type == "string")
+      and
       (.machineId | length > 0)
     ' \
-    "$HOME/.happy/settings.json" >/dev/null 2>&1
+    "$HAPPY_SETTINGS" \
+    >/dev/null 2>&1
 }
 
 happy_daemon_is_running() {
-  local state="$HOME/.happy/daemon.state.json"
   local pid=""
 
-  [[ -s "$state" ]] ||
+  [[ -s "$HAPPY_DAEMON_STATE" ]] ||
     return 1
 
   pid="$(
     jq \
       -r \
       '.pid // empty' \
-      "$state" 2>/dev/null ||
-      true
+      "$HAPPY_DAEMON_STATE" \
+      2>/dev/null \
+      || true
   )"
 
   [[ "$pid" =~ ^[0-9]+$ ]] ||
     return 1
 
-  kill -0 "$pid" 2>/dev/null
+  kill \
+    -0 \
+    "$pid" \
+    2>/dev/null
 }
 
-harden_happy_credentials() {
+harden_happy_state() {
   install \
     -d \
     -m 0700 \
-    "$HOME/.happy"
+    "$HAPPY_HOME"
 
   chmod \
     0700 \
-    "$HOME/.happy"
+    "$HAPPY_HOME"
 
-  if [[ -f "$HOME/.happy/access.key" ]]; then
-    chmod \
-      0600 \
-      "$HOME/.happy/access.key"
-  fi
+  local path
 
-  if [[ -f "$HOME/.happy/settings.json" ]]; then
-    chmod \
-      0600 \
-      "$HOME/.happy/settings.json"
-  fi
+  for path in \
+    "$HAPPY_ACCESS_KEY" \
+    "$HAPPY_SETTINGS" \
+    "${HAPPY_HOME}/sessions.json" \
+    "$HAPPY_DAEMON_STATE"; do
 
-  if [[ -f "$HOME/.happy/sessions.json" ]]; then
-    chmod \
-      0600 \
-      "$HOME/.happy/sessions.json"
-  fi
-
-  if [[ -f "$HOME/.happy/daemon.state.json" ]]; then
-    chmod \
-      0600 \
-      "$HOME/.happy/daemon.state.json"
-  fi
+    if [[ -f "$path" ]]; then
+      chmod \
+        0600 \
+        "$path"
+    fi
+  done
 }
 
 agents_auth_status() {
   require_dev
 
   local status=0
-
-  if happy_is_authenticated; then
-    ok "Happy is authenticated and this DevBox is registered"
-  else
-    warn "Happy is not authenticated or this DevBox is not registered"
-    status=1
-  fi
-
-  if happy_daemon_is_running; then
-    ok "Happy daemon is running"
-  elif happy_is_authenticated; then
-    warn "Happy daemon is not running"
-  fi
 
   if codex_is_authenticated; then
     ok "Codex CLI is authenticated"
@@ -1269,6 +1534,21 @@ agents_auth_status() {
     status=1
   fi
 
+  if happy_is_authenticated; then
+    ok "Happy is authenticated and this DevBox is registered"
+  else
+    warn "Happy is not paired"
+    status=1
+  fi
+
+  if happy_is_authenticated; then
+    if happy_daemon_is_running; then
+      ok "Happy daemon is running"
+    else
+      warn "Happy daemon is not running"
+    fi
+  fi
+
   return "$status"
 }
 
@@ -1280,7 +1560,8 @@ agents_auth_login() {
   else
     info "Signing in to Codex using the device-code flow"
 
-    codex login --device-auth
+    codex login \
+      --device-auth
 
     if [[ -f "${HOME}/.codex/auth.json" ]]; then
       chmod \
@@ -1293,8 +1574,8 @@ agents_auth_login() {
     ok "Claude CLI is already authenticated"
   else
     info "Signing in to Claude"
-    info "Open the printed URL on another device; if it shows a login code,"
-    info "paste that code back at the prompt here."
+
+    info "Open the printed URL on another device if necessary."
 
     claude auth login
 
@@ -1306,14 +1587,15 @@ agents_auth_login() {
   fi
 
   if happy_is_authenticated; then
-    ok "Happy is already authenticated"
+    ok "Happy is already paired"
   else
     info "Pairing this DevBox with Happy"
+    info "Happy asking you to connect/pair at this point is expected."
 
     happy auth login
   fi
 
-  harden_happy_credentials
+  harden_happy_state
 
   if happy_is_authenticated; then
     if happy_daemon_is_running; then
@@ -1321,10 +1603,13 @@ agents_auth_login() {
     else
       info "Starting Happy daemon"
 
-      if happy daemon start >/dev/null 2>&1; then
+      if happy daemon start \
+        >/dev/null 2>&1; then
+
         ok "Happy daemon started"
       else
-        warn "Happy daemon could not be started; run: happy daemon start"
+        warn "Happy daemon could not be started."
+        warn "Run manually: happy daemon start"
       fi
     fi
   fi
@@ -1336,15 +1621,14 @@ agents_auth_logout() {
   require_dev
 
   if happy_daemon_is_running; then
-    happy daemon stop ||
-      warn "Happy daemon stop reported an error"
+    happy daemon stop \
+      || warn "Happy daemon stop reported an error"
   fi
 
   if happy_is_authenticated; then
-    if [[ -t 0 &&
-      -t 1 ]]; then
-      happy auth logout ||
-        warn "Happy logout reported an error"
+    if [[ -t 0 && -t 1 ]]; then
+      happy auth logout \
+        || warn "Happy logout reported an error"
     else
       warn "Happy logout requires an interactive terminal and was skipped"
     fi
@@ -1352,24 +1636,25 @@ agents_auth_logout() {
     ok "Happy is already signed out"
   fi
 
-  codex logout ||
-    warn "Codex logout reported an error"
+  codex logout \
+    || warn "Codex logout reported an error"
 
-  claude auth logout ||
-    warn "Claude logout reported an error"
+  claude auth logout \
+    || warn "Claude logout reported an error"
 
   ok "Signed out of Happy, Codex and Claude"
 }
 
-# Also recognise the legacy codex-devbox marker so files written before the
-# rename stay manageable.
 is_managed_openrouter_file() {
   local path="$1"
 
   [[ -f "$path" ]] &&
-    head -n 2 "$path" |
-    grep -Eq \
-      "Managed by (devbox|codex-devbox) openrouter setup"
+    head \
+      -n 2 \
+      "$path" \
+    | grep \
+      -Eq \
+      'Managed by (devbox|codex-devbox) openrouter setup'
 }
 
 openrouter_status() {
@@ -1387,7 +1672,8 @@ openrouter_status() {
 
   if is_managed_openrouter_file "$OPENROUTER_PROFILE"; then
     model="$(
-      sed -n \
+      sed \
+        -n \
         's/^model = "\(.*\)"$/\1/p' \
         "$OPENROUTER_PROFILE"
     )"
@@ -1399,7 +1685,7 @@ openrouter_status() {
   fi
 
   if is_managed_openrouter_file "$LEGACY_OPENROUTER_WRAPPER"; then
-    warn "Legacy setup still routes codex through OpenRouter; run setup again"
+    warn "Legacy setup still routes native codex through OpenRouter"
     status=1
   elif is_managed_openrouter_file "$OPENROUTER_WRAPPER"; then
     ok "OpenRouter fallback command: codex-openrouter"
@@ -1414,8 +1700,7 @@ openrouter_status() {
 openrouter_setup() {
   require_dev
 
-  [[ -t 0 &&
-    -t 1 ]] ||
+  [[ -t 0 && -t 1 ]] ||
     die "OpenRouter setup requires an interactive terminal."
 
   local api_key=""
@@ -1429,6 +1714,7 @@ openrouter_setup() {
 
     if [[ -e "$path" ]] &&
       ! is_managed_openrouter_file "$path"; then
+
       die "Refusing to overwrite unmanaged file: ${path}"
     fi
   done
@@ -1450,10 +1736,12 @@ openrouter_setup() {
   model="${model:-~openai/gpt-latest}"
 
   [[ "$model" =~ ^[A-Za-z0-9._~:/-]+$ ]] ||
-    die "The OpenRouter model ID is invalid."
+    die "Invalid OpenRouter model ID."
 
   if is_managed_openrouter_file "$LEGACY_OPENROUTER_WRAPPER"; then
-    rm -f "$LEGACY_OPENROUTER_WRAPPER"
+    rm \
+      -f \
+      "$LEGACY_OPENROUTER_WRAPPER"
   fi
 
   install \
@@ -1506,13 +1794,15 @@ source "$openrouter_env"
 
 system_codex="$(
   PATH=/usr/local/bin:/usr/bin:/bin \
-    command -v codex ||
-    true
+    command \
+      -v \
+      codex \
+      || true
 )"
 
 [[ -n "$system_codex" &&
-  "$system_codex" != "$0" ]] || {
-  printf 'error - System Codex CLI was not found\n' >&2
+   "$system_codex" != "$0" ]] || {
+  printf 'error - Native Codex CLI was not found\n' >&2
   exit 1
 }
 
@@ -1529,8 +1819,15 @@ EOF
   unset api_key
 
   ok "OpenRouter fallback configured"
-  info "Use 'happy codex' normally, native 'codex' for recovery,"
-  info "and 'codex-openrouter' as the explicit OpenRouter fallback."
+
+  info "Primary Codex session:"
+  info "  happy codex"
+  info ""
+  info "Native Codex:"
+  info "  codex"
+  info ""
+  info "Explicit OpenRouter fallback:"
+  info "  codex-openrouter"
 
   openrouter_status
 }
@@ -1547,13 +1844,15 @@ openrouter_disable() {
     "$LEGACY_OPENROUTER_WRAPPER"; do
 
     if is_managed_openrouter_file "$path"; then
-      rm -f "$path"
+      rm \
+        -f \
+        "$path"
     elif [[ -e "$path" ]]; then
       warn "Retained unmanaged file: ${path}"
     fi
   done
 
-  ok "OpenRouter disabled and its managed API key removed"
+  ok "OpenRouter disabled and managed API key removed"
 }
 
 github_status() {
@@ -1562,15 +1861,17 @@ github_status() {
   local status=0
 
   if gh auth status \
-    --hostname github.com >/dev/null 2>&1; then
+    --hostname github.com \
+    >/dev/null 2>&1; then
+
     ok "GitHub authentication"
   else
     warn "GitHub is not authenticated"
     status=1
   fi
 
-  if [[ -n "$(git config --global user.name || true)" ]] &&
-    [[ -n "$(git config --global user.email || true)" ]]; then
+  if [[ -n "$(git config --global user.name || true)" &&
+        -n "$(git config --global user.email || true)" ]]; then
 
     printf 'Git name: %s\n' \
       "$(git config --global user.name)"
@@ -1596,7 +1897,8 @@ github_setup() {
   local git_name
 
   if ! gh auth status \
-    --hostname github.com >/dev/null 2>&1; then
+    --hostname github.com \
+    >/dev/null 2>&1; then
 
     gh auth login \
       --hostname github.com \
@@ -1608,17 +1910,20 @@ github_setup() {
     --hostname github.com
 
   account_login="$(
-    gh api user \
+    gh api \
+      user \
       --jq '.login'
   )"
 
   account_id="$(
-    gh api user \
+    gh api \
+      user \
       --jq '.id'
   )"
 
   default_name="$(
-    gh api user \
+    gh api \
+      user \
       --jq '.name // .login'
   )"
 
@@ -1685,13 +1990,14 @@ keys_generate() {
     "${HOME}/.ssh"
 
   if [[ -e "$private_key" ||
-    -e "${private_key}.pub" ]]; then
+        -e "${private_key}.pub" ]]; then
+
     warn "Identity key already exists"
     keys_status
     return
   fi
 
-  info "Generating an outbound Ed25519 identity key"
+  info "Generating outbound Ed25519 identity key"
 
   ssh-keygen \
     -t ed25519 \
@@ -1719,8 +2025,9 @@ keys_upload_github() {
     die "Generate the identity key first."
 
   gh auth status \
-    --hostname github.com >/dev/null 2>&1 ||
-    die "Configure GitHub first."
+    --hostname github.com \
+    >/dev/null 2>&1 \
+    || die "Configure GitHub first."
 
   gh ssh-key add \
     "$public_key" \
@@ -1735,9 +2042,9 @@ Happy remote development
 
   Happy iOS / Android / Web
               |
-              | end-to-end encrypted session
+              | encrypted Happy connection
               v
-        Happy daemon
+         Happy daemon
               |
         +-----+-----+
         |           |
@@ -1747,31 +2054,35 @@ Happy remote development
               |
       /home/dev/workspace
 
-Primary commands:
+
+Primary commands
 
   happy
       Start Claude through Happy.
 
   happy claude
-      Explicitly start Claude through Happy.
+      Explicit Claude session through Happy.
 
   happy codex
       Start Codex through Happy.
 
-Convenience aliases:
-
   hclaude
-  hcodex
+      Alias for happy claude.
 
-The native agent CLIs remain installed and are intentionally not shadowed:
+  hcodex
+      Alias for happy codex.
+
+
+Native backends remain installed
 
   claude
   codex
 
-Use the native commands for authentication, diagnostics, recovery, or when
-Happy should intentionally be bypassed.
+They are intentionally not replaced or aliased because Happy uses them as
+backends and they are useful for authentication, recovery and diagnostics.
 
-Happy management:
+
+Happy management
 
   happy auth status
   happy auth login
@@ -1781,20 +2092,28 @@ Happy management:
   happy daemon stop
   happy daemon list
 
-DevBox authentication:
+
+DevBox authentication
 
   devbox auth status
   devbox auth login
   devbox auth logout
 
-`devbox auth login` authenticates the native Codex and Claude backends, then
-pairs this machine with Happy and starts the Happy daemon.
+`devbox auth login` authenticates Codex and Claude, then explicitly launches
+Happy's pairing flow.
 
-Inbound SSH remains optional and independent of Happy. It can be used for
-direct shell access, troubleshooting, or as a fallback remote path.
+Happy asking you to connect/pair during that step is expected.
 
-Without SSH the DevBox remains reachable from the LXC host console, for
-example:
+Simply installing or validating the DevBox does NOT invoke Happy's pairing
+flow.
+
+
+SSH
+
+Inbound SSH is optional and independent from Happy. It can be used for direct
+shell access or as a recovery path.
+
+Without SSH, use the LXC host console, for example:
 
   pct enter <CTID>             # Proxmox VE
   lxc exec <name> -- bash      # LXD
@@ -1815,6 +2134,7 @@ doctor() {
     fd
     gh
     git
+    jq
     mix
     node
     npm
@@ -1824,8 +2144,11 @@ doctor() {
   )
 
   for command in "${commands[@]}"; do
-    if run_as_dev sh \
-      -lc "command -v ${command} >/dev/null 2>&1"; then
+    if run_as_dev \
+      bash \
+      -lc \
+      "command -v ${command} >/dev/null 2>&1"; then
+
       ok "$command"
     else
       warn "$command is missing"
@@ -1840,7 +2163,10 @@ doctor() {
     status=1
   fi
 
-  if systemctl is-active --quiet postgresql.service; then
+  if systemctl is-active \
+    --quiet \
+    postgresql.service; then
+
     ok "PostgreSQL service"
   else
     warn "PostgreSQL service is not active"
@@ -1850,85 +2176,176 @@ doctor() {
   if run_as_dev erl \
     -noshell \
     -eval 'halt(0).'; then
+
     ok "Erlang runtime"
   else
     warn "Erlang runtime failed"
     status=1
   fi
 
-  run_as_dev codex --version ||
+  if run_as_dev codex \
+    --version; then
+    :
+  else
     status=1
+  fi
 
-  run_as_dev claude --version ||
+  if run_as_dev claude \
+    --version; then
+    :
+  else
     status=1
+  fi
 
-  run_as_dev happy --version ||
+  # IMPORTANT:
+  # Do not run `happy --version`.
+  #
+  # Happy currently prints its version and then continues into normal startup,
+  # which can trigger first-time pairing. Validate the npm installation
+  # without starting Happy.
+  if run_as_dev npm list \
+    --global \
+    --depth=0 \
+    happy \
+    >/dev/null 2>&1; then
+
+    happy_version="$(
+      run_as_dev npm list \
+        --global \
+        --depth=0 \
+        happy \
+        2>/dev/null \
+      | grep -E 'happy@' \
+      | head -n1 \
+      || true
+    )"
+
+    ok "${happy_version:-Happy npm package}"
+  else
+    warn "Happy npm package is missing"
     status=1
+  fi
 
-  run_as_dev elixir --version ||
+  if run_as_dev elixir \
+    --version; then
+    :
+  else
     status=1
+  fi
 
-  run_as_dev mix phx.new --version ||
+  if run_as_dev mix phx.new \
+    --version; then
+    :
+  else
     status=1
+  fi
 
-  # Sign-in state is informational. A freshly installed box is expected to be
-  # signed out until onboarding runs.
-  if run_as_dev sh \
-    -lc 'codex login status >/dev/null 2>&1'; then
+  # Authentication is informational and intentionally does not make doctor
+  # fail on a freshly installed box.
+
+  if run_as_dev \
+    bash \
+    -lc \
+    'codex login status >/dev/null 2>&1'; then
+
     ok "Codex CLI is authenticated"
   else
     warn "Codex CLI is not authenticated (run: devbox auth login)"
   fi
 
-  if run_as_dev sh \
-    -lc 'claude auth status >/dev/null 2>&1'; then
+  if run_as_dev \
+    bash \
+    -lc \
+    'claude auth status >/dev/null 2>&1'; then
+
     ok "Claude CLI is authenticated"
   else
     warn "Claude CLI is not authenticated (run: devbox auth login)"
   fi
 
-  if run_as_dev sh -lc '
-    [[ -s "$HOME/.happy/access.key" ]] &&
-    [[ -s "$HOME/.happy/settings.json" ]] &&
-    jq -e "
-      (.machineId? | type == \"string\") and
-      (.machineId | length > 0)
-    " "$HOME/.happy/settings.json" >/dev/null 2>&1
-  '; then
-    ok "Happy is authenticated and machine is registered"
+  if run_as_dev \
+    bash \
+    -lc \
+    '
+      [[ -s "$HOME/.happy/access.key" ]] &&
+      [[ -s "$HOME/.happy/settings.json" ]] &&
+      jq -e "
+        (.machineId? | type == \"string\")
+        and
+        (.machineId | length > 0)
+      " "$HOME/.happy/settings.json" >/dev/null 2>&1
+    '; then
+
+    ok "Happy is paired"
   else
     warn "Happy is not paired (run: devbox auth login)"
   fi
 
-  if run_as_dev sh -lc '
-    state="$HOME/.happy/daemon.state.json"
+  if run_as_dev \
+    bash \
+    -lc \
+    '
+      state="$HOME/.happy/daemon.state.json"
 
-    [[ -s "$state" ]] || exit 1
+      [[ -s "$state" ]] ||
+        exit 1
 
-    pid="$(jq -r ".pid // empty" "$state" 2>/dev/null || true)"
+      pid="$(
+        jq -r ".pid // empty" "$state" 2>/dev/null ||
+        true
+      )"
 
-    [[ "$pid" =~ ^[0-9]+$ ]] || exit 1
+      [[ "$pid" =~ ^[0-9]+$ ]] ||
+        exit 1
 
-    kill -0 "$pid" 2>/dev/null
-  '; then
+      kill -0 "$pid" 2>/dev/null
+    '; then
+
     ok "Happy daemon"
   else
     warn "Happy daemon is not running"
   fi
 
-  if run_as_dev sh \
-    -lc '[[ ! -e "$HOME/.happy" || "$(stat -c %a "$HOME/.happy")" == "700" ]]'; then
+  if run_as_dev \
+    bash \
+    -lc \
+    '
+      [[ ! -e "$HOME/.happy" ]] ||
+      [[ "$(stat -c "%a" "$HOME/.happy")" == "700" ]]
+    '; then
+
     ok "Happy data directory permissions"
   else
     warn "~/.happy should have mode 0700"
     status=1
   fi
 
-  if run_as_dev sh \
-    -lc '[[ ! -e "$HOME/.happy/access.key" || "$(stat -c %a "$HOME/.happy/access.key")" == "600" ]]'; then
+  if run_as_dev \
+    bash \
+    -lc \
+    '
+      [[ ! -e "$HOME/.happy/access.key" ]] ||
+      [[ "$(stat -c "%a" "$HOME/.happy/access.key")" == "600" ]]
+    '; then
+
     ok "Happy access key permissions"
   else
     warn "~/.happy/access.key should have mode 0600"
+    status=1
+  fi
+
+  if run_as_dev \
+    bash \
+    -lc \
+    '
+      [[ "${LANG:-}" == *UTF-8* ||
+         "${LANG:-}" == *utf8* ||
+         "${LANG:-}" == *UTF8* ]]
+    '; then
+
+    ok "UTF-8 locale"
+  else
+    warn "Developer locale is not UTF-8"
     status=1
   fi
 
@@ -1958,7 +2375,9 @@ update_devbox() {
     -o "$installer" \
     "$installer_url"; then
 
-    rm -f "$installer"
+    rm \
+      -f \
+      "$installer"
 
     die "Failed to download installer from ${installer_url}"
   fi
@@ -1967,12 +2386,14 @@ update_devbox() {
     0755 \
     "$installer"
 
-  info "Re-running the installer to apply updates"
+  info "Re-running installer"
 
   DEVBOX_REPO_URL="$repo_url" \
     bash "$installer"
 
-  rm -f "$installer"
+  rm \
+    -f \
+    "$installer"
 
   ok "Updated from branch '${branch}'"
 
@@ -1982,8 +2403,7 @@ update_devbox() {
 onboard() {
   require_dev
 
-  [[ -t 0 &&
-    -t 1 ]] ||
+  [[ -t 0 && -t 1 ]] ||
     return 0
 
   install \
@@ -1992,42 +2412,55 @@ onboard() {
     "$STATE_DIR"
 
   cat <<'EOF'
+
 DevBox onboarding
 
-1. Optional inbound SSH access for a desktop host or another client
-2. Sign in to Codex and Claude and pair this DevBox with Happy
-3. Optional OpenRouter API key and model as a Codex fallback
-4. GitHub authentication and Git commit identity
+1. Optional inbound SSH access
+2. Authenticate Codex and Claude and pair Happy
+3. Optional OpenRouter Codex fallback
+4. GitHub authentication and Git identity
 5. Optional outbound Ed25519 identity key
-6. Environment diagnostics and Happy remote-access instructions
+6. Environment diagnostics
 
-Happy is the primary session layer:
+
+Primary agent commands after onboarding:
 
   happy
   happy claude
   happy codex
 
-The native `claude` and `codex` commands remain available underneath.
+Native backends remain available as:
+
+  claude
+  codex
+
 EOF
 
-  if prompt_yes_no "Configure inbound SSH now?"; then
+  if prompt_yes_no \
+    "Configure inbound SSH now?"; then
+
     sudo \
       -n \
       /usr/local/bin/devbox \
       ssh setup
   fi
 
-  if prompt_yes_no "Sign in to Codex and Claude and pair Happy now?"; then
+  if prompt_yes_no \
+    "Sign in to Codex and Claude and pair Happy now?"; then
+
     agents_auth_login
   fi
 
   if prompt_yes_no \
     "Configure OpenRouter as a Codex fallback?" \
     "no"; then
+
     openrouter_setup
   fi
 
-  if prompt_yes_no "Configure GitHub now?"; then
+  if prompt_yes_no \
+    "Configure GitHub now?"; then
+
     github_setup
   fi
 
@@ -2038,8 +2471,9 @@ EOF
     keys_generate
 
     if gh auth status \
-      --hostname github.com >/dev/null 2>&1 &&
-      prompt_yes_no \
+      --hostname github.com \
+      >/dev/null 2>&1 \
+      && prompt_yes_no \
         "Upload this public key to GitHub?" \
         "no"; then
 
@@ -2049,8 +2483,8 @@ EOF
 
   remote_info
 
-  doctor ||
-    warn "Doctor found optional or required items that need attention"
+  doctor \
+    || warn "Doctor found required or optional items that need attention"
 
   : >"$ONBOARDING_MARKER"
 
@@ -2066,77 +2500,86 @@ main() {
   local subcommand="${2:-}"
 
   case "$command:$subcommand" in
-  onboard:)
-    onboard
-    ;;
+    onboard:)
+      onboard
+      ;;
 
-  ssh:status)
-    ssh_status
-    ;;
-  ssh:setup)
-    ssh_setup
-    ;;
-  ssh:disable)
-    ssh_disable
-    ;;
+    ssh:status)
+      ssh_status
+      ;;
 
-  auth:status)
-    agents_auth_status
-    ;;
-  auth:login)
-    agents_auth_login
-    ;;
-  auth:logout)
-    agents_auth_logout
-    ;;
+    ssh:setup)
+      ssh_setup
+      ;;
 
-  openrouter:status)
-    openrouter_status
-    ;;
-  openrouter:setup)
-    openrouter_setup
-    ;;
-  openrouter:disable)
-    openrouter_disable
-    ;;
+    ssh:disable)
+      ssh_disable
+      ;;
 
-  github:status)
-    github_status
-    ;;
-  github:setup)
-    github_setup
-    ;;
+    auth:status)
+      agents_auth_status
+      ;;
 
-  keys:status)
-    keys_status
-    ;;
-  keys:generate)
-    keys_generate
-    ;;
-  keys:upload-github)
-    keys_upload_github
-    ;;
+    auth:login)
+      agents_auth_login
+      ;;
 
-  remote-info:)
-    remote_info
-    ;;
+    auth:logout)
+      agents_auth_logout
+      ;;
 
-  doctor:)
-    doctor
-    ;;
+    openrouter:status)
+      openrouter_status
+      ;;
 
-  update:*)
-    update_devbox "$subcommand"
-    ;;
+    openrouter:setup)
+      openrouter_setup
+      ;;
 
-  help: | -h: | --help:)
-    usage
-    ;;
+    openrouter:disable)
+      openrouter_disable
+      ;;
 
-  *)
-    usage >&2
-    return 2
-    ;;
+    github:status)
+      github_status
+      ;;
+
+    github:setup)
+      github_setup
+      ;;
+
+    keys:status)
+      keys_status
+      ;;
+
+    keys:generate)
+      keys_generate
+      ;;
+
+    keys:upload-github)
+      keys_upload_github
+      ;;
+
+    remote-info:)
+      remote_info
+      ;;
+
+    doctor:)
+      doctor
+      ;;
+
+    update:*)
+      update_devbox "$subcommand"
+      ;;
+
+    help: | -h: | --help:)
+      usage
+      ;;
+
+    *)
+      usage >&2
+      return 2
+      ;;
   esac
 }
 
@@ -2215,17 +2658,28 @@ if [[ -n "${SSH_AUTHORIZED_KEY:-}" ]]; then
     0600 \
     "${DEV_HOME}/.ssh/authorized_keys"
 
-  systemctl disable --now ssh.socket >/dev/null 2>&1 ||
-    true
+  systemctl disable \
+    --now \
+    ssh.socket \
+    >/dev/null 2>&1 \
+    || true
 
-  systemctl enable --now ssh.service
+  systemctl enable \
+    --now \
+    ssh.service
 
 elif [[ ! -s "${DEV_HOME}/.ssh/authorized_keys" ]]; then
-  systemctl disable --now ssh.socket >/dev/null 2>&1 ||
-    true
+  systemctl disable \
+    --now \
+    ssh.socket \
+    >/dev/null 2>&1 \
+    || true
 
-  systemctl disable --now ssh.service >/dev/null 2>&1 ||
-    true
+  systemctl disable \
+    --now \
+    ssh.service \
+    >/dev/null 2>&1 \
+    || true
 fi
 
 msg_ok "Secured SSH"
@@ -2237,7 +2691,8 @@ APT::Periodic::Update-Package-Lists "1";
 APT::Periodic::Unattended-Upgrade "1";
 EOF
 
-systemctl enable --now \
+systemctl enable \
+  --now \
   apt-daily.timer \
   apt-daily-upgrade.timer
 
@@ -2247,29 +2702,43 @@ msg_info "Validating Installation"
 
 node --version
 npm --version
-codex --version
-claude --version
 
-# Happy must be executed as the developer user so it never initializes state
-# below /root/.happy.
-run_as_dev happy --version
+# Agent CLIs are runtime tools for the dev account, so validate them as dev.
+run_as_dev codex --version
+run_as_dev claude --version
+
+# IMPORTANT:
+# Never execute `happy --version` during installation.
+#
+# Current Happy versions print the version and then continue into normal
+# startup, which can launch first-time pairing. Verify the installed npm
+# package without running Happy itself.
+run_as_dev npm list \
+  --global \
+  --depth=0 \
+  happy
 
 run_as_dev erl \
   -noshell \
   -eval 'halt(0).'
 
-run_as_dev elixir --version
+run_as_dev elixir \
+  --version
 
-run_as_dev mix phx.new --version
+run_as_dev mix phx.new \
+  --version
 
-systemctl is-active --quiet postgresql.service
+systemctl is-active \
+  --quiet \
+  postgresql.service
 
 run_as_dev psql \
   --host 127.0.0.1 \
   --username "$PG_DB_USER" \
   --dbname "$PG_DB_NAME" \
   --no-password \
-  --command "SELECT 1;" >/dev/null
+  --command "SELECT 1;" \
+  >/dev/null
 
 /usr/local/bin/devbox doctor
 
@@ -2277,23 +2746,36 @@ msg_ok "Validated Installation"
 
 msg_info "Cleaning Up"
 
-apt-get -y autoremove >>"$LOG_FILE" 2>&1 ||
-  true
+apt-get \
+  -y \
+  autoremove \
+  >>"$LOG_FILE" 2>&1 \
+  || true
 
-apt-get clean >>"$LOG_FILE" 2>&1 ||
-  true
+apt-get clean \
+  >>"$LOG_FILE" 2>&1 \
+  || true
 
-rm -f "$LOG_FILE"
+rm \
+  -f \
+  "$LOG_FILE"
 
 msg_ok "Cleaned Up"
-
 msg_ok "Completed Successfully!"
 
+echo
 echo -e "${GN}DevBox setup has been successfully initialized!${CL}"
-echo -e "${YW}From the LXC host, enter the container's console (e.g. 'pct enter <CTID>' on Proxmox VE, or 'lxc exec <name> -- bash' on LXD/Incus), then run:${CL}"
-echo -e "  sudo -iu dev"
-echo -e "  devbox onboard"
+echo
+echo -e "${YW}Enter the container and run:${CL}"
+echo
+echo "  sudo -iu dev"
+echo
+echo "The first interactive dev shell starts:"
+echo
+echo "  devbox onboard"
 echo
 echo -e "${YW}After onboarding, use Happy as the primary agent entry point:${CL}"
-echo -e "  happy"
-echo -e "  happy codex"
+echo
+echo "  happy"
+echo "  happy codex"
+echo
