@@ -4,7 +4,7 @@
 # License: MIT
 # Source: https://github.com/openai/codex, https://github.com/anthropics/claude-code
 
-# Codex DevBox - standalone LXC installer
+# DevBox - standalone LXC installer
 #
 # Run this script as root directly inside an already provisioned Ubuntu LTS
 # LXC container (Proxmox, LXD/Incus, or any other platform). It does not
@@ -33,7 +33,7 @@ error_handler() {
 }
 trap 'error_handler ${LINENO}' ERR
 
-LOG_FILE="$(mktemp /tmp/codex-devbox-install.XXXXXX.log)"
+LOG_FILE="$(mktemp /tmp/devbox-install.XXXXXX.log)"
 readonly LOG_FILE
 silent() {
   if ! "$@" >>"$LOG_FILE" 2>&1; then
@@ -52,11 +52,8 @@ require_root() {
 }
 
 # Erlang/OTP is installed from the precompiled builds on builds.hex.pm, which
-# are published for Ubuntu LTS only -- there are no Debian builds. On anything
-# else mise falls back to compiling OTP from source with kerl, and that
-# from-source runtime has proven broken (plain `erl` dies at boot with
-# `persistent_term:get(code_server)` badarg). So require Ubuntu up front and
-# say why, instead of failing much later with an opaque BEAM crash.
+# are published for Ubuntu LTS only -- there are no Debian builds. Require
+# Ubuntu up front and say why, instead of failing much later on a 404.
 require_supported_os() {
   local os_id=""
   local os_version=""
@@ -132,34 +129,37 @@ NODE_VERSION="24"
 ERLANG_VERSION="28.4"
 ELIXIR_VERSION="1.20.2"
 PHOENIX_VERSION="1.8.9"
-CODEX_DEVBOX_REPO_URL="${CODEX_DEVBOX_REPO_URL:-https://raw.githubusercontent.com/c4kingpin/Scripts}"
+DEVBOX_REPO_URL="${DEVBOX_REPO_URL:-https://raw.githubusercontent.com/c4kingpin/Scripts}"
 
 run_as_dev() {
   runuser -u "$DEV_USER" -- env \
     HOME="$DEV_HOME" \
     USER="$DEV_USER" \
     LOGNAME="$DEV_USER" \
-    PATH="${DEV_HOME}/.local/share/mise/shims:${DEV_HOME}/.local/bin:/usr/local/bin:/usr/bin:/bin" \
+    PATH="${DEV_HOME}/.local/bin:/usr/local/bin:/usr/bin:/bin" \
     "$@"
 }
 
-select_codex_autonomy() {
-  local requested="${CODEX_AUTONOMY:-}"
+# One autonomy profile drives both agents: it becomes approval_policy and
+# sandbox_mode in ~/.codex/config.toml and permissions.defaultMode in
+# ~/.claude/settings.json, so Codex and Claude behave consistently.
+select_autonomy() {
+  local requested="${DEVBOX_AUTONOMY:-}"
 
-  if [[ -f "${DEV_HOME}/.codex/config.toml" ]]; then
-    CODEX_AUTONOMY="${requested:-balanced}"
-    msg_ok "Existing ~/.codex/config.toml preserved; skipping autonomy prompt"
+  if [[ -f "${DEV_HOME}/.codex/config.toml" || -f "${DEV_HOME}/.claude/settings.json" ]]; then
+    DEVBOX_AUTONOMY="${requested:-balanced}"
+    msg_ok "Existing agent configuration preserved; skipping autonomy prompt"
     return
   fi
 
   case "$requested" in
   controlled | balanced | autonomous | full-access)
-    CODEX_AUTONOMY="$requested"
+    DEVBOX_AUTONOMY="$requested"
     ;;
   "")
     if [[ -t 0 && -t 1 ]]; then
       cat <<'EOF'
-How autonomously may Codex work?
+How autonomously may Codex and Claude work?
   1) Controlled   - read-only; approve edits and commands
   2) Balanced     - edit workspace; approve external access (recommended)
   3) Autonomous   - workspace and network without approval prompts
@@ -168,25 +168,25 @@ EOF
       local choice=""
       read -r -p "Choice [2]: " choice
       case "${choice:-2}" in
-      1) CODEX_AUTONOMY="controlled" ;;
-      2) CODEX_AUTONOMY="balanced" ;;
-      3) CODEX_AUTONOMY="autonomous" ;;
-      4) CODEX_AUTONOMY="full-access" ;;
-      *) CODEX_AUTONOMY="balanced" ;;
+      1) DEVBOX_AUTONOMY="controlled" ;;
+      2) DEVBOX_AUTONOMY="balanced" ;;
+      3) DEVBOX_AUTONOMY="autonomous" ;;
+      4) DEVBOX_AUTONOMY="full-access" ;;
+      *) DEVBOX_AUTONOMY="balanced" ;;
       esac
     else
-      CODEX_AUTONOMY="balanced"
+      DEVBOX_AUTONOMY="balanced"
     fi
     ;;
   *)
-    msg_error "Invalid CODEX_AUTONOMY: ${requested}"
+    msg_error "Invalid DEVBOX_AUTONOMY: ${requested}"
     exit 1
     ;;
   esac
 
-  msg_ok "Codex autonomy profile: ${CODEX_AUTONOMY}"
+  msg_ok "Agent autonomy profile: ${DEVBOX_AUTONOMY}"
 }
-select_codex_autonomy
+select_autonomy
 
 # gh, ripgrep, fd-find, git-lfs and shellcheck all live in Ubuntu's universe
 # component. Stock Ubuntu images enable it, minimal ones do not always, and a
@@ -263,11 +263,42 @@ if ! id "$DEV_USER" >/dev/null 2>&1; then
   usermod --password "$password_hash" "$DEV_USER"
   unset random_password password_hash
 fi
+# Carry over installations made under the old "codex-devbox" name before the
+# state directory is recreated -- it holds the PostgreSQL credentials, the
+# OpenRouter API key and the onboarding marker, none of which are recoverable.
+if [[ -d "${DEV_HOME}/.config/codex-devbox" && ! -d "${DEV_HOME}/.config/devbox" ]]; then
+  msg_info "Migrating state from ~/.config/codex-devbox"
+  mv "${DEV_HOME}/.config/codex-devbox" "${DEV_HOME}/.config/devbox"
+  msg_ok "Migrated state to ~/.config/devbox"
+fi
+rm -f \
+  /usr/local/bin/codex-devbox \
+  /etc/sudoers.d/90-codex-devbox \
+  /etc/ssh/sshd_config.d/00-codex-devbox.conf \
+  /etc/profile.d/codex-devbox.sh
+
+# Earlier revisions managed Erlang and Elixir with mise inside the developer's
+# home. Remove it: its shims precede /usr/local/bin on PATH and would keep
+# shadowing the /opt toolchain installed below.
+if [[ -d "${DEV_HOME}/.local/share/mise" || -x "${DEV_HOME}/.local/bin/mise" ]]; then
+  msg_info "Removing the previous mise-managed toolchain"
+  rm -rf \
+    "${DEV_HOME}/.local/share/mise" \
+    "${DEV_HOME}/.local/bin/mise" \
+    "${DEV_HOME}/.local/share/elixir" \
+    "${DEV_HOME}/.config/mise"
+  for stale_bin in elixir elixirc iex mix erl erlc escript; do
+    rm -f "${DEV_HOME}/.local/bin/${stale_bin}"
+  done
+  msg_ok "Removed the previous mise-managed toolchain"
+fi
+
 install -d -m 0700 -o "$DEV_USER" -g "$DEV_USER" \
   "${DEV_HOME}/.ssh" \
   "${DEV_HOME}/.codex" \
+  "${DEV_HOME}/.claude" \
   "${DEV_HOME}/.config" \
-  "${DEV_HOME}/.config/codex-devbox" \
+  "${DEV_HOME}/.config/devbox" \
   "${DEV_HOME}/.cache"
 install -d -m 0755 -o "$DEV_USER" -g "$DEV_USER" \
   "${DEV_HOME}/.local" \
@@ -292,54 +323,66 @@ msg_info "Installing Claude CLI"
 silent npm install --global @anthropic-ai/claude-code@latest
 msg_ok "Installed Claude CLI"
 
-msg_info "Installing Erlang via mise"
-mise_installer="/tmp/codex-devbox-mise-install.sh"
-curl_with_retry "https://mise.run" "$mise_installer"
-chmod 0755 "$mise_installer"
-run_as_dev env MISE_INSTALL_PATH="${DEV_HOME}/.local/bin/mise" sh "$mise_installer"
-rm -f "$mise_installer"
-# MISE_ERLANG_COMPILE=false forces the precompiled builds.hex.pm build and
-# makes mise fail loudly if none exists for this Ubuntu release, rather than
-# silently compiling a broken OTP from source (see require_supported_os).
-run_as_dev env \
-  MISE_ERLANG_COMPILE=false \
-  "${DEV_HOME}/.local/bin/mise" use --global "erlang@${ERLANG_VERSION}"
-run_as_dev "${DEV_HOME}/.local/bin/mise" reshim
+# Erlang and Elixir are installed system-wide under /opt/devbox and exposed
+# through plain symlinks in /usr/local/bin -- no version manager, no shims.
+#
+# This layout is the one that was verified to work end to end; routing the
+# same Erlang through mise's shims produced a BEAM that died during kernel
+# startup ("Kernel pid terminated (logger)", persistent_term:get(code_server)
+# badarg). Running the extracted release directly avoids that entirely, and
+# the interpreter no longer depends on anything under the developer's home.
+OTP_ROOT="/opt/devbox/otp"
+ELIXIR_ROOT="/opt/devbox/elixir"
+ERLANG_OTP_MAJOR="${ERLANG_VERSION%%.*}"
 
-# Fail here, with a readable message, if the runtime is unusable -- rather
-# than several steps later inside an Elixir or mix invocation.
+msg_info "Installing Erlang/OTP ${ERLANG_VERSION}"
+otp_arch="$(dpkg --print-architecture)"
+otp_os="ubuntu-$(. /etc/os-release && printf '%s' "${VERSION_ID}")"
+otp_tarball="/tmp/devbox-otp.tar.gz"
+curl_with_retry \
+  "https://builds.hex.pm/builds/otp/${otp_arch}/${otp_os}/OTP-${ERLANG_VERSION}.tar.gz" \
+  "$otp_tarball"
+rm -rf "$OTP_ROOT"
+install -d -m 0755 "$OTP_ROOT"
+tar -xzf "$otp_tarball" -C "$OTP_ROOT" --strip-components=1
+rm -f "$otp_tarball"
+# Install rewrites ROOTDIR in the launcher scripts to this prefix.
+(cd "$OTP_ROOT" && ./Install -minimal "$OTP_ROOT") >>"$LOG_FILE" 2>&1
+for otp_bin in erl erlc escript epmd dialyzer typer ct_run run_erl to_erl; do
+  if [[ -x "${OTP_ROOT}/bin/${otp_bin}" ]]; then
+    ln -sfn "${OTP_ROOT}/bin/${otp_bin}" "/usr/local/bin/${otp_bin}"
+  fi
+done
+
+# Erlang writes ~/.erlang.cookie when the kernel application starts, so a
+# missing or unwritable HOME takes the whole runtime down. Create it up front
+# and verify the runtime as the developer, exactly how it will be used.
+if [[ ! -f "${DEV_HOME}/.erlang.cookie" ]]; then
+  openssl rand -hex 32 >"${DEV_HOME}/.erlang.cookie"
+fi
+chown "$DEV_USER:$DEV_USER" "${DEV_HOME}/.erlang.cookie"
+chmod 0400 "${DEV_HOME}/.erlang.cookie"
+
 if ! run_as_dev erl -noshell -eval 'halt(0).'; then
   msg_error "Erlang ${ERLANG_VERSION} was installed but cannot execute BEAM code."
   exit 1
 fi
-msg_ok "Installed Erlang ${ERLANG_VERSION}"
+msg_ok "Installed Erlang/OTP ${ERLANG_VERSION}"
 
-msg_info "Installing Elixir and Phoenix"
-# mise's core Elixir plugin fetches a single, OTP-unpinned build from
-# builds.hex.pm, so nothing ties it to the OTP release installed above.
-# Elixir's own GitHub releases are instead published per OTP *major* version
-# (elixir-otp-28.zip, ...) and work with any OTP release in that series, so
-# derive the artifact from ERLANG_VERSION and install it directly. This keeps
-# the two from drifting apart on future version bumps.
-# Drop any Elixir previously managed by mise: its shims sit ahead of
-# ~/.local/bin on PATH and would otherwise keep shadowing the install below.
-run_as_dev "${DEV_HOME}/.local/bin/mise" unuse --global elixir >/dev/null 2>&1 || true
-for elixir_bin in elixir elixirc iex mix; do
-  rm -f "${DEV_HOME}/.local/share/mise/shims/${elixir_bin}"
-done
-run_as_dev "${DEV_HOME}/.local/bin/mise" reshim
-ERLANG_OTP_MAJOR="${ERLANG_VERSION%%.*}"
-elixir_zip="/tmp/codex-devbox-elixir.zip"
+msg_info "Installing Elixir ${ELIXIR_VERSION} and Phoenix ${PHOENIX_VERSION}"
+# Elixir's releases are published per OTP major version (elixir-otp-28.zip),
+# so deriving the artifact from ERLANG_VERSION keeps the two in lockstep.
+elixir_zip="/tmp/devbox-elixir.zip"
 curl_with_retry \
   "https://github.com/elixir-lang/elixir/releases/download/v${ELIXIR_VERSION}/elixir-otp-${ERLANG_OTP_MAJOR}.zip" \
   "$elixir_zip"
-rm -rf "${DEV_HOME}/.local/share/elixir"
-install -d -m 0755 -o "$DEV_USER" -g "$DEV_USER" "${DEV_HOME}/.local/share/elixir"
-run_as_dev unzip -q "$elixir_zip" -d "${DEV_HOME}/.local/share/elixir"
+rm -rf "$ELIXIR_ROOT"
+install -d -m 0755 "$ELIXIR_ROOT"
+unzip -q "$elixir_zip" -d "$ELIXIR_ROOT"
 rm -f "$elixir_zip"
+chmod 0755 "$ELIXIR_ROOT"/bin/*
 for elixir_bin in elixir elixirc iex mix; do
-  ln -sfn "${DEV_HOME}/.local/share/elixir/bin/${elixir_bin}" "${DEV_HOME}/.local/bin/${elixir_bin}"
-  chown -h "$DEV_USER:$DEV_USER" "${DEV_HOME}/.local/bin/${elixir_bin}"
+  ln -sfn "${ELIXIR_ROOT}/bin/${elixir_bin}" "/usr/local/bin/${elixir_bin}"
 done
 run_as_dev mix local.hex --force
 run_as_dev mix local.rebar --force
@@ -348,7 +391,7 @@ msg_ok "Installed Elixir ${ELIXIR_VERSION} (OTP ${ERLANG_OTP_MAJOR}) and Phoenix
 
 PG_DB_NAME="devbox"
 PG_DB_USER="dev"
-PG_ENV_FILE="${DEV_HOME}/.config/codex-devbox/postgres.env"
+PG_ENV_FILE="${DEV_HOME}/.config/devbox/postgres.env"
 
 msg_info "Configuring PostgreSQL Development Access"
 if [[ -r "$PG_ENV_FILE" ]] && grep -q '^PGPASSWORD=' "$PG_ENV_FILE"; then
@@ -399,48 +442,64 @@ if [[ -z "$fd_binary" ]]; then
 fi
 ln -sfn "$fd_binary" /usr/local/bin/fd
 
-cat <<'EOF' >/etc/profile.d/codex-devbox.sh
-export PATH="$HOME/.local/share/mise/shims:$HOME/.local/bin:/usr/local/bin:$PATH"
+cat <<'EOF' >/etc/profile.d/devbox.sh
+export PATH="$HOME/.local/bin:/usr/local/bin:$PATH"
 EOF
-chmod 0644 /etc/profile.d/codex-devbox.sh
+chmod 0644 /etc/profile.d/devbox.sh
 
-cat <<'EOF' >"${DEV_HOME}/.codex/AGENTS.md"
-# Devbox working agreements
+# The same working agreements for both agents: Codex reads AGENTS.md, Claude
+# reads CLAUDE.md.
+agent_instructions() {
+  cat <<'EOF'
+# DevBox working agreements
 
-- Follow repository-specific `AGENTS.md` files and project conventions.
+- Follow repository-specific `AGENTS.md` / `CLAUDE.md` files and project
+  conventions.
 - Work on a task branch; never push directly to the default branch.
 - Run the relevant tests and inspect the diff before publishing changes.
 - Create focused commits and draft pull requests when GitHub is authenticated.
 - Never commit credentials, tokens, `.env` files, or generated secrets.
 - Never force-push unless the user explicitly requests it.
 EOF
+}
+agent_instructions >"${DEV_HOME}/.codex/AGENTS.md"
+agent_instructions >"${DEV_HOME}/.claude/CLAUDE.md"
+
+# Map the single autonomy profile onto each agent's own vocabulary.
+case "$DEVBOX_AUTONOMY" in
+controlled)
+  codex_approval_policy="untrusted"
+  codex_sandbox_mode="read-only"
+  codex_network_access=""
+  # Manual: reads only, everything else is approved by the user.
+  claude_default_mode="default"
+  ;;
+balanced)
+  codex_approval_policy="on-request"
+  codex_sandbox_mode="workspace-write"
+  codex_network_access="false"
+  # Reads and file edits run unattended; commands and network still ask.
+  claude_default_mode="acceptEdits"
+  ;;
+autonomous)
+  codex_approval_policy="never"
+  codex_sandbox_mode="workspace-write"
+  codex_network_access="true"
+  # Everything runs, with the classifier applying background safety checks.
+  claude_default_mode="auto"
+  ;;
+full-access)
+  codex_approval_policy="never"
+  codex_sandbox_mode="danger-full-access"
+  codex_network_access=""
+  # No checks at all; only the LXC boundary remains.
+  claude_default_mode="bypassPermissions"
+  ;;
+esac
 
 if [[ ! -f "${DEV_HOME}/.codex/config.toml" ]]; then
-  case "$CODEX_AUTONOMY" in
-  controlled)
-    codex_approval_policy="untrusted"
-    codex_sandbox_mode="read-only"
-    codex_network_access=""
-    ;;
-  balanced)
-    codex_approval_policy="on-request"
-    codex_sandbox_mode="workspace-write"
-    codex_network_access="false"
-    ;;
-  autonomous)
-    codex_approval_policy="never"
-    codex_sandbox_mode="workspace-write"
-    codex_network_access="true"
-    ;;
-  full-access)
-    codex_approval_policy="never"
-    codex_sandbox_mode="danger-full-access"
-    codex_network_access=""
-    ;;
-  esac
-
   cat <<EOF >"${DEV_HOME}/.codex/config.toml"
-# Managed by the Codex DevBox installer.
+# Managed by the DevBox installer.
 # Change these values at any time to adjust Codex autonomy.
 approval_policy = "${codex_approval_policy}"
 sandbox_mode = "${codex_sandbox_mode}"
@@ -457,21 +516,53 @@ else
   msg_info "Preserving existing ~/.codex/config.toml"
 fi
 
-if ! grep -Fq '# Codex Dev Box' "${DEV_HOME}/.bashrc" 2>/dev/null; then
+# permissions.defaultMode sets the mode every Claude session starts in. The
+# deny rules apply on top of it in every mode, including bypassPermissions,
+# so the box's own secrets stay unreadable whatever profile is selected.
+if [[ ! -f "${DEV_HOME}/.claude/settings.json" ]]; then
+  cat <<EOF >"${DEV_HOME}/.claude/settings.json"
+{
+  "\$schema": "https://json.schemastore.org/claude-code-settings.json",
+  "permissions": {
+    "defaultMode": "${claude_default_mode}",
+    "deny": [
+      "Read(./.env)",
+      "Read(./.env.*)",
+      "Read(~/.ssh/**)",
+      "Read(~/.pgpass)",
+      "Read(~/.codex/auth.json)",
+      "Read(~/.claude/.credentials.json)",
+      "Read(~/.config/devbox/openrouter.env)"
+    ]
+  }
+}
+EOF
+else
+  msg_info "Preserving existing ~/.claude/settings.json"
+fi
+
+# Refresh a block written under the old name in place; appending a second one
+# would leave the stale codex-devbox paths active alongside the new ones.
+if grep -Fq '# Codex Dev Box' "${DEV_HOME}/.bashrc" 2>/dev/null; then
+  sed -i \
+    -e 's/# Codex Dev Box/# DevBox/' \
+    -e 's/codex-devbox/devbox/g' \
+    "${DEV_HOME}/.bashrc"
+  msg_ok "Migrated the DevBox block in ~/.bashrc"
+fi
+
+if ! grep -Fq '# DevBox' "${DEV_HOME}/.bashrc" 2>/dev/null; then
   cat <<'EOF' >>"${DEV_HOME}/.bashrc"
 
-# Codex Dev Box
-export PATH="$HOME/.local/share/mise/shims:$HOME/.local/bin:/usr/local/bin:$PATH"
-if [[ $- == *i* ]] && command -v mise >/dev/null 2>&1; then
-  eval "$(mise activate bash)"
-fi
+# DevBox
+export PATH="$HOME/.local/bin:/usr/local/bin:$PATH"
 if [[ $- == *i* && -d "$HOME/workspace" ]]; then
   cd "$HOME/workspace"
 fi
 if [[ $- == *i* && -t 0 && -t 1 ]] &&
-  [[ ! -e "$HOME/.config/codex-devbox/onboarding-complete" ]] &&
-  command -v codex-devbox >/dev/null 2>&1; then
-  codex-devbox onboard || true
+  [[ ! -e "$HOME/.config/devbox/onboarding-complete" ]] &&
+  command -v devbox >/dev/null 2>&1; then
+  devbox onboard || true
 fi
 EOF
 fi
@@ -479,11 +570,16 @@ fi
 chown "$DEV_USER:$DEV_USER" \
   "${DEV_HOME}/.bashrc" \
   "${DEV_HOME}/.codex/AGENTS.md" \
-  "${DEV_HOME}/.codex/config.toml"
+  "${DEV_HOME}/.codex/config.toml" \
+  "${DEV_HOME}/.claude/CLAUDE.md" \
+  "${DEV_HOME}/.claude/settings.json"
 chmod 0644 \
   "${DEV_HOME}/.bashrc" \
-  "${DEV_HOME}/.codex/AGENTS.md"
-chmod 0600 "${DEV_HOME}/.codex/config.toml"
+  "${DEV_HOME}/.codex/AGENTS.md" \
+  "${DEV_HOME}/.claude/CLAUDE.md"
+chmod 0600 \
+  "${DEV_HOME}/.codex/config.toml" \
+  "${DEV_HOME}/.claude/settings.json"
 
 run_as_dev git lfs install --skip-repo
 run_as_dev git config --global init.defaultBranch main
@@ -491,8 +587,8 @@ run_as_dev git config --global pull.ff only
 run_as_dev git config --global push.autoSetupRemote true
 msg_ok "Configured Development Environment"
 
-msg_info "Installing Codex Dev Box Manager"
-cat <<'MANAGER' >/usr/local/bin/codex-devbox
+msg_info "Installing DevBox Manager"
+cat <<'MANAGER' >/usr/local/bin/devbox
 #!/usr/bin/env bash
 
 set -Eeuo pipefail
@@ -500,9 +596,9 @@ umask 077
 
 readonly DEV_USER="dev"
 readonly DEV_HOME="/home/${DEV_USER}"
-readonly STATE_DIR="${DEV_HOME}/.config/codex-devbox"
+readonly STATE_DIR="${DEV_HOME}/.config/devbox"
 readonly ONBOARDING_MARKER="${STATE_DIR}/onboarding-complete"
-readonly SSH_CONFIG="/etc/ssh/sshd_config.d/00-codex-devbox.conf"
+readonly SSH_CONFIG="/etc/ssh/sshd_config.d/00-devbox.conf"
 readonly SSH_KEY_FILE="${DEV_HOME}/.ssh/authorized_keys"
 readonly OPENROUTER_ENV="${STATE_DIR}/openrouter.env"
 readonly OPENROUTER_PROFILE="${DEV_HOME}/.codex/openrouter.config.toml"
@@ -531,16 +627,16 @@ die() {
 
 usage() {
   cat <<'EOF'
-Usage: codex-devbox COMMAND [SUBCOMMAND]
+Usage: devbox COMMAND [SUBCOMMAND]
 
 Commands:
   onboard             Run the interactive first-login onboarding
   ssh status          Show inbound SSH status
   ssh setup           Import a client public key and enable SSH
   ssh disable         Disable the SSH listener
-  auth status         Show Codex CLI authentication status
-  auth login          Authenticate Codex CLI with the device-code flow
-  auth logout         Remove the Codex CLI authentication
+  auth status         Show Codex and Claude authentication status
+  auth login          Sign in to Codex and Claude (skips either if signed in)
+  auth logout         Sign out of Codex and Claude
   openrouter status   Show OpenRouter configuration status
   openrouter setup    Configure codex-openrouter as a fallback
   openrouter disable  Stop using OpenRouter and remove its stored API key
@@ -573,7 +669,7 @@ run_as_dev() {
       HOME="$DEV_HOME" \
       USER="$DEV_USER" \
       LOGNAME="$DEV_USER" \
-      PATH="${DEV_HOME}/.local/share/mise/shims:${DEV_HOME}/.local/bin:/usr/local/bin:/usr/bin:/bin" \
+      PATH="${DEV_HOME}/.local/bin:/usr/local/bin:/usr/bin:/bin" \
       "$@"
   else
     "$@"
@@ -693,31 +789,81 @@ ssh_disable() {
   ok "SSH listener disabled; authorized_keys was retained."
 }
 
-codex_auth_status() {
-  require_dev
-  codex login status
+codex_is_authenticated() {
+  codex login status >/dev/null 2>&1
 }
 
-codex_auth_login() {
+# claude auth status exits 0 when signed in and 1 when not.
+claude_is_authenticated() {
+  claude auth status >/dev/null 2>&1
+}
+
+agents_auth_status() {
   require_dev
-  codex login --device-auth
-  if [[ -f "${HOME}/.codex/auth.json" ]]; then
-    chmod 0600 "${HOME}/.codex/auth.json"
+  local status=0
+
+  if codex_is_authenticated; then
+    ok "Codex CLI is authenticated"
+  else
+    warn "Codex CLI is not authenticated"
+    status=1
   fi
-  codex_auth_status
+
+  if claude_is_authenticated; then
+    ok "Claude CLI is authenticated"
+  else
+    warn "Claude CLI is not authenticated"
+    status=1
+  fi
+
+  return "$status"
 }
 
-codex_auth_logout() {
+agents_auth_login() {
   require_dev
-  codex logout
-  ok "Codex CLI authentication removed"
+
+  if codex_is_authenticated; then
+    ok "Codex CLI is already authenticated"
+  else
+    info "Signing in to Codex using the device-code flow"
+    codex login --device-auth
+    if [[ -f "${HOME}/.codex/auth.json" ]]; then
+      chmod 0600 "${HOME}/.codex/auth.json"
+    fi
+  fi
+
+  if claude_is_authenticated; then
+    ok "Claude CLI is already authenticated"
+  else
+    info "Signing in to Claude"
+    # This box has no browser, so the callback server is unreachable and the
+    # browser shows a login code to paste back here instead.
+    info "Open the printed URL on another device; if it shows a login code,"
+    info "paste that code back at the prompt here."
+    claude auth login
+    if [[ -f "${HOME}/.claude/.credentials.json" ]]; then
+      chmod 0600 "${HOME}/.claude/.credentials.json"
+    fi
+  fi
+
+  agents_auth_status
 }
 
+agents_auth_logout() {
+  require_dev
+  codex logout || warn "Codex logout reported an error"
+  claude auth logout || warn "Claude logout reported an error"
+  ok "Signed out of Codex and Claude"
+}
+
+# Also recognise the legacy "codex-devbox" marker so files written before the
+# rename stay manageable (and removable) instead of looking unmanaged.
 is_managed_openrouter_file() {
   local path="$1"
 
   [[ -f "$path" ]] &&
-    head -n 2 "$path" | grep -Fq "Managed by codex-devbox openrouter setup"
+    head -n 2 "$path" |
+    grep -Eq "Managed by (devbox|codex-devbox) openrouter setup"
 }
 
 openrouter_status() {
@@ -786,13 +932,13 @@ openrouter_setup() {
     "${DEV_HOME}/.local/bin"
 
   {
-    printf '# Managed by codex-devbox openrouter setup\n'
+    printf '# Managed by devbox openrouter setup\n'
     printf 'export OPENROUTER_API_KEY=%q\n' "$api_key"
   } >"$OPENROUTER_ENV"
   chmod 0600 "$OPENROUTER_ENV"
 
   cat >"$OPENROUTER_PROFILE" <<EOF
-# Managed by codex-devbox openrouter setup
+# Managed by devbox openrouter setup
 model = "${model}"
 model_provider = "openrouter"
 
@@ -806,10 +952,10 @@ EOF
 
   cat >"$OPENROUTER_WRAPPER" <<'EOF'
 #!/usr/bin/env bash
-# Managed by codex-devbox openrouter setup
+# Managed by devbox openrouter setup
 set -Eeuo pipefail
 
-readonly openrouter_env="${HOME}/.config/codex-devbox/openrouter.env"
+readonly openrouter_env="${HOME}/.config/devbox/openrouter.env"
 [[ -r "$openrouter_env" ]] || {
   printf 'error - OpenRouter API key is not configured\n' >&2
   exit 1
@@ -945,7 +1091,7 @@ keys_upload_github() {
   [[ -s "$public_key" ]] || die "Generate the identity key first."
   gh auth status --hostname github.com >/dev/null 2>&1 ||
     die "Configure GitHub first."
-  gh ssh-key add "$public_key" --title "$(hostname)-codex-devbox"
+  gh ssh-key add "$public_key" --title "$(hostname)-devbox"
   ok "Uploaded identity key to GitHub"
 }
 
@@ -956,7 +1102,7 @@ Supported ChatGPT mobile path:
   ChatGPT on iOS
     -> paired ChatGPT desktop app on macOS or Windows
     -> SSH connection configured by that desktop app
-    -> this Codex Dev Box
+    -> this DevBox
 
 Remote setup starts in the ChatGPT desktop app. It cannot be started from the
 Codex CLI. Add this Dev Box under Settings > Connections > SSH and select a
@@ -1016,6 +1162,20 @@ doctor() {
   run_as_dev claude --version || status=1
   run_as_dev elixir --version || status=1
   run_as_dev mix phx.new --version || status=1
+
+  # Sign-in state is reported but never counted as a failure: a freshly
+  # installed box is expected to be signed out until onboarding runs.
+  if run_as_dev sh -lc 'codex login status >/dev/null 2>&1'; then
+    ok "Codex CLI is authenticated"
+  else
+    warn "Codex CLI is not authenticated (run: devbox auth login)"
+  fi
+  if run_as_dev sh -lc 'claude auth status >/dev/null 2>&1'; then
+    ok "Claude CLI is authenticated"
+  else
+    warn "Claude CLI is not authenticated (run: devbox auth login)"
+  fi
+
   ssh_status
   return "$status"
 }
@@ -1023,7 +1183,7 @@ doctor() {
 update_devbox() {
   require_root
   local branch="${1:-$DEFAULT_UPDATE_BRANCH}"
-  local repo_url="${CODEX_DEVBOX_REPO_URL:-$DEFAULT_REPO_URL}"
+  local repo_url="${DEVBOX_REPO_URL:-$DEFAULT_REPO_URL}"
   local installer_url="${repo_url%/}/${branch}/install.sh"
   local installer
 
@@ -1037,7 +1197,7 @@ update_devbox() {
   chmod 0755 "$installer"
 
   info "Re-running the installer to apply updates"
-  CODEX_DEVBOX_REPO_URL="$repo_url" bash "$installer"
+  DEVBOX_REPO_URL="$repo_url" bash "$installer"
   rm -f "$installer"
   ok "Updated from branch '${branch}'"
   doctor
@@ -1049,21 +1209,21 @@ onboard() {
 
   install -d -m 0700 "$STATE_DIR"
   cat <<'EOF'
-Codex Dev Box onboarding
+DevBox onboarding
 
-1. Optional inbound SSH access for the ChatGPT desktop host or another client
-2. Optional Codex CLI authentication using a device code
-3. Optional OpenRouter API key and model for Codex
+1. Optional inbound SSH access for a desktop host or another client
+2. Sign in to both agent CLIs, Codex and Claude
+3. Optional OpenRouter API key and model as a Codex fallback
 4. GitHub authentication and Git commit identity
 5. Optional outbound Ed25519 identity key
 6. Environment diagnostics and supported ChatGPT mobile instructions
 EOF
 
   if prompt_yes_no "Configure inbound SSH now?"; then
-    sudo -n /usr/local/bin/codex-devbox ssh setup
+    sudo -n /usr/local/bin/devbox ssh setup
   fi
-  if prompt_yes_no "Authenticate the Codex CLI now?"; then
-    codex_auth_login
+  if prompt_yes_no "Sign in to Codex and Claude now?"; then
+    agents_auth_login
   fi
   if prompt_yes_no "Configure OpenRouter as a Codex fallback?" "no"; then
     openrouter_setup
@@ -1071,7 +1231,7 @@ EOF
   if prompt_yes_no "Configure GitHub now?"; then
     github_setup
   fi
-  if prompt_yes_no "Generate a Dev Box identity key?" "no"; then
+  if prompt_yes_no "Generate a DevBox identity key?" "no"; then
     keys_generate
     if gh auth status --hostname github.com >/dev/null 2>&1 &&
       prompt_yes_no "Upload this public key to GitHub?" "no"; then
@@ -1104,13 +1264,13 @@ main() {
       ssh_disable
       ;;
     auth:status)
-      codex_auth_status
+      agents_auth_status
       ;;
     auth:login)
-      codex_auth_login
+      agents_auth_login
       ;;
     auth:logout)
-      codex_auth_logout
+      agents_auth_logout
       ;;
     openrouter:status)
       openrouter_status
@@ -1157,19 +1317,19 @@ main() {
 
 main "$@"
 MANAGER
-chmod 0755 /usr/local/bin/codex-devbox
+chmod 0755 /usr/local/bin/devbox
 
-cat <<EOF >/etc/sudoers.d/90-codex-devbox
-${DEV_USER} ALL=(root) NOPASSWD: /usr/local/bin/codex-devbox ssh setup
-${DEV_USER} ALL=(root) NOPASSWD: /usr/local/bin/codex-devbox ssh disable
+cat <<EOF >/etc/sudoers.d/90-devbox
+${DEV_USER} ALL=(root) NOPASSWD: /usr/local/bin/devbox ssh setup
+${DEV_USER} ALL=(root) NOPASSWD: /usr/local/bin/devbox ssh disable
 EOF
-chmod 0440 /etc/sudoers.d/90-codex-devbox
-visudo -cf /etc/sudoers.d/90-codex-devbox
-msg_ok "Installed Codex Dev Box Manager"
+chmod 0440 /etc/sudoers.d/90-devbox
+visudo -cf /etc/sudoers.d/90-devbox
+msg_ok "Installed DevBox Manager"
 
 msg_info "Securing SSH"
 install -d -m 0755 /etc/ssh/sshd_config.d
-cat <<EOF >/etc/ssh/sshd_config.d/00-codex-devbox.conf
+cat <<EOF >/etc/ssh/sshd_config.d/00-devbox.conf
 PermitRootLogin no
 PasswordAuthentication no
 PermitEmptyPasswords no
@@ -1190,7 +1350,7 @@ MaxAuthTries 3
 ClientAliveInterval 60
 ClientAliveCountMax 3
 EOF
-chmod 0644 /etc/ssh/sshd_config.d/00-codex-devbox.conf
+chmod 0644 /etc/ssh/sshd_config.d/00-devbox.conf
 install -d -m 0755 /run/sshd
 /usr/sbin/sshd -t
 
@@ -1219,7 +1379,7 @@ node --version
 npm --version
 codex --version
 claude --version
-run_as_dev "${DEV_HOME}/.local/bin/mise" --version
+run_as_dev erl -noshell -eval 'halt(0).'
 run_as_dev elixir --version
 run_as_dev mix phx.new --version
 systemctl is-active --quiet postgresql.service
@@ -1229,7 +1389,7 @@ run_as_dev psql \
   --dbname "$PG_DB_NAME" \
   --no-password \
   --command "SELECT 1;" >/dev/null
-/usr/local/bin/codex-devbox doctor
+/usr/local/bin/devbox doctor
 msg_ok "Validated Installation"
 
 msg_info "Cleaning Up"
@@ -1239,7 +1399,7 @@ rm -f "$LOG_FILE"
 msg_ok "Cleaned Up"
 
 msg_ok "Completed Successfully!"
-echo -e "${GN}Codex DevBox setup has been successfully initialized!${CL}"
+echo -e "${GN}DevBox setup has been successfully initialized!${CL}"
 echo -e "${YW}From the LXC host, enter the container's console (e.g. 'pct enter <CTID>' on Proxmox VE, or 'lxc exec <name> -- bash' on LXD/Incus), then run:${CL}"
 echo -e "  sudo -iu dev"
-echo -e "  codex-devbox onboard"
+echo -e "  devbox onboard"

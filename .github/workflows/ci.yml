@@ -30,14 +30,14 @@ jobs:
         run: >-
           bash -n
           install.sh
-          tests/test-codex-devbox.sh
+          tests/test-devbox.sh
 
       - name: Run regression tests
-        run: bash tests/test-codex-devbox.sh
+        run: bash tests/test-devbox.sh
 
       - name: Run ShellCheck
         run: >-
           shellcheck -x
           --exclude=SC1090,SC1091,SC2086,SC2154
           install.sh
-          tests/test-codex-devbox.sh
+          tests/test-devbox.sh

@@ -6,15 +6,15 @@ set -Eeuo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 readonly REPO_ROOT
 readonly INSTALL_SCRIPT="${REPO_ROOT}/install.sh"
-TEST_TMP="$(mktemp -d /tmp/codex-devbox-tests.XXXXXX)"
+TEST_TMP="$(mktemp -d /tmp/devbox-tests.XXXXXX)"
 readonly TEST_TMP
-readonly MANAGER="${TEST_TMP}/codex-devbox"
+readonly MANAGER="${TEST_TMP}/devbox"
 
 PASSED=0
 FAILED=0
 
 cleanup() {
-  if [[ "$TEST_TMP" == /tmp/codex-devbox-tests.* && -d "$TEST_TMP" ]]; then
+  if [[ "$TEST_TMP" == /tmp/devbox-tests.* && -d "$TEST_TMP" ]]; then
     rm -rf "$TEST_TMP"
   fi
 }
@@ -35,7 +35,7 @@ run_test() {
 
 extract_manager() {
   awk '
-    /^cat <<'\''MANAGER'\'' >\/usr\/local\/bin\/codex-devbox$/ {
+    /^cat <<'\''MANAGER'\'' >\/usr\/local\/bin\/devbox$/ {
       capture=1
       next
     }
@@ -81,14 +81,35 @@ install_script_is_bare_metal() {
   ! grep -Eq 'setup_docker|docker (run|compose|pull)|podman' "$INSTALL_SCRIPT"
 }
 
-erlang_uses_precompiled_ubuntu_builds() {
-  # builds.hex.pm publishes precompiled Erlang for Ubuntu only. Compiling OTP
-  # from source with kerl produced a runtime where even plain `erl` died with
-  # persistent_term:get(code_server) badarg, so the source path must stay off.
-  grep -Fq 'MISE_ERLANG_COMPILE=false' "$INSTALL_SCRIPT" &&
-    ! grep -Fq 'MISE_ERLANG_COMPILE=true' "$INSTALL_SCRIPT" &&
+# Routing the toolchain through mise's shims produced a BEAM that died during
+# kernel startup; the same release run directly from /opt works. No version
+# manager may come back, and no interpreter may live under the developer home.
+toolchain_is_installed_without_a_version_manager() {
+  grep -Fq 'OTP_ROOT="/opt/devbox/otp"' "$INSTALL_SCRIPT" &&
+    grep -Fq 'ELIXIR_ROOT="/opt/devbox/elixir"' "$INSTALL_SCRIPT" &&
+    grep -Fq './Install -minimal "$OTP_ROOT"' "$INSTALL_SCRIPT" &&
+    grep -Fq 'ln -sfn "${OTP_ROOT}/bin/${otp_bin}" "/usr/local/bin/${otp_bin}"' \
+      "$INSTALL_SCRIPT" &&
+    grep -Fq 'ln -sfn "${ELIXIR_ROOT}/bin/${elixir_bin}" "/usr/local/bin/${elixir_bin}"' \
+      "$INSTALL_SCRIPT" &&
+    ! grep -Eq 'mise (use|exec|reshim|unuse)|MISE_[A-Z_]+=|mise\.run|mise activate|mise/shims' \
+      "$INSTALL_SCRIPT"
+}
+
+erlang_comes_from_the_precompiled_ubuntu_build() {
+  grep -Fq 'builds.hex.pm/builds/otp/${otp_arch}/${otp_os}/OTP-${ERLANG_VERSION}.tar.gz' \
+    "$INSTALL_SCRIPT" &&
+    grep -Fq 'otp_arch="$(dpkg --print-architecture)"' "$INSTALL_SCRIPT" &&
     ! grep -Fq 'KERL_CONFIGURE_OPTIONS' "$INSTALL_SCRIPT" &&
     grep -Fq "run_as_dev erl -noshell -eval 'halt(0).'" "$INSTALL_SCRIPT"
+}
+
+# Erlang writes ~/.erlang.cookie when the kernel application starts; an
+# unwritable HOME took the whole runtime down during the original failure.
+erlang_cookie_is_provisioned() {
+  grep -Fq '"${DEV_HOME}/.erlang.cookie"' "$INSTALL_SCRIPT" &&
+    grep -Fq 'chmod 0400 "${DEV_HOME}/.erlang.cookie"' "$INSTALL_SCRIPT" &&
+    grep -Fq 'HOME="$DEV_HOME"' "$INSTALL_SCRIPT"
 }
 
 installer_requires_ubuntu() {
@@ -100,14 +121,10 @@ installer_requires_ubuntu() {
 }
 
 elixir_is_pinned_to_the_erlang_otp_major() {
-  # mise's core Elixir plugin ships one OTP-unpinned build from builds.hex.pm,
-  # which crashes at boot against the from-source Erlang built above. Elixir
-  # must come from its own OTP-major-tagged GitHub release instead.
+  # Elixir releases are published per OTP major, so deriving the artifact from
+  # ERLANG_VERSION keeps the pair from drifting apart on version bumps.
   grep -Fq 'ERLANG_OTP_MAJOR="${ERLANG_VERSION%%.*}"' "$INSTALL_SCRIPT" &&
     grep -Fq 'releases/download/v${ELIXIR_VERSION}/elixir-otp-${ERLANG_OTP_MAJOR}.zip' \
-      "$INSTALL_SCRIPT" &&
-    ! grep -Eq 'mise" use --global "elixir@|mise use --global "elixir@' "$INSTALL_SCRIPT" &&
-    ! grep -Eq 'mise" exec -- (elixir|mix|iex)|mise exec -- (elixir|mix|iex)' \
       "$INSTALL_SCRIPT"
 }
 
@@ -212,7 +229,7 @@ developer_user_is_least_privilege() {
     grep -Fq 'PasswordAuthentication no' "$INSTALL_SCRIPT" &&
     grep -Fq 'AllowUsers ${DEV_USER}' "$INSTALL_SCRIPT" &&
     grep -Fq \
-      '${DEV_USER} ALL=(root) NOPASSWD: /usr/local/bin/codex-devbox ssh setup' \
+      '${DEV_USER} ALL=(root) NOPASSWD: /usr/local/bin/devbox ssh setup' \
       "$INSTALL_SCRIPT" &&
     ! grep -Eq 'NOPASSWD:[[:space:]]*ALL' "$INSTALL_SCRIPT"
 }
@@ -240,39 +257,66 @@ PY
 developer_home_parents_are_writable() {
   local config_line
   local state_line
-  local mise_line
+  local toolchain_line
   local permissions_root="${TEST_TMP}/permissions"
 
   config_line="$(grep -nF '"${DEV_HOME}/.config"' "$INSTALL_SCRIPT" | head -n 1 | cut -d: -f1)"
-  state_line="$(grep -nF '"${DEV_HOME}/.config/codex-devbox"' "$INSTALL_SCRIPT" | head -n 1 | cut -d: -f1)"
-  mise_line="$(grep -nF 'MISE_INSTALL_PATH=' "$INSTALL_SCRIPT" | head -n 1 | cut -d: -f1)"
+  # Skip the migration lines (they name the old path too) so this anchors on
+  # the install -d entry that actually creates the directory.
+  state_line="$(grep -nF '"${DEV_HOME}/.config/devbox"' "$INSTALL_SCRIPT" |
+    grep -v codex-devbox | head -n 1 | cut -d: -f1)"
+  toolchain_line="$(grep -nF 'OTP_ROOT="/opt/devbox/otp"' "$INSTALL_SCRIPT" | head -n 1 | cut -d: -f1)"
 
   grep -Fq 'run_as_dev test -w "$developer_dir"' "$INSTALL_SCRIPT" &&
     grep -Fq 'Developer directory is not writable:' "$INSTALL_SCRIPT" ||
     return 1
 
-  [[ -n "$config_line" && -n "$state_line" && -n "$mise_line" ]] &&
-    ((config_line < state_line && state_line < mise_line)) &&
+  [[ -n "$config_line" && -n "$state_line" && -n "$toolchain_line" ]] &&
+    ((config_line < state_line && state_line < toolchain_line)) &&
     grep -Fq '"${DEV_HOME}/.cache"' "$INSTALL_SCRIPT" &&
     grep -Fq '"${DEV_HOME}/.local"' "$INSTALL_SCRIPT" &&
     grep -Fq '"${DEV_HOME}/.local/bin"' "$INSTALL_SCRIPT" || return 1
 
   install -d -m 0500 "${permissions_root}/.config"
-  if mkdir "${permissions_root}/.config/mise" 2>/dev/null; then
+  if mkdir "${permissions_root}/.config/devbox" 2>/dev/null; then
     return 1
   fi
   chmod 0700 "${permissions_root}/.config"
-  mkdir "${permissions_root}/.config/mise"
+  mkdir "${permissions_root}/.config/devbox"
 }
 
 rerunning_installer_is_idempotent() {
-  grep -Fq 'if ! grep -Fq '\''# Codex Dev Box'\'' "${DEV_HOME}/.bashrc"' "$INSTALL_SCRIPT" &&
+  grep -Fq 'if ! grep -Fq '\''# DevBox'\'' "${DEV_HOME}/.bashrc"' "$INSTALL_SCRIPT" &&
     grep -Fq 'if [[ ! -f "${DEV_HOME}/.codex/config.toml" ]]; then' "$INSTALL_SCRIPT" &&
-    grep -Fq 'if [[ -f "${DEV_HOME}/.codex/config.toml" ]]; then' "$INSTALL_SCRIPT" &&
+    grep -Fq 'if [[ ! -f "${DEV_HOME}/.claude/settings.json" ]]; then' "$INSTALL_SCRIPT" &&
     grep -Fq 'elif [[ ! -s "${DEV_HOME}/.ssh/authorized_keys" ]]; then' "$INSTALL_SCRIPT" &&
     grep -Fq "SELECT 1 FROM pg_roles WHERE rolname = '\${PG_DB_USER}'" "$INSTALL_SCRIPT" &&
     grep -Fq "SELECT 1 FROM pg_database WHERE datname = '\${PG_DB_NAME}'" "$INSTALL_SCRIPT" &&
     grep -Fq "grep -q '^PGPASSWORD='" "$INSTALL_SCRIPT"
+}
+
+# Everything the old name owned must be carried over or removed; the state
+# directory holds the only copy of the DB password and the OpenRouter key.
+renaming_migrates_existing_installations() {
+  grep -Fq 'mv "${DEV_HOME}/.config/codex-devbox" "${DEV_HOME}/.config/devbox"' \
+    "$INSTALL_SCRIPT" &&
+    grep -Fq '/usr/local/bin/codex-devbox' "$INSTALL_SCRIPT" &&
+    grep -Fq '/etc/sudoers.d/90-codex-devbox' "$INSTALL_SCRIPT" &&
+    grep -Fq '/etc/ssh/sshd_config.d/00-codex-devbox.conf' "$INSTALL_SCRIPT" &&
+    grep -Fq '/etc/profile.d/codex-devbox.sh' "$INSTALL_SCRIPT" &&
+    grep -Fq "s/# Codex Dev Box/# DevBox/" "$INSTALL_SCRIPT" &&
+    grep -Eq 'Managed by \(devbox\|codex-devbox\) openrouter setup' "$MANAGER"
+}
+
+# The rename must not leave the old command, paths or env vars behind.
+old_name_is_gone_from_the_active_surface() {
+  ! grep -Fq 'CODEX_DEVBOX_REPO_URL' "$INSTALL_SCRIPT" &&
+    ! grep -Fq 'CODEX_AUTONOMY' "$INSTALL_SCRIPT" &&
+    ! grep -Fq 'Usage: codex-devbox' "$MANAGER" &&
+    grep -Fq 'Usage: devbox COMMAND' "$MANAGER" &&
+    grep -Fq 'cat <<'\''MANAGER'\'' >/usr/local/bin/devbox' "$INSTALL_SCRIPT" &&
+    grep -Fq 'DEVBOX_REPO_URL' "$INSTALL_SCRIPT" &&
+    grep -Fq 'DEVBOX_AUTONOMY' "$INSTALL_SCRIPT"
 }
 
 ssh_onboarding_distinguishes_key_directions() {
@@ -333,15 +377,21 @@ managed_secrets_have_restricted_permissions() {
   grep -Fq 'chmod 0600' "$INSTALL_SCRIPT" &&
     grep -Fq '"${DEV_HOME}/.pgpass"' "$INSTALL_SCRIPT" &&
     grep -Fq '"$PG_ENV_FILE"' "$INSTALL_SCRIPT" &&
-    grep -Fq 'chmod 0600 "${DEV_HOME}/.codex/config.toml"' \
-      "$INSTALL_SCRIPT" &&
+    grep -Fq '"${DEV_HOME}/.codex/config.toml"' "$INSTALL_SCRIPT" &&
+    grep -Fq '"${DEV_HOME}/.claude/settings.json"' "$INSTALL_SCRIPT" &&
     grep -Fq 'chmod 0600 "$OPENROUTER_ENV"' "$MANAGER"
 }
 
-codex_autonomy_is_selectable_and_persisted() {
-  grep -Fq 'select_codex_autonomy() {' "$INSTALL_SCRIPT" &&
-    grep -Fq 'CODEX_AUTONOMY' "$INSTALL_SCRIPT" &&
-    grep -Fq 'How autonomously may Codex work?' "$INSTALL_SCRIPT" &&
+# One profile must configure both agents, or they would drift apart.
+autonomy_is_selectable_and_applies_to_both_agents() {
+  grep -Fq 'select_autonomy() {' "$INSTALL_SCRIPT" &&
+    grep -Fq 'DEVBOX_AUTONOMY' "$INSTALL_SCRIPT" &&
+    grep -Fq 'How autonomously may Codex and Claude work?' "$INSTALL_SCRIPT" &&
+    grep -Fq '"defaultMode": "${claude_default_mode}"' "$INSTALL_SCRIPT" &&
+    grep -Fq 'claude_default_mode="default"' "$INSTALL_SCRIPT" &&
+    grep -Fq 'claude_default_mode="acceptEdits"' "$INSTALL_SCRIPT" &&
+    grep -Fq 'claude_default_mode="auto"' "$INSTALL_SCRIPT" &&
+    grep -Fq 'claude_default_mode="bypassPermissions"' "$INSTALL_SCRIPT" &&
     grep -Fq 'approval_policy = "${codex_approval_policy}"' \
       "$INSTALL_SCRIPT" &&
     grep -Fq 'sandbox_mode = "${codex_sandbox_mode}"' "$INSTALL_SCRIPT" &&
@@ -375,7 +425,7 @@ openrouter_configuration_is_safe_and_supported() {
 
 first_login_onboarding_is_optional_and_repeatable() {
   grep -Fq 'onboarding-complete' "$INSTALL_SCRIPT" &&
-    grep -Fq 'codex-devbox onboard || true' "$INSTALL_SCRIPT" &&
+    grep -Fq 'devbox onboard || true' "$INSTALL_SCRIPT" &&
     grep -Fq 'codex login --device-auth' "$MANAGER" &&
     grep -Fq 'onboard() {' "$MANAGER"
 }
@@ -392,12 +442,12 @@ installer_validates_complete_stack() {
     grep -Fxq 'npm --version' "$INSTALL_SCRIPT" &&
     grep -Fxq 'codex --version' "$INSTALL_SCRIPT" &&
     grep -Fxq 'claude --version' "$INSTALL_SCRIPT" &&
-    grep -Fq 'run_as_dev "${DEV_HOME}/.local/bin/mise" --version' "$INSTALL_SCRIPT" &&
+    grep -Fq "run_as_dev erl -noshell -eval 'halt(0).'" "$INSTALL_SCRIPT" &&
     grep -Fxq 'run_as_dev elixir --version' "$INSTALL_SCRIPT" &&
     grep -Fxq 'run_as_dev mix phx.new --version' "$INSTALL_SCRIPT" &&
     grep -Fq 'systemctl is-active --quiet postgresql.service' "$INSTALL_SCRIPT" &&
     grep -Fq -- '--command "SELECT 1;"' "$INSTALL_SCRIPT" &&
-    grep -Fxq '/usr/local/bin/codex-devbox doctor' "$INSTALL_SCRIPT" &&
+    grep -Fxq '/usr/local/bin/devbox doctor' "$INSTALL_SCRIPT" &&
     grep -Fq 'msg_ok "Validated Installation"' "$INSTALL_SCRIPT"
 }
 
@@ -408,7 +458,9 @@ run_test "standalone, no Proxmox/community-scripts framework" standalone_no_prox
 run_test "standalone preflight checks" install_script_runs_standalone_preflight
 run_test "curl-pipeable from master" installer_curl_pipeable_from_master
 run_test "bare-metal install" install_script_is_bare_metal
-run_test "precompiled Ubuntu Erlang builds" erlang_uses_precompiled_ubuntu_builds
+run_test "toolchain without a version manager" toolchain_is_installed_without_a_version_manager
+run_test "precompiled Ubuntu Erlang build" erlang_comes_from_the_precompiled_ubuntu_build
+run_test "Erlang cookie provisioned" erlang_cookie_is_provisioned
 run_test "installer requires Ubuntu" installer_requires_ubuntu
 run_test "Elixir pinned to the Erlang OTP major" elixir_is_pinned_to_the_erlang_otp_major
 run_test "Claude CLI installed alongside Codex CLI" claude_cli_is_installed
@@ -427,7 +479,7 @@ run_test "manager command surface" manager_exposes_expected_commands
 run_test "manager rejects unknown commands" manager_rejects_unknown_commands
 run_test "no hardcoded default credentials" no_hardcoded_default_credentials
 run_test "managed secret permissions" managed_secrets_have_restricted_permissions
-run_test "selectable Codex autonomy" codex_autonomy_is_selectable_and_persisted
+run_test "autonomy applies to both agents" autonomy_is_selectable_and_applies_to_both_agents
 run_test "safe supported OpenRouter config" openrouter_configuration_is_safe_and_supported
 run_test "optional repeatable onboarding" first_login_onboarding_is_optional_and_repeatable
 run_test "updates preserve user state" update_preserves_user_state

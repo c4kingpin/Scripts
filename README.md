@@ -1,10 +1,10 @@
-# Codex DevBox für LXC
+# DevBox für LXC
 
 Dieses Repository enthält [`install.sh`](install.sh), einen eigenständigen
 Installer für eine isolierte Codex- und Claude-Entwicklungsumgebung. Das
 Skript läuft direkt **innerhalb** eines bereits vorhandenen, unprivilegierten
 LXC-Containers (Proxmox VE, LXD/Incus oder jede andere Plattform), wird als
-`root` ausgeführt und richtet dabei auch den `codex-devbox`-Manager ein. Es
+`root` ausgeführt und richtet dabei auch den `devbox`-Manager ein. Es
 hat keine Abhängigkeit zu Proxmox selbst oder zum Community-Scripts-Framework.
 
 Das Skript erstellt oder konfiguriert den Container selbst nicht. Storage,
@@ -18,19 +18,31 @@ Netzwerk, Template und Ressourcen des Containers müssen vor dem Aufruf bereits
 | --- | --- |
 | Benutzer | `dev` |
 | Workspace | `/home/dev/workspace` |
-| Codex-Autonomie | ausgewogen |
+| Agenten-Autonomie | ausgewogen |
 
 Installiert werden unter anderem Codex CLI, Claude CLI, Node.js 24, Git, Git
 LFS, GitHub CLI, Python, ShellCheck, ripgrep, `fd`, Erlang/OTP, Elixir,
 Phoenix und PostgreSQL.
 
-Erlang/OTP wird für den Benutzer `dev` über `mise` verwaltet und dabei
-ausschließlich als **vorkompilierter** Build von builds.hex.pm installiert
-(`MISE_ERLANG_COMPILE=false`). Elixir kommt bewusst **nicht** über `mise`,
-sondern als offizielles, auf die Erlang-Hauptversion abgestimmtes Release
-(`elixir-otp-28.zip`) nach `~/.local/share/elixir`, verlinkt in
-`~/.local/bin` — `mise` liefert für Elixir nur einen einzelnen, nicht an eine
-OTP-Version gebundenen Build aus.
+Erlang/OTP und Elixir werden **ohne Versionsmanager** systemweit unter
+`/opt/devbox` installiert und über einfache Symlinks in `/usr/local/bin`
+bereitgestellt:
+
+| Komponente | Quelle | Ziel |
+| --- | --- | --- |
+| Erlang/OTP | vorkompilierter Build von builds.hex.pm (Architektur und Ubuntu-Version werden erkannt) | `/opt/devbox/otp` |
+| Elixir | offizielles Release passend zur OTP-Hauptversion (`elixir-otp-28.zip`) | `/opt/devbox/elixir` |
+
+Die OTP-Hauptversion für Elixir wird direkt aus der Erlang-Version abgeleitet,
+sodass beide bei einem Versionswechsel nicht auseinanderlaufen können.
+
+Der Verzicht auf `mise` hat einen konkreten Grund: Über dessen Shims
+ausgeführt, stürzte die BEAM beim Start der `kernel`-Application ab
+(`Kernel pid terminated (logger)`, `persistent_term:get(code_server)`-`badarg`)
+— dasselbe Release direkt aus `/opt` gestartet läuft einwandfrei. Zusätzlich
+legt der Installer `~/.erlang.cookie` an, den Erlang beim Start der
+`kernel`-Application schreibt und ohne den die Runtime ebenfalls abbricht.
+Eine vorhandene `mise`-Installation wird beim Update automatisch entfernt.
 
 Empfohlene Containergröße: 4 CPU-Kerne, 8192 MiB RAM, 32 GiB Speicher,
 unprivilegiert. Kleinere Container funktionieren ebenfalls.
@@ -42,12 +54,9 @@ ebenfalls); amd64 und arm64 werden unterstützt. Der Installer prüft das zu
 Beginn und bricht mit einer klaren Meldung ab, falls ein anderes System läuft.
 
 Der Grund ist Erlang/OTP: builds.hex.pm veröffentlicht vorkompilierte
-OTP-Builds ausschließlich für Ubuntu. Auf Debian müsste `mise` Erlang aus dem
-Quellcode übersetzen, und diese selbst gebaute Runtime erwies sich als defekt
-— schon ein einfaches `erl` brach beim Start mit
-`persistent_term:get(code_server)`-`badarg` und
-`Kernel pid terminated (logger)` ab. Mit Ubuntu entfällt der Quellbuild
-vollständig, was die Installation zusätzlich deutlich beschleunigt.
+OTP-Builds ausschließlich für Ubuntu (für amd64 und arm64). Auf Debian gäbe es
+kein passendes Archiv, und Erlang aus dem Quellcode zu übersetzen kostet viele
+Minuten CPU-Zeit. Mit Ubuntu wird stattdessen ein fertiges Archiv entpackt.
 
 ## Installation
 
@@ -98,20 +107,25 @@ Auf LXD/Incus entsprechend über `lxc exec <name> -- bash` bzw.
 > ```
 
 Ausgeführt in einem echten Terminal fragt das Skript dann vor der eigentlichen
-Installation, wie autonom Codex arbeiten darf:
+Installation, wie autonom die Agenten arbeiten dürfen. **Die Auswahl gilt für
+Codex und Claude gemeinsam** — ein Profil, beide Agenten verhalten sich gleich:
 
-| Profil | Codex-Verhalten |
-| --- | --- |
-| Kontrolliert | Nur lesender Zugriff; Änderungen und Befehle benötigen eine Freigabe. |
-| Ausgewogen (Standard) | Codex darf den Workspace selbstständig bearbeiten und fragt für Zugriffe außerhalb des Workspace oder auf das Netzwerk. |
-| Autonom | Codex darf den Workspace bearbeiten und das Netzwerk ohne Freigabedialoge nutzen; die Workspace-Sandbox bleibt aktiv. |
-| Vollzugriff | Keine Sandbox und keine Freigabedialoge innerhalb des LXC-Containers. |
+| Profil | Verhalten | Codex | Claude |
+| --- | --- | --- | --- |
+| Kontrolliert | Nur lesender Zugriff; Änderungen und Befehle benötigen eine Freigabe. | `untrusted` / `read-only` | `default` |
+| Ausgewogen (Standard) | Der Workspace darf selbstständig bearbeitet werden; Zugriffe nach außen werden erfragt. | `on-request` / `workspace-write` | `acceptEdits` |
+| Autonom | Workspace und Netzwerk ohne Freigabedialoge; die Sandbox bleibt aktiv. | `never` / `workspace-write` | `auto` |
+| Vollzugriff | Keine Sandbox und keine Freigabedialoge innerhalb des LXC-Containers. | `never` / `danger-full-access` | `bypassPermissions` |
+
+Unabhängig vom Profil schützen `deny`-Regeln in `~/.claude/settings.json` die
+Geheimnisse der Box (SSH-Schlüssel, `.pgpass`, Anmeldedaten, OpenRouter-Key) —
+diese Regeln greifen in **jedem** Modus, auch bei `bypassPermissions`.
 
 Ohne interaktives Terminal (also auch beim `curl | bash`-Einzeiler) wird
 `balanced` verwendet, sofern nicht explizit ein Profil vorgegeben wird:
 
 ```bash
-CODEX_AUTONOMY=autonomous \
+DEVBOX_AUTONOMY=autonomous \
   curl -fsSL https://raw.githubusercontent.com/c4kingpin/Scripts/master/install.sh | bash
 ```
 
@@ -119,10 +133,14 @@ Gültige Werte sind `controlled`, `balanced`, `autonomous` und `full-access`.
 `full-access` hebt nur die innere Codex-Sandbox auf; die Grenze des
 unprivilegierten LXC-Containers bleibt bestehen.
 
-Die Auswahl wird als `approval_policy` und `sandbox_mode` in
-`/home/dev/.codex/config.toml` gespeichert und kann dort später jederzeit
-geändert werden. Ein späterer `codex-devbox update` überschreibt eine bereits
-vorhandene `config.toml` nicht.
+Gespeichert wird die Auswahl in `/home/dev/.codex/config.toml` (als
+`approval_policy` und `sandbox_mode`) sowie in
+`/home/dev/.claude/settings.json` (als `permissions.defaultMode`). Beide
+Dateien können jederzeit von Hand angepasst werden; ein späterer
+`devbox update` überschreibt sie nicht.
+
+Dieselben Arbeitsregeln liegen für beide Agenten bereit — als
+`~/.codex/AGENTS.md` für Codex und `~/.claude/CLAUDE.md` für Claude.
 
 ## Erster Login und Onboarding
 
@@ -140,20 +158,20 @@ Beim ersten interaktiven Login startet das optionale Onboarding. Es kann
 jederzeit wiederholt werden:
 
 ```bash
-codex-devbox onboard
+devbox onboard
 ```
 
 Das Onboarding behandelt nacheinander:
 
 1. optionalen eingehenden SSH-Zugang,
-2. optionale Codex-CLI-Anmeldung per Gerätecode,
-3. optionalen OpenRouter-API-Key samt Modell für Codex,
+2. Anmeldung **beider** Agenten-CLIs, Codex und Claude,
+3. optionalen OpenRouter-API-Key samt Modell als Codex-Fallback,
 4. GitHub-Anmeldung und Git-Identität,
 5. einen optionalen ausgehenden Ed25519-Schlüssel der Devbox,
 6. Diagnose und Hinweise zur ChatGPT-Mobilverbindung.
 
 Der Abschluss wird in
-`~/.config/codex-devbox/onboarding-complete` vermerkt. Das Onboarding kann
+`~/.config/devbox/onboarding-complete` vermerkt. Das Onboarding kann
 trotzdem jederzeit erneut aufgerufen werden.
 
 ## SSH sicher einrichten
@@ -171,18 +189,18 @@ auf dem Mac, Windows-PC oder sonstigen SSH-Client erzeugt, der sich mit der
 Devbox verbinden soll:
 
 ```bash
-ssh-keygen -t ed25519 -a 100 -f ~/.ssh/codex-devbox
+ssh-keygen -t ed25519 -a 100 -f ~/.ssh/devbox
 ```
 
-Nur die einzelne Zeile aus `~/.ssh/codex-devbox.pub` wird im Onboarding
+Nur die einzelne Zeile aus `~/.ssh/devbox.pub` wird im Onboarding
 eingefügt. Der private Client-Schlüssel gehört nicht auf die Devbox.
 
 Verwaltung innerhalb des Containers:
 
 ```bash
-codex-devbox ssh status
-sudo /usr/local/bin/codex-devbox ssh setup
-sudo /usr/local/bin/codex-devbox ssh disable
+devbox ssh status
+sudo /usr/local/bin/devbox ssh setup
+sudo /usr/local/bin/devbox ssh disable
 ```
 
 Die SSH-Konfiguration erlaubt ausschließlich Public-Key-Anmeldung für `dev`.
@@ -200,36 +218,43 @@ Die Richtung der beiden Schlüsseltypen ist bewusst getrennt:
 GitHub wird standardmäßig per HTTPS über die GitHub CLI eingerichtet:
 
 ```bash
-codex-devbox github setup
-codex-devbox github status
+devbox github setup
+devbox github status
 ```
 
 Ein zusätzlicher ausgehender SSH-Schlüssel kann erzeugt und nach erfolgreicher
 GitHub-Anmeldung hochgeladen werden:
 
 ```bash
-codex-devbox keys generate
-codex-devbox keys status
-codex-devbox keys upload-github
+devbox keys generate
+devbox keys status
+devbox keys upload-github
 ```
 
 Private Schlüssel, GitHub-Tokens und Codex-Anmeldedaten werden weder vom
 Installer ausgegeben noch in dieses Repository geschrieben.
 
-## Codex-Anmeldung
+## Anmeldung der Agenten
 
-Die Codex-Anmeldung findet erst im Benutzerterminal statt, niemals während der
-Installation. Für die headless Devbox verwendet der Manager den Gerätecode-
-Flow:
+Die Anmeldung findet erst im Benutzerterminal statt, niemals während der
+Installation. Ein Befehl deckt **beide** Agenten ab und überspringt jeweils
+den, der bereits angemeldet ist:
 
 ```bash
-codex-devbox auth login
-codex-devbox auth status
-codex-devbox auth logout
+devbox auth login
+devbox auth status
+devbox auth logout
 ```
 
-Codex verwaltet seine Anmeldung selbst unter `~/.codex`. Dieser Ordner darf
-nicht kopiert, veröffentlicht oder eingecheckt werden.
+Beide CLIs sind für den headless Betrieb geeignet: Codex nutzt den
+Gerätecode-Flow, Claude zeigt im Browser einen Anmeldecode, der im Terminal
+eingefügt wird — der lokale Callback-Server ist aus einem Container ohnehin
+nicht erreichbar.
+
+Jede CLI verwaltet ihre Anmeldedaten selbst: Codex unter `~/.codex`, Claude in
+`~/.claude/.credentials.json`. Diese Dateien dürfen nicht kopiert,
+veröffentlicht oder eingecheckt werden; die `deny`-Regeln der
+Autonomie-Konfiguration halten die Agenten zusätzlich davon ab, sie zu lesen.
 
 ## OpenRouter für Codex
 
@@ -237,13 +262,13 @@ Zusätzlich zur Codex-CLI-Anmeldung kann ein OpenRouter-API-Key als manueller
 Fallback hinterlegt werden:
 
 ```bash
-codex-devbox openrouter setup
-codex-devbox openrouter status
+devbox openrouter setup
+devbox openrouter status
 ```
 
 Die Einrichtung fragt den Key verdeckt und ein OpenRouter-Modell ab. Ohne
 Modellangabe wird `~openai/gpt-latest` verwendet. Der Key liegt ausschließlich
-in `~/.config/codex-devbox/openrouter.env` mit Dateimodus `0600`; Statusausgaben
+in `~/.config/devbox/openrouter.env` mit Dateimodus `0600`; Statusausgaben
 zeigen seinen Wert nie an. Der normale Aufruf `codex` nutzt weiterhin die
 ChatGPT-Anmeldung und damit zunächst das im ChatGPT-Abo enthaltene
 Codex-Kontingent. OpenRouter wird erst mit dem separaten Befehl gestartet:
@@ -261,7 +286,7 @@ Die OpenRouter-Einrichtung lässt sich einschließlich des gespeicherten Keys
 wieder entfernen:
 
 ```bash
-codex-devbox openrouter disable
+devbox openrouter disable
 ```
 
 Dabei werden der gespeicherte Key, das Profil und `codex-openrouter` entfernt.
@@ -269,17 +294,16 @@ Der normale `codex`-Aufruf und seine ChatGPT-Anmeldung bleiben unverändert.
 
 ## Claude CLI
 
-Neben Codex installiert der Installer auch die Claude-CLI
-(`@anthropic-ai/claude-code`) für den Benutzer `dev`:
+Die Claude-CLI (`@anthropic-ai/claude-code`) wird gleichwertig neben Codex
+installiert:
 
 ```bash
 claude --version
 claude
 ```
 
-Der erste Aufruf von `claude` führt durch die Anmeldung (Browser-Login oder
-ein hinterlegter `ANTHROPIC_API_KEY`). Die Anmeldedaten verwaltet die CLI
-selbst; sie werden vom Installer weder ausgegeben noch verändert.
+Die Anmeldung erfolgt über `devbox auth login` (siehe oben) oder direkt mit
+`claude auth login`. `devbox doctor` meldet den Anmeldestatus beider Agenten.
 
 ## ChatGPT auf iPhone oder iPad
 
@@ -300,7 +324,7 @@ iOS-App auf die vom Desktop bereitgestellte Remote-Umgebung zugreifen.
 Die aktuellen Hinweise zeigt auch:
 
 ```bash
-codex-devbox remote-info
+devbox remote-info
 ```
 
 Ohne SSH bleibt die Devbox vollständig über die Konsole des LXC-Hosts (z. B.
@@ -314,7 +338,7 @@ im Container:
 
 ```text
 /home/dev/.pgpass
-/home/dev/.config/codex-devbox/postgres.env
+/home/dev/.config/devbox/postgres.env
 ```
 
 Beide Dateien gehören `dev` und haben Modus `0600`. Für ein Phoenix-Projekt
@@ -322,11 +346,11 @@ kann die Umgebung beispielsweise so geladen werden:
 
 ```bash
 set -a
-source ~/.config/codex-devbox/postgres.env
+source ~/.config/devbox/postgres.env
 set +a
 ```
 
-Ein `codex-devbox update` ändert das gespeicherte Datenbankpasswort nicht,
+Ein `devbox update` ändert das gespeicherte Datenbankpasswort nicht,
 solange `postgres.env` bereits existiert.
 
 ## Betrieb und Updates
@@ -334,7 +358,7 @@ solange `postgres.env` bereits existiert.
 Diagnose:
 
 ```bash
-codex-devbox doctor
+devbox doctor
 ```
 
 `update` muss als `root` laufen, nicht über `sudo` als `dev` – der Benutzer
@@ -344,17 +368,17 @@ codex-devbox doctor
 aktuellen Stand des `master`-Branches aktualisieren:
 
 ```bash
-codex-devbox update
+devbox update
 ```
 
 Optional lässt sich auch ein anderer Branch installieren, zum Beispiel um
 eine Vorabversion zu testen:
 
 ```bash
-codex-devbox update feature/mein-branch
+devbox update feature/mein-branch
 ```
 
-`codex-devbox update [branch]` lädt `install.sh` vom angegebenen (oder
+`devbox update [branch]` lädt `install.sh` vom angegebenen (oder
 standardmäßig dem `master`-) Branch aus dem GitHub-Repository herunter und
 führt es erneut aus. Der Installer ist für wiederholte Ausführungen
 ausgelegt: Betriebssystempakete, Codex CLI, Claude CLI und die verwaltete
@@ -366,25 +390,25 @@ Um von einem eigenen Fork oder Spiegel zu aktualisieren, kann die
 Repository-URL überschrieben werden:
 
 ```bash
-CODEX_DEVBOX_REPO_URL="https://raw.githubusercontent.com/<fork>/Scripts" \
-  codex-devbox update <branch>
+DEVBOX_REPO_URL="https://raw.githubusercontent.com/<fork>/Scripts" \
+  devbox update <branch>
 ```
 
 Automatische Sicherheitsupdates sind zusätzlich aktiviert, sodass
-Betriebssystem-Patches auch ohne manuelles `codex-devbox update` einlaufen.
+Betriebssystem-Patches auch ohne manuelles `devbox update` einlaufen.
 
 ## Tests
 
 Lokale Prüfungen:
 
 ```bash
-bash -n install.sh tests/test-codex-devbox.sh
+bash -n install.sh tests/test-devbox.sh
 
-bash tests/test-codex-devbox.sh
+bash tests/test-devbox.sh
 
 shellcheck -x --exclude=SC1090,SC1091,SC2086,SC2154 \
   install.sh \
-  tests/test-codex-devbox.sh
+  tests/test-devbox.sh
 ```
 
 Diese Prüfungen laufen bei Pushes und Pull Requests über GitHub Actions. Ein
@@ -396,7 +420,9 @@ simuliert werden können.
 
 - [Codex CLI](https://developers.openai.com/codex/cli/)
 - [Codex `AGENTS.md`](https://developers.openai.com/codex/guides/agents-md/)
-- [Claude Code](https://docs.claude.com/en/docs/claude-code/overview)
+- [Claude Code](https://code.claude.com/docs/en/overview)
+- [Claude Code: Berechtigungsmodi](https://code.claude.com/docs/en/permission-modes)
+- [Claude Code: settings.json](https://code.claude.com/docs/en/settings)
 - [ChatGPT Remote connections](https://learn.chatgpt.com/docs/remote-connections)
-- [mise](https://mise.jdx.dev/)
+- [Erlang/OTP Builds (hex.pm)](https://builds.hex.pm/)
 - [Phoenix installation](https://hexdocs.pm/phoenix/installation.html)
