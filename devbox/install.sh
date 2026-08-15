@@ -13,6 +13,8 @@
 #   root      -> OS/packages/system services/toolchain administration
 #   postgres  -> PostgreSQL service
 #   dev       -> Happy, Claude Code, Codex, Git/GitHub, workspaces, credentials
+#             -> may also install OS packages via passwordless
+#                sudo apt-get/apt/dpkg (see /etc/sudoers.d/90-devbox)
 #
 # Happy is the primary session/remote layer:
 #   happy
@@ -2637,6 +2639,7 @@ chmod \
 cat <<EOF >/etc/sudoers.d/90-devbox
 ${DEV_USER} ALL=(root) NOPASSWD: /usr/local/bin/devbox ssh setup
 ${DEV_USER} ALL=(root) NOPASSWD: /usr/local/bin/devbox ssh disable
+${DEV_USER} ALL=(root) NOPASSWD: /usr/bin/apt-get, /usr/bin/apt, /usr/bin/dpkg
 EOF
 
 chmod \
