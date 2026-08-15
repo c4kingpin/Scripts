@@ -35,6 +35,7 @@ trap 'error_handler ${LINENO}' ERR
 
 LOG_FILE="$(mktemp /tmp/devbox-install.XXXXXX.log)"
 readonly LOG_FILE
+
 silent() {
   if ! "$@" >>"$LOG_FILE" 2>&1; then
     msg_error "Command failed: $*"
@@ -76,7 +77,7 @@ require_supported_os() {
     msg_error "Unsupported OS: ${os_id:-unknown} ${os_version:-unknown}"
     msg_error "Ubuntu 24.04 LTS is required (22.04 and 20.04 also work)."
     msg_error "Precompiled Erlang/OTP is published for Ubuntu only; on other"
-    msg_error "distributions it would be compiled from source and end up broken."
+    msg_error "distributions it would be compiled from source."
     exit 1
     ;;
   esac
@@ -102,6 +103,7 @@ update_os() {
 curl_with_retry() {
   local url="$1"
   local destination="$2"
+
   curl \
     --proto '=https' \
     --tlsv1.2 \
@@ -126,25 +128,34 @@ update_os
 DEV_USER="dev"
 DEV_HOME="/home/${DEV_USER}"
 NODE_VERSION="24"
-# OTP 28 crashes on boot in this class of container -- every 28.x build tried
-# (precompiled and from source, on Debian and Ubuntu, in $HOME and in /opt,
-# as root and as the developer) died with persistent_term:get(code_server)
-# badarg, while 27.3.x runs everywhere. The likely cause is the OTP 28 JIT
-# requiring CPU features a conservative hypervisor CPU model does not expose.
-# Override with ERLANG_VERSION=... to try a newer release.
+
+# Keep the default OTP release explicitly pinned so installer runs stay
+# reproducible. Override with ERLANG_VERSION=... when testing another release.
+#
+# Important: Erlang/OTP must not be started after dropping privileges while
+# inheriting an inaccessible working directory such as /root. Some OTP
+# releases can fail very early during kernel/logger startup in that situation.
+# run_as_dev() below therefore changes to DEV_HOME before invoking runuser.
 ERLANG_VERSION="${ERLANG_VERSION:-27.3.4.16}"
 ELIXIR_VERSION="${ELIXIR_VERSION:-1.20.2}"
 PHOENIX_VERSION="${PHOENIX_VERSION:-1.8.9}"
 DEVBOX_REPO_URL="${DEVBOX_REPO_URL:-https://raw.githubusercontent.com/c4kingpin/Scripts}"
 
-run_as_dev() {
-  runuser -u "$DEV_USER" -- env \
+# Commands started through runuser inherit the caller's current working
+# directory. The installer is normally launched by root from /root, which the
+# developer user cannot traverse. Erlang/OTP in particular can crash during
+# early kernel startup when started in such an inaccessible inherited CWD.
+#
+# Use a subshell so the installer's own working directory is not changed.
+run_as_dev() (
+  cd "$DEV_HOME"
+  exec runuser -u "$DEV_USER" -- env \
     HOME="$DEV_HOME" \
     USER="$DEV_USER" \
     LOGNAME="$DEV_USER" \
     PATH="${DEV_HOME}/.local/bin:/usr/local/bin:/usr/bin:/bin" \
     "$@"
-}
+)
 
 # One autonomy profile drives both agents: it becomes approval_policy and
 # sandbox_mode in ~/.codex/config.toml and permissions.defaultMode in
@@ -251,6 +262,7 @@ if [[ "$(node --version 2>/dev/null || true)" != "v${NODE_VERSION}."* ]]; then
   rm -f "$nodesource_setup"
   silent apt-get install -y --no-install-recommends nodejs
 fi
+
 [[ "$(node --version)" == "v${NODE_VERSION}."* ]] || {
   msg_error "Unexpected Node.js version: $(node --version 2>/dev/null || echo none)"
   exit 1
@@ -269,6 +281,7 @@ if ! id "$DEV_USER" >/dev/null 2>&1; then
   usermod --password "$password_hash" "$DEV_USER"
   unset random_password password_hash
 fi
+
 # Carry over installations made under the old "codex-devbox" name before the
 # state directory is recreated -- it holds the PostgreSQL credentials, the
 # OpenRouter API key and the onboarding marker, none of which are recoverable.
@@ -277,6 +290,7 @@ if [[ -d "${DEV_HOME}/.config/codex-devbox" && ! -d "${DEV_HOME}/.config/devbox"
   mv "${DEV_HOME}/.config/codex-devbox" "${DEV_HOME}/.config/devbox"
   msg_ok "Migrated state to ~/.config/devbox"
 fi
+
 rm -f \
   /usr/local/bin/codex-devbox \
   /etc/sudoers.d/90-codex-devbox \
@@ -284,23 +298,26 @@ rm -f \
   /etc/profile.d/codex-devbox.sh
 
 # Earlier revisions let mise manage Erlang and Elixir. mise itself stays (it
-# is useful for other languages), but its BEAM installs and shims must go:
-# the shims would shadow the /opt toolchain installed further down.
+# is useful for other languages), but its BEAM installs and shims must go so
+# they cannot shadow the system-wide toolchain installed below.
 if [[ -d "${DEV_HOME}/.local/share/mise" ]]; then
   msg_info "Removing the previously mise-managed BEAM toolchain"
   rm -rf \
     "${DEV_HOME}/.local/share/mise/installs/erlang" \
     "${DEV_HOME}/.local/share/mise/installs/elixir" \
     "${DEV_HOME}/.local/share/elixir"
+
   for stale_bin in elixir elixirc iex mix erl erlc escript; do
     rm -f \
       "${DEV_HOME}/.local/share/mise/shims/${stale_bin}" \
       "${DEV_HOME}/.local/bin/${stale_bin}"
   done
+
   # Drop the erlang/elixir pins so mise stops trying to reinstall them.
   if [[ -f "${DEV_HOME}/.config/mise/config.toml" ]]; then
     sed -i '/^\(erlang\|elixir\) *=/d' "${DEV_HOME}/.config/mise/config.toml"
   fi
+
   msg_ok "Removed the previously mise-managed BEAM toolchain"
 fi
 
@@ -311,10 +328,12 @@ install -d -m 0700 -o "$DEV_USER" -g "$DEV_USER" \
   "${DEV_HOME}/.config" \
   "${DEV_HOME}/.config/devbox" \
   "${DEV_HOME}/.cache"
+
 install -d -m 0755 -o "$DEV_USER" -g "$DEV_USER" \
   "${DEV_HOME}/.local" \
   "${DEV_HOME}/.local/bin" \
   "${DEV_HOME}/workspace"
+
 for developer_dir in \
   "${DEV_HOME}/.config" \
   "${DEV_HOME}/.cache" \
@@ -324,6 +343,7 @@ for developer_dir in \
     exit 1
   fi
 done
+
 msg_ok "Created Developer User"
 
 msg_info "Installing Codex CLI"
@@ -349,11 +369,10 @@ msg_ok "Installed mise"
 # Erlang and Elixir are installed system-wide under /opt/devbox and exposed
 # through plain symlinks in /usr/local/bin -- no version manager, no shims.
 #
-# This layout is the one that was verified to work end to end; routing the
-# same Erlang through mise's shims produced a BEAM that died during kernel
-# startup ("Kernel pid terminated (logger)", persistent_term:get(code_server)
-# badarg). Running the extracted release directly avoids that entirely, and
-# the interpreter no longer depends on anything under the developer's home.
+# Developer commands are always executed from DEV_HOME before privileges are
+# dropped. This avoids inheriting /root (or another inaccessible directory)
+# as the current working directory, which can make Erlang/OTP fail during
+# early kernel/logger startup.
 OTP_ROOT="/opt/devbox/otp"
 ELIXIR_ROOT="/opt/devbox/elixir"
 ERLANG_OTP_MAJOR="${ERLANG_VERSION%%.*}"
@@ -362,54 +381,69 @@ msg_info "Installing Erlang/OTP ${ERLANG_VERSION}"
 otp_arch="$(dpkg --print-architecture)"
 otp_os="ubuntu-$(. /etc/os-release && printf '%s' "${VERSION_ID}")"
 otp_tarball="/tmp/devbox-otp.tar.gz"
+
 curl_with_retry \
   "https://builds.hex.pm/builds/otp/${otp_arch}/${otp_os}/OTP-${ERLANG_VERSION}.tar.gz" \
   "$otp_tarball"
+
 rm -rf "$OTP_ROOT"
 install -d -m 0755 "$OTP_ROOT"
 tar -xzf "$otp_tarball" -C "$OTP_ROOT" --strip-components=1
 rm -f "$otp_tarball"
+
 # Install rewrites ROOTDIR in the launcher scripts to this prefix.
 (cd "$OTP_ROOT" && ./Install -minimal "$OTP_ROOT") >>"$LOG_FILE" 2>&1
+
 for otp_bin in erl erlc escript epmd dialyzer typer ct_run run_erl to_erl; do
   if [[ -x "${OTP_ROOT}/bin/${otp_bin}" ]]; then
     ln -sfn "${OTP_ROOT}/bin/${otp_bin}" "/usr/local/bin/${otp_bin}"
   fi
 done
 
-# Erlang writes ~/.erlang.cookie when the kernel application starts, so a
-# missing or unwritable HOME takes the whole runtime down. Create it up front
-# and verify the runtime as the developer, exactly how it will be used.
+# Erlang writes ~/.erlang.cookie when the kernel application starts. Create
+# it up front with correct ownership and permissions.
 if [[ ! -f "${DEV_HOME}/.erlang.cookie" ]]; then
   openssl rand -hex 32 >"${DEV_HOME}/.erlang.cookie"
 fi
+
 chown "$DEV_USER:$DEV_USER" "${DEV_HOME}/.erlang.cookie"
 chmod 0400 "${DEV_HOME}/.erlang.cookie"
 
+# Verify the runtime exactly as the developer will use it. run_as_dev changes
+# to DEV_HOME before runuser, so an inaccessible root CWD cannot leak into
+# the Erlang VM.
 if ! run_as_dev erl -noshell -eval 'halt(0).'; then
   msg_error "Erlang ${ERLANG_VERSION} was installed but cannot execute BEAM code."
   exit 1
 fi
+
 msg_ok "Installed Erlang/OTP ${ERLANG_VERSION}"
 
 msg_info "Installing Elixir ${ELIXIR_VERSION} and Phoenix ${PHOENIX_VERSION}"
-# Elixir's releases are published per OTP major version (elixir-otp-28.zip),
-# so deriving the artifact from ERLANG_VERSION keeps the two in lockstep.
+
+# Elixir's releases are published per OTP major version (elixir-otp-27.zip,
+# elixir-otp-28.zip, ...), so deriving the artifact from ERLANG_VERSION keeps
+# the two in lockstep.
 elixir_zip="/tmp/devbox-elixir.zip"
+
 curl_with_retry \
   "https://github.com/elixir-lang/elixir/releases/download/v${ELIXIR_VERSION}/elixir-otp-${ERLANG_OTP_MAJOR}.zip" \
   "$elixir_zip"
+
 rm -rf "$ELIXIR_ROOT"
 install -d -m 0755 "$ELIXIR_ROOT"
 unzip -q "$elixir_zip" -d "$ELIXIR_ROOT"
 rm -f "$elixir_zip"
 chmod 0755 "$ELIXIR_ROOT"/bin/*
+
 for elixir_bin in elixir elixirc iex mix; do
   ln -sfn "${ELIXIR_ROOT}/bin/${elixir_bin}" "/usr/local/bin/${elixir_bin}"
 done
+
 run_as_dev mix local.hex --force
 run_as_dev mix local.rebar --force
 run_as_dev mix archive.install hex phx_new "$PHOENIX_VERSION" --force
+
 msg_ok "Installed Elixir ${ELIXIR_VERSION} (OTP ${ERLANG_OTP_MAJOR}) and Phoenix ${PHOENIX_VERSION}"
 
 PG_DB_NAME="devbox"
@@ -417,11 +451,13 @@ PG_DB_USER="dev"
 PG_ENV_FILE="${DEV_HOME}/.config/devbox/postgres.env"
 
 msg_info "Configuring PostgreSQL Development Access"
+
 if [[ -r "$PG_ENV_FILE" ]] && grep -q '^PGPASSWORD=' "$PG_ENV_FILE"; then
   PG_DB_PASS="$(sed -n 's/^PGPASSWORD=//p' "$PG_ENV_FILE")"
 else
   PG_DB_PASS="$(openssl rand -hex 24)"
 fi
+
 if runuser -u postgres -- psql --tuples-only --no-align \
   --command "SELECT 1 FROM pg_roles WHERE rolname = '${PG_DB_USER}';" | grep -q '^1$'; then
   runuser -u postgres -- psql \
@@ -432,16 +468,19 @@ else
     --set ON_ERROR_STOP=on \
     --command "CREATE ROLE ${PG_DB_USER} WITH LOGIN PASSWORD '${PG_DB_PASS}' CREATEDB;"
 fi
+
 if ! runuser -u postgres -- psql --tuples-only --no-align \
   --command "SELECT 1 FROM pg_database WHERE datname = '${PG_DB_NAME}';" | grep -q '^1$'; then
   runuser -u postgres -- psql \
     --set ON_ERROR_STOP=on \
     --command "CREATE DATABASE ${PG_DB_NAME} OWNER ${PG_DB_USER};"
 fi
+
 cat <<EOF >"${DEV_HOME}/.pgpass"
 127.0.0.1:5432:*:${PG_DB_USER}:${PG_DB_PASS}
 localhost:5432:*:${PG_DB_USER}:${PG_DB_PASS}
 EOF
+
 cat <<EOF >"$PG_ENV_FILE"
 PGHOST=127.0.0.1
 PGPORT=5432
@@ -450,19 +489,26 @@ PGPASSWORD=${PG_DB_PASS}
 PGDATABASE=${PG_DB_NAME}
 DATABASE_URL=ecto://${PG_DB_USER}:${PG_DB_PASS}@127.0.0.1/${PG_DB_NAME}
 EOF
+
 chown "$DEV_USER:$DEV_USER" "${DEV_HOME}/.pgpass" "$PG_ENV_FILE"
 chmod 0600 "${DEV_HOME}/.pgpass" "$PG_ENV_FILE"
 unset PG_DB_PASS
+
 msg_ok "Configured PostgreSQL Development Access"
 
 msg_info "Configuring Development Environment"
+
 fd_binary="$(command -v fdfind || true)"
+
 if [[ -z "$fd_binary" && -x /usr/lib/cargo/bin/fd ]]; then
   fd_binary="/usr/lib/cargo/bin/fd"
 fi
+
 if [[ -z "$fd_binary" ]]; then
   msg_error "No fd binary found"
+  exit 1
 fi
+
 ln -sfn "$fd_binary" /usr/local/bin/fd
 
 cat <<'EOF' >/etc/profile.d/devbox.sh
@@ -485,6 +531,7 @@ agent_instructions() {
 - Never force-push unless the user explicitly requests it.
 EOF
 }
+
 agent_instructions >"${DEV_HOME}/.codex/AGENTS.md"
 agent_instructions >"${DEV_HOME}/.claude/CLAUDE.md"
 
@@ -596,10 +643,12 @@ chown "$DEV_USER:$DEV_USER" \
   "${DEV_HOME}/.codex/config.toml" \
   "${DEV_HOME}/.claude/CLAUDE.md" \
   "${DEV_HOME}/.claude/settings.json"
+
 chmod 0644 \
   "${DEV_HOME}/.bashrc" \
   "${DEV_HOME}/.codex/AGENTS.md" \
   "${DEV_HOME}/.claude/CLAUDE.md"
+
 chmod 0600 \
   "${DEV_HOME}/.codex/config.toml" \
   "${DEV_HOME}/.claude/settings.json"
@@ -608,9 +657,11 @@ run_as_dev git lfs install --skip-repo
 run_as_dev git config --global init.defaultBranch main
 run_as_dev git config --global pull.ff only
 run_as_dev git config --global push.autoSetupRemote true
+
 msg_ok "Configured Development Environment"
 
 msg_info "Installing DevBox Manager"
+
 cat <<'MANAGER' >/usr/local/bin/devbox
 #!/usr/bin/env bash
 
@@ -686,14 +737,21 @@ require_dev() {
     die "Run this command as ${DEV_USER}."
 }
 
+# runuser preserves the current working directory. When devbox is invoked by
+# root from /root, that directory is not accessible to the developer user.
+# Execute root->dev transitions from DEV_HOME so runtimes such as Erlang never
+# inherit an inaccessible CWD.
 run_as_dev() {
   if [[ "$EUID" -eq 0 ]]; then
-    runuser -u "$DEV_USER" -- env \
-      HOME="$DEV_HOME" \
-      USER="$DEV_USER" \
-      LOGNAME="$DEV_USER" \
-      PATH="${DEV_HOME}/.local/bin:/usr/local/bin:/usr/bin:/bin" \
-      "$@"
+    (
+      cd "$DEV_HOME"
+      exec runuser -u "$DEV_USER" -- env \
+        HOME="$DEV_HOME" \
+        USER="$DEV_USER" \
+        LOGNAME="$DEV_USER" \
+        PATH="${DEV_HOME}/.local/bin:/usr/local/bin:/usr/bin:/bin" \
+        "$@"
+    )
   else
     "$@"
   fi
@@ -718,25 +776,30 @@ validate_public_key() {
   local key_file
 
   [[ -n "$key" && "$key" != *$'\n'* && "$key" != *$'\r'* ]] || return 1
+
   [[ "$key" =~ ^(ssh-ed25519|ssh-rsa|ecdsa-sha2-nistp(256|384|521)|sk-ssh-ed25519@openssh.com|sk-ecdsa-sha2-nistp256@openssh.com)[[:space:]] ]] ||
     return 1
 
   key_file="$(mktemp)"
   chmod 0600 "$key_file"
   printf '%s\n' "$key" >"$key_file"
+
   local status
   if ssh-keygen -l -f "$key_file" >/dev/null 2>&1; then
     status=0
   else
     status=$?
   fi
+
   rm -f "$key_file"
   return "$status"
 }
 
 write_ssh_config() {
   require_root
+
   install -d -m 0755 /etc/ssh/sshd_config.d
+
   cat <<EOF >"$SSH_CONFIG"
 PermitRootLogin no
 PasswordAuthentication no
@@ -758,6 +821,7 @@ MaxAuthTries 3
 ClientAliveInterval 60
 ClientAliveCountMax 3
 EOF
+
   chmod 0644 "$SSH_CONFIG"
   install -d -m 0755 /run/sshd
   /usr/sbin/sshd -t
@@ -768,6 +832,7 @@ ssh_status() {
   local listener_status="disabled"
 
   [[ -s "$SSH_KEY_FILE" ]] && key_status="configured"
+
   if systemctl is-active --quiet ssh.service ||
     systemctl is-active --quiet ssh.socket; then
     listener_status="enabled"
@@ -775,6 +840,7 @@ ssh_status() {
 
   printf 'Public key: %s\n' "$key_status"
   printf 'SSH listener: %s\n' "$listener_status"
+
   if [[ -s "$SSH_KEY_FILE" ]]; then
     ssh-keygen -l -f "$SSH_KEY_FILE"
   fi
@@ -782,7 +848,9 @@ ssh_status() {
 
 ssh_setup() {
   require_root
-  [[ -t 0 && -t 1 ]] || die "SSH setup requires an interactive terminal."
+
+  [[ -t 0 && -t 1 ]] ||
+    die "SSH setup requires an interactive terminal."
 
   cat <<'EOF'
 Create the private key on the Mac, Windows PC, or SSH client that will access
@@ -792,23 +860,31 @@ EOF
 
   local public_key=""
   read -r -p "Client public key: " public_key
-  validate_public_key "$public_key" || die "The public key is invalid."
+
+  validate_public_key "$public_key" ||
+    die "The public key is invalid."
 
   install -d -m 0700 -o "$DEV_USER" -g "$DEV_USER" "${DEV_HOME}/.ssh"
+
   printf '%s\n' "$public_key" >"$SSH_KEY_FILE"
   chown "$DEV_USER:$DEV_USER" "$SSH_KEY_FILE"
   chmod 0600 "$SSH_KEY_FILE"
+
   write_ssh_config
+
   systemctl disable --now ssh.socket >/dev/null 2>&1 || true
   systemctl enable --now ssh.service
+
   ok "SSH enabled for ${DEV_USER}"
   ssh-keygen -l -f "$SSH_KEY_FILE"
 }
 
 ssh_disable() {
   require_root
+
   systemctl disable --now ssh.socket >/dev/null 2>&1 || true
   systemctl disable --now ssh.service >/dev/null 2>&1 || true
+
   ok "SSH listener disabled; authorized_keys was retained."
 }
 
@@ -823,6 +899,7 @@ claude_is_authenticated() {
 
 agents_auth_status() {
   require_dev
+
   local status=0
 
   if codex_is_authenticated; then
@@ -850,6 +927,7 @@ agents_auth_login() {
   else
     info "Signing in to Codex using the device-code flow"
     codex login --device-auth
+
     if [[ -f "${HOME}/.codex/auth.json" ]]; then
       chmod 0600 "${HOME}/.codex/auth.json"
     fi
@@ -859,11 +937,11 @@ agents_auth_login() {
     ok "Claude CLI is already authenticated"
   else
     info "Signing in to Claude"
-    # This box has no browser, so the callback server is unreachable and the
-    # browser shows a login code to paste back here instead.
     info "Open the printed URL on another device; if it shows a login code,"
     info "paste that code back at the prompt here."
+
     claude auth login
+
     if [[ -f "${HOME}/.claude/.credentials.json" ]]; then
       chmod 0600 "${HOME}/.claude/.credentials.json"
     fi
@@ -874,8 +952,10 @@ agents_auth_login() {
 
 agents_auth_logout() {
   require_dev
+
   codex logout || warn "Codex logout reported an error"
   claude auth logout || warn "Claude logout reported an error"
+
   ok "Signed out of Codex and Claude"
 }
 
@@ -891,6 +971,7 @@ is_managed_openrouter_file() {
 
 openrouter_status() {
   require_dev
+
   local model=""
   local status=0
 
@@ -924,6 +1005,7 @@ openrouter_status() {
 
 openrouter_setup() {
   require_dev
+
   [[ -t 0 && -t 1 ]] ||
     die "OpenRouter setup requires an interactive terminal."
 
@@ -939,11 +1021,13 @@ openrouter_setup() {
 
   read -r -s -p "OpenRouter API key: " api_key
   printf '\n'
+
   [[ "$api_key" == sk-or-* ]] ||
     die "The API key must start with sk-or-."
 
   read -r -p "OpenRouter model [~openai/gpt-latest]: " model
   model="${model:-~openai/gpt-latest}"
+
   [[ "$model" =~ ^[A-Za-z0-9._~:/-]+$ ]] ||
     die "The OpenRouter model ID is invalid."
 
@@ -951,13 +1035,16 @@ openrouter_setup() {
     rm -f "$LEGACY_OPENROUTER_WRAPPER"
   fi
 
-  install -d -m 0700 "$STATE_DIR" "${DEV_HOME}/.codex" \
+  install -d -m 0700 \
+    "$STATE_DIR" \
+    "${DEV_HOME}/.codex" \
     "${DEV_HOME}/.local/bin"
 
   {
     printf '# Managed by devbox openrouter setup\n'
     printf 'export OPENROUTER_API_KEY=%q\n' "$api_key"
   } >"$OPENROUTER_ENV"
+
   chmod 0600 "$OPENROUTER_ENV"
 
   cat >"$OPENROUTER_PROFILE" <<EOF
@@ -971,6 +1058,7 @@ base_url = "https://openrouter.ai/api/v1"
 env_key = "OPENROUTER_API_KEY"
 wire_api = "responses"
 EOF
+
   chmod 0600 "$OPENROUTER_PROFILE"
 
   cat >"$OPENROUTER_WRAPPER" <<'EOF'
@@ -979,30 +1067,38 @@ EOF
 set -Eeuo pipefail
 
 readonly openrouter_env="${HOME}/.config/devbox/openrouter.env"
+
 [[ -r "$openrouter_env" ]] || {
   printf 'error - OpenRouter API key is not configured\n' >&2
   exit 1
 }
+
 # shellcheck source=/dev/null
 source "$openrouter_env"
 
 system_codex="$(PATH=/usr/local/bin:/usr/bin:/bin command -v codex || true)"
+
 [[ -n "$system_codex" && "$system_codex" != "$0" ]] || {
   printf 'error - System Codex CLI was not found\n' >&2
   exit 1
 }
+
 exec "$system_codex" --profile openrouter "$@"
 EOF
+
   chmod 0700 "$OPENROUTER_WRAPPER"
 
   unset api_key
+
   ok "OpenRouter fallback configured"
   info "Use codex normally for ChatGPT, then codex-openrouter as a fallback."
+
   openrouter_status
 }
 
 openrouter_disable() {
   require_dev
+
   local path
 
   for path in \
@@ -1016,11 +1112,13 @@ openrouter_disable() {
       warn "Retained unmanaged file: ${path}"
     fi
   done
+
   ok "OpenRouter disabled and its managed API key removed"
 }
 
 github_status() {
   require_dev
+
   local status=0
 
   if gh auth status --hostname github.com >/dev/null 2>&1; then
@@ -1029,6 +1127,7 @@ github_status() {
     warn "GitHub is not authenticated"
     status=1
   fi
+
   if [[ -n "$(git config --global user.name || true)" ]] &&
     [[ -n "$(git config --global user.email || true)" ]]; then
     printf 'Git name: %s\n' "$(git config --global user.name)"
@@ -1037,11 +1136,13 @@ github_status() {
     warn "Git identity is incomplete"
     status=1
   fi
+
   return "$status"
 }
 
 github_setup() {
   require_dev
+
   local account_id
   local account_login
   local default_email
@@ -1055,6 +1156,7 @@ github_setup() {
       --git-protocol https \
       --web
   fi
+
   gh auth setup-git --hostname github.com
 
   account_login="$(gh api user --jq '.login')"
@@ -1064,32 +1166,38 @@ github_setup() {
 
   read -r -p "Git commit name [${default_name}]: " git_name
   read -r -p "Git commit email [${default_email}]: " git_email
+
   git config --global user.name "${git_name:-$default_name}"
   git config --global user.email "${git_email:-$default_email}"
   git config --global credential.https://github.com.helper ""
   git config --global --add \
     credential.https://github.com.helper \
     "!/usr/bin/gh auth git-credential"
+
   ok "GitHub and Git identity configured"
 }
 
 keys_status() {
   require_dev
+
   local public_key="${HOME}/.ssh/id_ed25519.pub"
 
   if [[ ! -s "$public_key" ]]; then
     warn "No Dev Box identity key exists"
     return 1
   fi
+
   ssh-keygen -l -f "$public_key"
   printf '\n%s\n' "$(cat "$public_key")"
 }
 
 keys_generate() {
   require_dev
+
   local private_key="${HOME}/.ssh/id_ed25519"
 
   install -d -m 0700 "${HOME}/.ssh"
+
   if [[ -e "$private_key" || -e "${private_key}.pub" ]]; then
     warn "Identity key already exists"
     keys_status
@@ -1097,24 +1205,32 @@ keys_generate() {
   fi
 
   info "Generating an outbound Ed25519 identity key"
+
   ssh-keygen \
     -t ed25519 \
     -a 100 \
     -C "${DEV_USER}@$(hostname)" \
     -f "$private_key"
+
   chmod 0600 "$private_key"
   chmod 0644 "${private_key}.pub"
+
   keys_status
 }
 
 keys_upload_github() {
   require_dev
+
   local public_key="${HOME}/.ssh/id_ed25519.pub"
 
-  [[ -s "$public_key" ]] || die "Generate the identity key first."
+  [[ -s "$public_key" ]] ||
+    die "Generate the identity key first."
+
   gh auth status --hostname github.com >/dev/null 2>&1 ||
     die "Configure GitHub first."
+
   gh ssh-key add "$public_key" --title "$(hostname)-devbox"
+
   ok "Uploaded identity key to GitHub"
 }
 
@@ -1143,6 +1259,7 @@ EOF
 doctor() {
   local command
   local status=0
+
   local commands=(
     claude
     codex
@@ -1174,10 +1291,20 @@ doctor() {
     warn "Unexpected Node.js version: $(node --version 2>/dev/null || true)"
     status=1
   fi
+
   if systemctl is-active --quiet postgresql.service; then
     ok "PostgreSQL service"
   else
     warn "PostgreSQL service is not active"
+    status=1
+  fi
+
+  # Run Erlang explicitly before Elixir so a BEAM runtime problem is reported
+  # directly rather than only surfacing through elixir/mix.
+  if run_as_dev erl -noshell -eval 'halt(0).'; then
+    ok "Erlang runtime"
+  else
+    warn "Erlang runtime failed"
     status=1
   fi
 
@@ -1193,6 +1320,7 @@ doctor() {
   else
     warn "Codex CLI is not authenticated (run: devbox auth login)"
   fi
+
   if run_as_dev sh -lc 'claude auth status >/dev/null 2>&1'; then
     ok "Claude CLI is authenticated"
   else
@@ -1200,37 +1328,53 @@ doctor() {
   fi
 
   ssh_status
+
   return "$status"
 }
 
 update_devbox() {
   require_root
+
   local branch="${1:-$DEFAULT_UPDATE_BRANCH}"
   local repo_url="${DEVBOX_REPO_URL:-$DEFAULT_REPO_URL}"
   local installer_url="${repo_url%/}/${branch}/devbox/install.sh"
   local installer
 
   installer="$(mktemp)"
+
   info "Downloading installer from branch '${branch}'"
-  if ! curl -fsSL --connect-timeout 15 --retry 5 --retry-connrefused \
-    --retry-delay 3 -o "$installer" "$installer_url"; then
+
+  if ! curl -fsSL \
+    --connect-timeout 15 \
+    --retry 5 \
+    --retry-connrefused \
+    --retry-delay 3 \
+    -o "$installer" \
+    "$installer_url"; then
     rm -f "$installer"
     die "Failed to download installer from ${installer_url}"
   fi
+
   chmod 0755 "$installer"
 
   info "Re-running the installer to apply updates"
+
   DEVBOX_REPO_URL="$repo_url" bash "$installer"
+
   rm -f "$installer"
+
   ok "Updated from branch '${branch}'"
+
   doctor
 }
 
 onboard() {
   require_dev
+
   [[ -t 0 && -t 1 ]] || return 0
 
   install -d -m 0700 "$STATE_DIR"
+
   cat <<'EOF'
 DevBox onboarding
 
@@ -1245,17 +1389,22 @@ EOF
   if prompt_yes_no "Configure inbound SSH now?"; then
     sudo -n /usr/local/bin/devbox ssh setup
   fi
+
   if prompt_yes_no "Sign in to Codex and Claude now?"; then
     agents_auth_login
   fi
+
   if prompt_yes_no "Configure OpenRouter as a Codex fallback?" "no"; then
     openrouter_setup
   fi
+
   if prompt_yes_no "Configure GitHub now?"; then
     github_setup
   fi
+
   if prompt_yes_no "Generate a DevBox identity key?" "no"; then
     keys_generate
+
     if gh auth status --hostname github.com >/dev/null 2>&1 &&
       prompt_yes_no "Upload this public key to GitHub?" "no"; then
       keys_upload_github
@@ -1263,9 +1412,13 @@ EOF
   fi
 
   remote_info
-  doctor || warn "Doctor found optional or required items that need attention"
+
+  doctor ||
+    warn "Doctor found optional or required items that need attention"
+
   : >"$ONBOARDING_MARKER"
   chmod 0600 "$ONBOARDING_MARKER"
+
   ok "Onboarding completed"
 }
 
@@ -1274,84 +1427,89 @@ main() {
   local subcommand="${2:-}"
 
   case "$command:$subcommand" in
-    onboard:)
-      onboard
-      ;;
-    ssh:status)
-      ssh_status
-      ;;
-    ssh:setup)
-      ssh_setup
-      ;;
-    ssh:disable)
-      ssh_disable
-      ;;
-    auth:status)
-      agents_auth_status
-      ;;
-    auth:login)
-      agents_auth_login
-      ;;
-    auth:logout)
-      agents_auth_logout
-      ;;
-    openrouter:status)
-      openrouter_status
-      ;;
-    openrouter:setup)
-      openrouter_setup
-      ;;
-    openrouter:disable)
-      openrouter_disable
-      ;;
-    github:status)
-      github_status
-      ;;
-    github:setup)
-      github_setup
-      ;;
-    keys:status)
-      keys_status
-      ;;
-    keys:generate)
-      keys_generate
-      ;;
-    keys:upload-github)
-      keys_upload_github
-      ;;
-    remote-info:)
-      remote_info
-      ;;
-    doctor:)
-      doctor
-      ;;
-    update:*)
-      update_devbox "$subcommand"
-      ;;
-    help:|-h:|--help:)
-      usage
-      ;;
-    *)
-      usage >&2
-      return 2
-      ;;
+  onboard:)
+    onboard
+    ;;
+  ssh:status)
+    ssh_status
+    ;;
+  ssh:setup)
+    ssh_setup
+    ;;
+  ssh:disable)
+    ssh_disable
+    ;;
+  auth:status)
+    agents_auth_status
+    ;;
+  auth:login)
+    agents_auth_login
+    ;;
+  auth:logout)
+    agents_auth_logout
+    ;;
+  openrouter:status)
+    openrouter_status
+    ;;
+  openrouter:setup)
+    openrouter_setup
+    ;;
+  openrouter:disable)
+    openrouter_disable
+    ;;
+  github:status)
+    github_status
+    ;;
+  github:setup)
+    github_setup
+    ;;
+  keys:status)
+    keys_status
+    ;;
+  keys:generate)
+    keys_generate
+    ;;
+  keys:upload-github)
+    keys_upload_github
+    ;;
+  remote-info:)
+    remote_info
+    ;;
+  doctor:)
+    doctor
+    ;;
+  update:*)
+    update_devbox "$subcommand"
+    ;;
+  help: | -h: | --help:)
+    usage
+    ;;
+  *)
+    usage >&2
+    return 2
+    ;;
   esac
 }
 
 main "$@"
 MANAGER
+
 chmod 0755 /usr/local/bin/devbox
 
 cat <<EOF >/etc/sudoers.d/90-devbox
 ${DEV_USER} ALL=(root) NOPASSWD: /usr/local/bin/devbox ssh setup
 ${DEV_USER} ALL=(root) NOPASSWD: /usr/local/bin/devbox ssh disable
 EOF
+
 chmod 0440 /etc/sudoers.d/90-devbox
 visudo -cf /etc/sudoers.d/90-devbox
+
 msg_ok "Installed DevBox Manager"
 
 msg_info "Securing SSH"
+
 install -d -m 0755 /etc/ssh/sshd_config.d
+
 cat <<EOF >/etc/ssh/sshd_config.d/00-devbox.conf
 PermitRootLogin no
 PasswordAuthentication no
@@ -1373,6 +1531,7 @@ MaxAuthTries 3
 ClientAliveInterval 60
 ClientAliveCountMax 3
 EOF
+
 chmod 0644 /etc/ssh/sshd_config.d/00-devbox.conf
 install -d -m 0755 /run/sshd
 /usr/sbin/sshd -t
@@ -1381,47 +1540,61 @@ if [[ -n "${SSH_AUTHORIZED_KEY:-}" ]]; then
   printf '%s\n' "$SSH_AUTHORIZED_KEY" >"${DEV_HOME}/.ssh/authorized_keys"
   chown "$DEV_USER:$DEV_USER" "${DEV_HOME}/.ssh/authorized_keys"
   chmod 0600 "${DEV_HOME}/.ssh/authorized_keys"
+
   systemctl disable --now ssh.socket >/dev/null 2>&1 || true
   systemctl enable --now ssh.service
 elif [[ ! -s "${DEV_HOME}/.ssh/authorized_keys" ]]; then
   systemctl disable --now ssh.socket >/dev/null 2>&1 || true
   systemctl disable --now ssh.service >/dev/null 2>&1 || true
 fi
+
 msg_ok "Secured SSH"
 
 msg_info "Enabling Security Updates"
+
 cat <<'EOF' >/etc/apt/apt.conf.d/20auto-upgrades
 APT::Periodic::Update-Package-Lists "1";
 APT::Periodic::Unattended-Upgrade "1";
 EOF
+
 systemctl enable --now apt-daily.timer apt-daily-upgrade.timer
+
 msg_ok "Enabled Security Updates"
 
 msg_info "Validating Installation"
+
 node --version
 npm --version
 codex --version
 claude --version
+
 run_as_dev erl -noshell -eval 'halt(0).'
 run_as_dev elixir --version
 run_as_dev mix phx.new --version
+
 systemctl is-active --quiet postgresql.service
+
 run_as_dev psql \
   --host 127.0.0.1 \
   --username "$PG_DB_USER" \
   --dbname "$PG_DB_NAME" \
   --no-password \
   --command "SELECT 1;" >/dev/null
+
 /usr/local/bin/devbox doctor
+
 msg_ok "Validated Installation"
 
 msg_info "Cleaning Up"
+
 apt-get -y autoremove >>"$LOG_FILE" 2>&1 || true
 apt-get clean >>"$LOG_FILE" 2>&1 || true
 rm -f "$LOG_FILE"
+
 msg_ok "Cleaned Up"
 
 msg_ok "Completed Successfully!"
+
 echo -e "${GN}DevBox setup has been successfully initialized!${CL}"
 echo -e "${YW}From the LXC host, enter the container's console (e.g. 'pct enter <CTID>' on Proxmox VE, or 'lxc exec <name> -- bash' on LXD/Incus), then run:${CL}"
 echo -e "  sudo -iu dev"
