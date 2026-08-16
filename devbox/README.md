@@ -131,9 +131,13 @@ unprivilegiert. Kleinere Container funktionieren ebenfalls.
 
 ### Betriebssystem: Ubuntu LTS erforderlich
 
-Die DevBox setzt **Ubuntu 24.04 LTS** voraus (22.04 und 20.04 funktionieren
-ebenfalls); amd64 und arm64 werden unterstützt. Der Installer prüft das zu
-Beginn und bricht mit einer klaren Meldung ab, falls ein anderes System läuft.
+Die DevBox setzt **Ubuntu 24.04 LTS** voraus (22.04 funktioniert ebenfalls);
+amd64 und arm64 werden unterstützt. Der Installer prüft das zu Beginn und
+bricht mit einer klaren Meldung ab, falls ein anderes System läuft.
+
+Ubuntu 20.04 wird **nicht** unterstützt: für OTP 29.0.5 existiert kein
+passendes vorkompiliertes Artefakt für 20.04, das Standardprofil würde dort
+also grundsätzlich fehlschlagen.
 
 Der Grund ist Erlang/OTP: builds.hex.pm veröffentlicht vorkompilierte
 OTP-Builds ausschließlich für Ubuntu (für amd64 und arm64). Auf Debian gäbe es
