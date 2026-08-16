@@ -1334,6 +1334,20 @@ devbox_status_composes_existing_status_commands() {
     grep -Fq 'status' "$NORM_MANAGER"
 }
 
+# P1.4: downloaded artifacts without a checksum to verify (OTP/Elixir are
+# checksum-verified separately; the mise installer script isn't) used
+# predictable, fixed /tmp paths - unpredictable via mktemp closes that gap
+# for the artifacts this PR can reasonably harden without taking on an
+# external, frequently-changing checksum to maintain for mise.run itself.
+temp_artifact_downloads_use_unpredictable_paths() {
+  grep -Fq 'otp_tarball="$(mktemp)"' "$FEATURE_ELIXIR" &&
+    grep -Fq 'elixir_zip="$(mktemp)"' "$FEATURE_ELIXIR" &&
+    grep -Fq 'mise_installer="$(mktemp)"' "$FEATURE_TOOLING" &&
+    ! grep -Fq '/tmp/devbox-otp.tar.gz' "$FEATURE_ELIXIR" &&
+    ! grep -Fq '/tmp/devbox-elixir.zip' "$FEATURE_ELIXIR" &&
+    ! grep -Fq '/tmp/devbox-mise-install.sh' "$FEATURE_TOOLING"
+}
+
 # P1.3: install.sh resolves DEVBOX_REF to a commit SHA once, up front, so
 # every module fetch in this run (lib/*.sh, features/*.sh, bin/devbox.sh -
 # ~10 separate downloads) uses the exact same commit even if the branch
@@ -1877,6 +1891,7 @@ run_test "update and rollback round trip restores the active ref" update_and_rol
 run_test "LXC integration test exercises the curl | bash path" lxc_integration_test_exercises_the_curl_pipe_path
 run_test "install pins module fetches to a resolved commit" install_pins_module_fetches_to_a_resolved_commit
 run_test "install falls back to the ref when resolution fails" install_falls_back_to_the_ref_when_resolution_fails
+run_test "temp artifact downloads use unpredictable paths" temp_artifact_downloads_use_unpredictable_paths
 run_test "doctor checks root state version" doctor_checks_root_state_version
 run_test "Happy daemon starts at boot" happy_daemon_starts_at_boot
 run_test "Happy .bashrc start remains a fallback" happy_bashrc_start_remains_as_fallback
