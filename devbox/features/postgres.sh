@@ -92,12 +92,15 @@ configure_postgres_dev_access() {
         --command "CREATE DATABASE ${PG_DB_NAME} OWNER ${PG_DB_USER};"
   fi
 
-  cat <<EOF >"${DEV_HOME}/.pgpass"
+  local pgpass_content
+  pgpass_content="$(cat <<EOF
 127.0.0.1:5432:*:${PG_DB_USER}:${PG_DB_PASS}
 localhost:5432:*:${PG_DB_USER}:${PG_DB_PASS}
 EOF
+  )"
 
-  cat <<EOF >"$PG_ENV_FILE"
+  local pg_env_content
+  pg_env_content="$(cat <<EOF
 PGHOST=127.0.0.1
 PGPORT=5432
 PGUSER=${PG_DB_USER}
@@ -105,16 +108,10 @@ PGPASSWORD=${PG_DB_PASS}
 PGDATABASE=${PG_DB_NAME}
 DATABASE_URL=ecto://${PG_DB_USER}:${PG_DB_PASS}@127.0.0.1/${PG_DB_NAME}
 EOF
+  )"
 
-  chown \
-    "$DEV_USER:$DEV_USER" \
-    "${DEV_HOME}/.pgpass" \
-    "$PG_ENV_FILE"
-
-  chmod \
-    0600 \
-    "${DEV_HOME}/.pgpass" \
-    "$PG_ENV_FILE"
+  write_root_owned_file "${DEV_HOME}/.pgpass" 0600 "${pgpass_content}"$'\n'
+  write_root_owned_file "$PG_ENV_FILE" 0600 "${pg_env_content}"$'\n'
 
   unset PG_DB_PASS
 

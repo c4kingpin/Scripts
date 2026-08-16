@@ -214,6 +214,44 @@ run_as_dev() {
   fi
 }
 
+# P0.1: dev owns everything under $DEV_HOME, so a root-executed command
+# that blindly creates/writes into a dev-controlled path can be redirected
+# by a symlink dev planted there in advance. Reject that outright instead
+# of following it.
+reject_symlink() {
+  local path="$1"
+
+  [[ ! -L "$path" ]] ||
+    die "Refusing to operate on ${path}: it is a symlink"
+}
+
+# Writes $content to $target atomically and symlink-safely: rejects an
+# existing symlink or other non-regular-file target, then writes via a
+# same-directory tempfile and renames it into place (rename() replaces a
+# symlink at the destination rather than following it, so even a target
+# re-created between the check above and this write can't redirect the
+# write outside $target's directory).
+write_root_owned_file() {
+  local target="$1"
+  local mode="$2"
+  local content="$3"
+  local tmp
+
+  reject_symlink "$target"
+
+  [[ ! -e "$target" || -f "$target" ]] ||
+    die "Refusing to write ${target}: exists but is not a regular file"
+
+  tmp="$(mktemp "${target}.XXXXXX")"
+
+  printf '%s' "$content" >"$tmp"
+
+  chown "${DEV_USER}:${DEV_USER}" "$tmp"
+  chmod "$mode" "$tmp"
+
+  mv -f "$tmp" "$target"
+}
+
 prompt_yes_no() {
   local prompt="$1"
   local default="${2:-yes}"
@@ -448,6 +486,8 @@ EOF
   validate_public_key "$public_key" ||
     die "The public key is invalid."
 
+  reject_symlink "${DEV_HOME}/.ssh"
+
   install \
     -d \
     -m 0700 \
@@ -455,17 +495,10 @@ EOF
     -g "$DEV_USER" \
     "${DEV_HOME}/.ssh"
 
-  printf '%s\n' \
-    "$public_key" \
-    >"$SSH_KEY_FILE"
-
-  chown \
-    "$DEV_USER:$DEV_USER" \
-    "$SSH_KEY_FILE"
-
-  chmod \
+  write_root_owned_file \
+    "$SSH_KEY_FILE" \
     0600 \
-    "$SSH_KEY_FILE"
+    "${public_key}"$'\n'
 
   rm \
     -f \
@@ -485,6 +518,8 @@ EOF
 ssh_disable() {
   require_root
 
+  reject_symlink "$STATE_DIR"
+
   install \
     -d \
     -m 0700 \
@@ -492,15 +527,10 @@ ssh_disable() {
     -g "$DEV_USER" \
     "$STATE_DIR"
 
-  : >"$SSH_DISABLED_MARKER"
-
-  chown \
-    "$DEV_USER:$DEV_USER" \
-    "$SSH_DISABLED_MARKER"
-
-  chmod \
+  write_root_owned_file \
+    "$SSH_DISABLED_MARKER" \
     0600 \
-    "$SSH_DISABLED_MARKER"
+    ""
 
   write_dev_ssh_policy disabled
   apply_sshd_config no
