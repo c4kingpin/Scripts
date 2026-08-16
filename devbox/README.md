@@ -636,7 +636,7 @@ bash -n install.sh bin/devbox.sh lib/*.sh features/*.sh tests/*.sh
 
 bash tests/test-devbox.sh
 
-shellcheck -x --exclude=SC1090,SC1091,SC2086,SC2154 \
+shellcheck -x --exclude=SC1090,SC1091 \
   install.sh \
   bin/devbox.sh \
   lib/*.sh \

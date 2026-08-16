@@ -27,7 +27,7 @@ Lokal:
 find . -name '*.sh' -not -path './.git/*' -print0 | xargs -0 -n1 bash -n
 
 find . -name '*.sh' -not -path './.git/*' -print0 |
-  xargs -0 shellcheck -x --exclude=SC1090,SC1091,SC2086,SC2154
+  xargs -0 shellcheck -x --exclude=SC1090,SC1091
 
 bash devbox/tests/test-devbox.sh
 ```
