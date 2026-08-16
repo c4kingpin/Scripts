@@ -1691,6 +1691,77 @@ postgres_and_elixir_writes_use_symlink_safe_helper() {
     ! grep -Fq 'cat <<EOF >"$PG_ENV_FILE"' "$FEATURE_POSTGRES"
 }
 
+# P2.1: DEVBOX_VERSION alone doesn't uniquely identify installed code, so
+# devbox version/status also report the installed commit (persisted by
+# install.sh, P1.3).
+devbox_version_reports_the_installed_commit() {
+  local text_output json_output
+
+  text_output="$("$MANAGER" version)"
+  json_output="$("$MANAGER" version --json)"
+
+  grep -Fq 'Commit:' <<<"$text_output" &&
+    jq -e '.commit' <<<"$json_output" >/dev/null &&
+    grep -Fq 'installed_commit' "$MANAGER"
+}
+
+# update --check on a branch used to only say "not version-compared"; it
+# now resolves the branch's current remote commit and compares it against
+# the locally installed one, so a real "up to date"/"update available"
+# state exists for branch updates too, not just releases.
+update_check_compares_branch_commits() {
+  local root_state="${TEST_TMP}/update-check-commit-root-state"
+  local bin_dir="${TEST_TMP}/update-check-commit-bin"
+  local manager_functions="${TEST_TMP}/update-check-commit-manager-functions.sh"
+  local up_to_date_output stale_output
+
+  mkdir -p "$root_state" "$bin_dir"
+
+  cat <<'EOF' >"${bin_dir}/curl"
+#!/usr/bin/env bash
+url="${!#}"
+case "$url" in
+*/commits/feature-branch)
+  echo '{"sha":"cccccccccccccccccccccccccccccccccccccccc"}'
+  ;;
+*)
+  echo "unexpected curl invocation: $url" >&2
+  exit 22
+  ;;
+esac
+EOF
+  chmod 0755 "${bin_dir}/curl"
+
+  sed 's/^readonly //' "$MANAGER" | head -n -1 >"$manager_functions"
+
+  printf 'cccccccccccccccccccccccccccccccccccccccc\n' >"${root_state}/commit"
+  up_to_date_output="$(
+    PATH="${bin_dir}:/usr/bin:/bin" \
+    bash -c '
+      # shellcheck source=/dev/null
+      source "'"$manager_functions"'"
+      ROOT_COMMIT_FILE="'"${root_state}/commit"'"
+      require_root() { :; }
+      update_devbox --branch feature-branch --check
+    '
+  )"
+
+  printf 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n' >"${root_state}/commit"
+  stale_output="$(
+    PATH="${bin_dir}:/usr/bin:/bin" \
+    bash -c '
+      # shellcheck source=/dev/null
+      source "'"$manager_functions"'"
+      ROOT_COMMIT_FILE="'"${root_state}/commit"'"
+      require_root() { :; }
+      update_devbox --branch feature-branch --check
+    '
+  )"
+
+  grep -Fq "Already up to date (branch 'feature-branch' at cccccccccccccccccccccccccccccccccccccccc)" <<<"$up_to_date_output" &&
+    grep -Fq "Update available on branch 'feature-branch': aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa -> cccccccccccccccccccccccccccccccccccccccc" <<<"$stale_output"
+}
+
 doctor_checks_root_state_version() {
   local check_block
   check_block="$(sed -n '/if \[\[ -r "\$ROOT_VERSION_FILE" \]\]; then/,/^  fi$/p' "$MANAGER")"
@@ -1951,6 +2022,8 @@ run_test "install falls back to the ref when resolution fails" install_falls_bac
 run_test "temp artifact downloads use unpredictable paths" temp_artifact_downloads_use_unpredictable_paths
 run_test "postgres password reuse validates the persisted format" postgres_password_reuse_validates_the_persisted_format
 run_test "postgres password is validated before SQL interpolation" postgres_password_is_validated_before_sql_interpolation
+run_test "devbox version reports the installed commit" devbox_version_reports_the_installed_commit
+run_test "update --check compares branch commits" update_check_compares_branch_commits
 run_test "doctor checks root state version" doctor_checks_root_state_version
 run_test "Happy daemon starts at boot" happy_daemon_starts_at_boot
 run_test "Happy .bashrc start remains a fallback" happy_bashrc_start_remains_as_fallback
