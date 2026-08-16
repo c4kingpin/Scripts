@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# PostgreSQL: enabling the system service, and provisioning the dev role,
-# database and credentials the dev user needs to reach it.
+# PostgreSQL: the optional "postgres" feature. Installing the package,
+# enabling the system service, and provisioning the dev role, database and
+# credentials the dev user needs to reach it.
 #
 # Downloaded and sourced by install.sh after its bootstrap preflight.
 # configure_postgres_dev_access() relies on PG_DB_NAME/PG_DB_USER/
@@ -9,6 +10,17 @@
 # in install.sh rather than moving here).
 
 set -Eeuo pipefail
+
+install_postgres_package() {
+  msg_info "Installing PostgreSQL"
+
+  silent apt-get install \
+    -y \
+    --no-install-recommends \
+    postgresql
+
+  msg_ok "Installed PostgreSQL"
+}
 
 enable_postgresql_service() {
   msg_info "Enabling PostgreSQL"

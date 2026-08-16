@@ -8,6 +8,7 @@ readonly DEV_HOME="/home/${DEV_USER}"
 
 readonly STATE_DIR="${DEV_HOME}/.config/devbox"
 readonly ONBOARDING_MARKER="${STATE_DIR}/onboarding-complete"
+readonly FEATURES_FILE="${STATE_DIR}/features"
 
 readonly SSH_CONFIG="/etc/ssh/sshd_config.d/00-devbox.conf"
 readonly SSH_KEY_FILE="${DEV_HOME}/.ssh/authorized_keys.devbox"
@@ -1186,6 +1187,15 @@ change root/admin SSH policy.
 EOF
 }
 
+# P1.2: install.sh records the optional features (elixir, postgres) a box
+# was actually installed with in FEATURES_FILE. No file means the box
+# predates that (or predates the feature system entirely), so every check
+# runs, matching pre-P1.2 behavior.
+feature_was_installed() {
+  [[ -r "$FEATURES_FILE" ]] || return 0
+  grep -Fqw "$1" "$FEATURES_FILE"
+}
+
 doctor() {
   local command
   local status=0
@@ -1195,19 +1205,23 @@ doctor() {
     claude
     codex
     happy
-    elixir
-    erl
     fd
     gh
     git
     jq
-    mix
     node
     npm
-    psql
     python3
     rg
   )
+
+  if feature_was_installed elixir; then
+    commands+=(elixir erl mix)
+  fi
+
+  if feature_was_installed postgres; then
+    commands+=(psql)
+  fi
 
   for command in "${commands[@]}"; do
     if run_as_dev \
@@ -1229,24 +1243,28 @@ doctor() {
     status=1
   fi
 
-  if systemctl is-active \
-    --quiet \
-    postgresql.service; then
+  if feature_was_installed postgres; then
+    if systemctl is-active \
+      --quiet \
+      postgresql.service; then
 
-    ok "PostgreSQL service"
-  else
-    warn "PostgreSQL service is not active"
-    status=1
+      ok "PostgreSQL service"
+    else
+      warn "PostgreSQL service is not active"
+      status=1
+    fi
   fi
 
-  if run_as_dev erl \
-    -noshell \
-    -eval 'halt(0).'; then
+  if feature_was_installed elixir; then
+    if run_as_dev erl \
+      -noshell \
+      -eval 'halt(0).'; then
 
-    ok "Erlang runtime"
-  else
-    warn "Erlang runtime failed"
-    status=1
+      ok "Erlang runtime"
+    else
+      warn "Erlang runtime failed"
+      status=1
+    fi
   fi
 
   run_as_dev codex \
@@ -1282,13 +1300,15 @@ doctor() {
     status=1
   fi
 
-  run_as_dev elixir \
-    --version \
-    || status=1
+  if feature_was_installed elixir; then
+    run_as_dev elixir \
+      --version \
+      || status=1
 
-  run_as_dev mix phx.new \
-    --version \
-    || status=1
+    run_as_dev mix phx.new \
+      --version \
+      || status=1
+  fi
 
   # Authentication status is informational for a fresh install.
 
