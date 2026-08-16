@@ -13,8 +13,15 @@
 #   root      -> OS/packages/system services/toolchain administration
 #   postgres  -> PostgreSQL service
 #   dev       -> Happy, Claude Code, Codex, Git/GitHub, workspaces, credentials
-#             -> may also install OS packages via passwordless
-#                sudo apt-get/apt/dpkg (see /etc/sudoers.d/90-devbox)
+#             -> may request OS package installs only via the controlled
+#                `sudo devbox packages install <package...>` command
+#                (see /etc/sudoers.d/90-devbox); dev has no generic
+#                passwordless apt/apt-get/dpkg access.
+#
+# Managed tool versions are centrally defined in devbox/versions.env; the
+# defaults embedded below must stay in sync with that file (enforced by
+# devbox/tests/test-devbox.sh) so the installer keeps working as a single
+# curl-pipeable file.
 #
 # Happy is the primary session/remote layer:
 #   happy
@@ -175,12 +182,53 @@ update_os
 
 readonly DEV_USER="dev"
 readonly DEV_HOME="/home/${DEV_USER}"
-readonly NODE_VERSION="24"
 
+# Central version manifest (mirrors devbox/versions.env; see header comment).
+readonly DEVBOX_VERSION="${DEVBOX_VERSION:-1.0.0}"
+NODE_VERSION="${NODE_VERSION:-24}"
+readonly NODE_VERSION
 ERLANG_VERSION="${ERLANG_VERSION:-29.0.5}"
 ELIXIR_VERSION="${ELIXIR_VERSION:-1.20.3}"
 PHOENIX_VERSION="${PHOENIX_VERSION:-1.8.9}"
+CODEX_VERSION="${CODEX_VERSION:-0.147.0}"
+CLAUDE_VERSION="${CLAUDE_VERSION:-2.1.233}"
+HAPPY_VERSION="${HAPPY_VERSION:-1.2.0}"
+
 DEVBOX_REPO_URL="${DEVBOX_REPO_URL:-https://raw.githubusercontent.com/c4kingpin/Scripts}"
+
+# Known-good SHA256 checksums for versioned binary artifacts (mirrors
+# devbox/checksums.env). Keyed as "<artifact>:<version-or-otp-major>[:<os>:<arch>]".
+declare -A DEVBOX_CHECKSUMS=(
+  ["otp:29.0.5:ubuntu-24.04:amd64"]="1ecf8a20104afa053e6701e36ec1485cbce1a2fa4aef962d5e73f9eb5c6e9fc0"
+  ["otp:29.0.5:ubuntu-22.04:amd64"]="da6f05c7b292f7726cdee6794e7a48542cc47384c3fdaeeb737df8aa5de24acf"
+  ["otp:29.0.5:ubuntu-24.04:arm64"]="7ab17628fca446dc02d40ecb0afe6c18e72437e09fca5c90d208c66db4206ae0"
+  ["otp:29.0.5:ubuntu-22.04:arm64"]="22bb49411e0a6dbb1829a32a2d31cc1cecc994e0c828d97845696ded66cd9c09"
+  ["elixir:1.20.3:29"]="51f799b78374d569a5df659bdedeb0dd9ef8251230bcdaef00c533019086e625"
+)
+readonly DEVBOX_CHECKSUMS
+
+verify_checksum() {
+  local file="$1"
+  local expected="$2"
+  local label="$3"
+  local actual
+
+  actual="$(sha256sum "$file" | awk '{print $1}')"
+
+  if [[ -z "$expected" ]]; then
+    rm -f "$file"
+    msg_error "No known checksum for ${label}; refusing to install it."
+    exit 1
+  fi
+
+  if [[ "$actual" != "$expected" ]]; then
+    rm -f "$file"
+    msg_error "Checksum mismatch for ${label} (expected ${expected}, got ${actual})."
+    exit 1
+  fi
+
+  msg_ok "Verified checksum for ${label}"
+}
 
 run_as_dev() (
   cd "$DEV_HOME"
@@ -462,27 +510,27 @@ done
 
 msg_ok "Created Developer User"
 
-msg_info "Installing Codex CLI"
+msg_info "Installing Codex CLI ${CODEX_VERSION}"
 
 silent npm install \
   --global \
-  @openai/codex@latest
+  "@openai/codex@${CODEX_VERSION}"
 
-msg_ok "Installed Codex CLI"
+msg_ok "Installed Codex CLI ${CODEX_VERSION}"
 
-msg_info "Installing Claude Code"
-
-silent npm install \
-  --global \
-  @anthropic-ai/claude-code@latest
-
-msg_ok "Installed Claude Code"
-
-msg_info "Installing Happy"
+msg_info "Installing Claude Code ${CLAUDE_VERSION}"
 
 silent npm install \
   --global \
-  happy@latest
+  "@anthropic-ai/claude-code@${CLAUDE_VERSION}"
+
+msg_ok "Installed Claude Code ${CLAUDE_VERSION}"
+
+msg_info "Installing Happy ${HAPPY_VERSION}"
+
+silent npm install \
+  --global \
+  "happy@${HAPPY_VERSION}"
 
 if ! npm list \
   --global \
@@ -537,6 +585,11 @@ otp_tarball="/tmp/devbox-otp.tar.gz"
 curl_with_retry \
   "https://builds.hex.pm/builds/otp/${otp_arch}/${otp_os}/OTP-${ERLANG_VERSION}.tar.gz" \
   "$otp_tarball"
+
+verify_checksum \
+  "$otp_tarball" \
+  "${DEVBOX_CHECKSUMS["otp:${ERLANG_VERSION}:${otp_os}:${otp_arch}"]:-}" \
+  "Erlang/OTP ${ERLANG_VERSION} (${otp_os}, ${otp_arch})"
 
 rm -rf "$OTP_ROOT"
 
@@ -610,6 +663,11 @@ elixir_zip="/tmp/devbox-elixir.zip"
 curl_with_retry \
   "https://github.com/elixir-lang/elixir/releases/download/v${ELIXIR_VERSION}/elixir-otp-${ERLANG_OTP_MAJOR}.zip" \
   "$elixir_zip"
+
+verify_checksum \
+  "$elixir_zip" \
+  "${DEVBOX_CHECKSUMS["elixir:${ELIXIR_VERSION}:${ERLANG_OTP_MAJOR}"]:-}" \
+  "Elixir ${ELIXIR_VERSION} (OTP ${ERLANG_OTP_MAJOR})"
 
 rm -rf "$ELIXIR_ROOT"
 
@@ -1070,6 +1128,17 @@ readonly LEGACY_OPENROUTER_WRAPPER="${DEV_HOME}/.local/bin/codex"
 
 readonly NODE_MAJOR="24"
 
+# Mirrors the version manifest embedded in install.sh / devbox/versions.env.
+readonly DEVBOX_VERSION="1.0.0"
+readonly ERLANG_VERSION="29.0.5"
+readonly ELIXIR_VERSION="1.20.3"
+readonly PHOENIX_VERSION="1.8.9"
+readonly CODEX_VERSION="0.147.0"
+readonly CLAUDE_VERSION="2.1.233"
+readonly HAPPY_VERSION="1.2.0"
+
+readonly PACKAGE_NAME_PATTERN='^[a-z0-9][a-z0-9+.-]*$'
+
 readonly DEFAULT_UPDATE_BRANCH="master"
 readonly DEFAULT_REPO_URL="https://raw.githubusercontent.com/c4kingpin/Scripts"
 
@@ -1107,6 +1176,16 @@ Commands:
 
   ssh disable
       Disable SSH login for dev only.
+
+  packages list
+      List installed OS packages.
+
+  packages install <package...>
+      Install OS packages via a controlled, validated apt-get call.
+      Requires root (sudo devbox packages install <package...>).
+
+  version
+      Show centrally managed DevBox tool versions.
 
   auth status
       Show Happy, Codex and Claude authentication status.
@@ -1484,6 +1563,58 @@ ssh_disable() {
 
   ok "SSH login disabled for ${DEV_USER}"
   ok "Administrative/root SSH policy was not changed"
+}
+
+validate_package_name() {
+  local package="$1"
+
+  [[ "$package" =~ $PACKAGE_NAME_PATTERN ]]
+}
+
+packages_list() {
+  dpkg-query \
+    --show \
+    --showformat '${Package}\t${Version}\n' \
+  | sort
+}
+
+packages_install() {
+  require_root
+
+  local package
+  local packages=("$@")
+
+  [[ "${#packages[@]}" -gt 0 ]] ||
+    die "Usage: devbox packages install <package...>"
+
+  for package in "${packages[@]}"; do
+    validate_package_name "$package" ||
+      die "Refusing invalid package name: ${package}"
+  done
+
+  info "Installing packages: ${packages[*]}"
+
+  DEBIAN_FRONTEND=noninteractive \
+    apt-get install \
+      -y \
+      --no-install-recommends \
+      -- \
+      "${packages[@]}"
+
+  ok "Installed packages: ${packages[*]}"
+}
+
+show_version() {
+  cat <<EOF
+DevBox:        ${DEVBOX_VERSION}
+Node:          ${NODE_MAJOR}
+Erlang:        ${ERLANG_VERSION}
+Elixir:        ${ELIXIR_VERSION}
+Phoenix:       ${PHOENIX_VERSION}
+Codex CLI:     ${CODEX_VERSION}
+Claude Code:   ${CLAUDE_VERSION}
+Happy:         ${HAPPY_VERSION}
+EOF
 }
 
 codex_is_authenticated() {
@@ -2562,6 +2693,18 @@ main() {
       ssh_disable
       ;;
 
+    packages:list)
+      packages_list
+      ;;
+
+    packages:install)
+      packages_install "${@:3}"
+      ;;
+
+    version:)
+      show_version
+      ;;
+
     auth:status)
       agents_auth_status
       ;;
@@ -2639,7 +2782,7 @@ chmod \
 cat <<EOF >/etc/sudoers.d/90-devbox
 ${DEV_USER} ALL=(root) NOPASSWD: /usr/local/bin/devbox ssh setup
 ${DEV_USER} ALL=(root) NOPASSWD: /usr/local/bin/devbox ssh disable
-${DEV_USER} ALL=(root) NOPASSWD: /usr/bin/apt-get, /usr/bin/apt, /usr/bin/dpkg
+${DEV_USER} ALL=(root) NOPASSWD: /usr/local/bin/devbox packages install *
 EOF
 
 chmod \

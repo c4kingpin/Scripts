@@ -223,6 +223,22 @@ Die SSH-Konfiguration erlaubt ausschließlich Public-Key-Anmeldung für `dev`.
 Root-, Passwort- und Keyboard-Interactive-Login sowie Agent-, TCP-, Socket-,
 X11- und Tunnel-Forwarding sind deaktiviert.
 
+## Paketverwaltung
+
+Der Benutzer `dev` besitzt **kein** allgemeines passwortloses `sudo apt`,
+`apt-get` oder `dpkg`. OS-Pakete werden ausschließlich über den validierten
+DevBox-Befehl installiert:
+
+```bash
+sudo devbox packages install imagemagick libvips
+devbox packages list
+```
+
+Paketnamen werden gegen `^[a-z0-9][a-z0-9+.-]*$` geprüft; Optionen, Pfade,
+Shell-Metazeichen oder Großschreibung werden abgelehnt. Agenten mit den
+Autonomieprofilen `autonomous` oder `full-access` erhalten dadurch keinen
+generischen Root-Zugriff auf die Paketverwaltung.
+
 ## Devbox-Schlüssel und GitHub
 
 Die Richtung der beiden Schlüsseltypen ist bewusst getrennt:
@@ -379,9 +395,10 @@ devbox doctor
 
 `update` muss als `root` laufen, nicht über `sudo` als `dev` – der Benutzer
 `dev` besitzt bewusst kein allgemeines passwortloses `sudo`, sondern nur für
-`ssh setup`/`ssh disable` (siehe oben). Auf der Root-Konsole des Containers
-(z. B. direkt nach `pct enter <CTID>`, ohne vorheriges `sudo -iu dev`) auf den
-aktuellen Stand des `master`-Branches aktualisieren:
+`ssh setup`/`ssh disable` und `packages install` (siehe oben). Auf der
+Root-Konsole des Containers (z. B. direkt nach `pct enter <CTID>`, ohne
+vorheriges `sudo -iu dev`) auf den aktuellen Stand des `master`-Branches
+aktualisieren:
 
 ```bash
 devbox update
@@ -412,6 +429,26 @@ DEVBOX_REPO_URL="https://raw.githubusercontent.com/<fork>/Scripts" \
 
 Automatische Sicherheitsupdates sind zusätzlich aktiviert, sodass
 Betriebssystem-Patches auch ohne manuelles `devbox update` einlaufen.
+
+## Versionsmanifest und Prüfsummen
+
+Alle aktiv verwalteten Tool-Versionen sind zentral in
+[`versions.env`](versions.env) definiert (DevBox selbst, Node.js,
+Erlang/OTP, Elixir, Phoenix, Codex CLI, Claude Code, Happy). `install.sh`
+bleibt ein einzelnes, per `curl | bash` ausführbares Skript und trägt dieselben
+Werte als eingebettete Defaults; ein Regressionstest stellt sicher, dass beide
+Stellen nicht auseinanderlaufen. Keine der verwalteten npm-Komponenten nutzt
+`@latest`. Jeder Wert lässt sich für einen einzelnen Lauf per Umgebungsvariable
+überschreiben, zum Beispiel `ERLANG_VERSION=28.4 bash install.sh`.
+
+```bash
+devbox version
+```
+
+Die heruntergeladenen Erlang/OTP- und Elixir-Artefakte werden vor der
+Installation gegen bekannte SHA256-Prüfsummen aus
+[`checksums.env`](checksums.env) verifiziert; ein manipuliertes oder falsches
+Artefakt bricht die Installation sofort ab, bevor es entpackt wird.
 
 ## Tests
 
