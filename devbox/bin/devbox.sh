@@ -18,6 +18,7 @@ readonly FEATURES_FILE="${ROOT_STATE_DIR}/installed-features"
 readonly ROOT_VERSION_FILE="${ROOT_STATE_DIR}/version"
 readonly PREVIOUS_VERSION_FILE="${ROOT_STATE_DIR}/previous-version"
 readonly PREVIOUS_REF_FILE="${ROOT_STATE_DIR}/previous-ref"
+readonly ACTIVE_REF_FILE="${ROOT_STATE_DIR}/active-ref"
 readonly INSTALL_STATE_FILE="${ROOT_STATE_DIR}/install-state.json"
 
 readonly SSH_CONFIG="/etc/ssh/sshd_config.d/00-devbox.conf"
@@ -2001,7 +2002,25 @@ update_devbox() {
     die "Downloaded installer failed bash syntax validation"
   fi
 
-  record_previous_update_state "$mode" "$ref"
+  # P1.1: record what was active BEFORE this update, not the new target -
+  # otherwise `devbox rollback` re-installs the same ref it's already on.
+  # No ACTIVE_REF_FILE means an install from before this file existed;
+  # skip recording rather than write a previous-ref that isn't real.
+  local active_mode="" active_target=""
+
+  if [[ -r "$ACTIVE_REF_FILE" ]]; then
+    local active_ref
+    active_ref="$(<"$ACTIVE_REF_FILE")"
+    active_mode="${active_ref%%:*}"
+    active_target="${active_ref#*:}"
+
+    [[ -n "$active_mode" && -n "$active_target" && "$active_mode" != "$active_target" ]] ||
+      active_mode="" active_target=""
+  fi
+
+  if [[ -n "$active_mode" && -n "$active_target" ]]; then
+    record_previous_update_state "$active_mode" "$active_target"
+  fi
 
   info "Re-running installer"
 
@@ -2012,6 +2031,17 @@ update_devbox() {
   rm \
     -f \
     "$installer"
+
+  install \
+    -d \
+    -m 0755 \
+    "$ROOT_STATE_DIR"
+
+  printf '%s:%s\n' "$mode" "$ref" >"$ACTIVE_REF_FILE"
+
+  chmod \
+    0644 \
+    "$ACTIVE_REF_FILE"
 
   ok "Updated from ${mode} '${ref}'"
 

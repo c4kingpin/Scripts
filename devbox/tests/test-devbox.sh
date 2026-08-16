@@ -1046,7 +1046,41 @@ install_script_records_devbox_state() {
     grep -Fq 'install -d -m 0755 "$ROOT_STATE_DIR"' "$NORM_INSTALL" &&
     grep -Fq 'printf '\''%s\n'\'' "$DEVBOX_VERSION" >"${ROOT_STATE_DIR}/version"' "$INSTALL_SCRIPT" &&
     grep -Fq 'printf '\''%s\n'\'' "$devbox_selected_features" >"${ROOT_STATE_DIR}/installed-features"' "$INSTALL_SCRIPT" &&
-    grep -Fq '"${ROOT_STATE_DIR}/install-state.json"' "$INSTALL_SCRIPT"
+    grep -Fq '"${ROOT_STATE_DIR}/install-state.json"' "$INSTALL_SCRIPT" &&
+    grep -Fq '"${ROOT_STATE_DIR}/active-ref"' "$INSTALL_SCRIPT"
+}
+
+# P1.1: install.sh seeds active-ref with a best-effort release/branch
+# classification of DEVBOX_REF, so the first `devbox update` after a fresh
+# install has something real to snapshot as "previous" before overwriting
+# it (update_devbox() itself always overwrites this with the exact mode it
+# already knows, so this guess only matters until the first update).
+install_script_classifies_active_ref_mode() {
+  local classify_block
+  classify_block="$(sed -n '/^if \[\[ "\$DEVBOX_REF" =~/,/^fi$/p' "$INSTALL_SCRIPT")"
+
+  [[ -n "$classify_block" ]] || return 1
+
+  local release_result branch_result
+
+  release_result="$(
+    bash -c '
+      DEVBOX_REF="v1.2.3"
+      '"$classify_block"'
+      echo "$devbox_active_mode"
+    '
+  )"
+
+  branch_result="$(
+    bash -c '
+      DEVBOX_REF="master"
+      '"$classify_block"'
+      echo "$devbox_active_mode"
+    '
+  )"
+
+  [[ "$release_result" == "release" ]] &&
+    [[ "$branch_result" == "branch" ]]
 }
 
 # The P1.2/P1.3 user-state files are migrated into root-state once, so an
@@ -1300,6 +1334,73 @@ devbox_status_composes_existing_status_commands() {
     grep -Fq 'status' "$NORM_MANAGER"
 }
 
+# P1.1: a real install-A -> update A->B -> rollback -> back-to-A sequence
+# against a fully faked Root-State directory (readonly stripped so
+# ROOT_STATE_DIR/ACTIVE_REF_FILE/PREVIOUS_REF_FILE can point at a temp
+# fixture instead of the real /var/lib/devbox, same technique as the
+# doctor --json and workspace tests use).
+update_and_rollback_round_trip_restores_the_active_ref() {
+  local root_state="${TEST_TMP}/rollback-roundtrip-root-state"
+  local bin_dir="${TEST_TMP}/rollback-roundtrip-bin"
+  local manager_functions="${TEST_TMP}/rollback-roundtrip-manager-functions.sh"
+  local output_file="${TEST_TMP}/rollback-roundtrip-output.log"
+
+  mkdir -p "$root_state" "$bin_dir"
+
+  printf 'release:v1.0.0\n' >"${root_state}/active-ref"
+
+  cat <<'EOF' >"${bin_dir}/curl"
+#!/usr/bin/env bash
+out=""
+prev=""
+for arg in "$@"; do
+  if [[ "$prev" == "-o" ]]; then
+    out="$arg"
+  fi
+  prev="$arg"
+done
+printf '#!/usr/bin/env bash\necho ran fake installer\n' >"$out"
+chmod 0755 "$out"
+EOF
+  chmod 0755 "${bin_dir}/curl"
+
+  sed 's/^readonly //' "$MANAGER" | head -n -1 >"$manager_functions"
+
+  (
+    set -Eeuo pipefail
+    PATH="${bin_dir}:/usr/bin:/bin"
+    # shellcheck source=/dev/null
+    source "$manager_functions"
+    # shellcheck disable=SC2034 # read by update_devbox below (sourced at runtime)
+    ROOT_STATE_DIR="$root_state"
+    ACTIVE_REF_FILE="${root_state}/active-ref"
+    PREVIOUS_REF_FILE="${root_state}/previous-ref"
+    # shellcheck disable=SC2034 # read by record_previous_update_state below (sourced at runtime)
+    PREVIOUS_VERSION_FILE="${root_state}/previous-version"
+    # shellcheck disable=SC2317,SC2329
+    require_root() { :; }
+    # shellcheck disable=SC2317,SC2329
+    doctor() { :; }
+    # shellcheck disable=SC2317,SC2329
+    migrate_legacy_previous_update_state() { :; }
+
+    echo "=== update A(v1.0.0) -> B(v2.0.0) ==="
+    update_devbox --to v2.0.0
+    echo "active-ref after update: $(<"$ACTIVE_REF_FILE")"
+    echo "previous-ref after update: $(<"$PREVIOUS_REF_FILE")"
+
+    echo "=== rollback ==="
+    rollback_devbox
+    echo "active-ref after rollback: $(<"$ACTIVE_REF_FILE")"
+    echo "previous-ref after rollback: $(<"$PREVIOUS_REF_FILE")"
+  ) >"$output_file" 2>&1
+
+  grep -Fq "active-ref after update: release:v2.0.0" "$output_file" &&
+    grep -Fq "previous-ref after update: release:v1.0.0" "$output_file" &&
+    grep -Fq "active-ref after rollback: release:v1.0.0" "$output_file" &&
+    grep -Fq "previous-ref after rollback: release:v2.0.0" "$output_file"
+}
+
 doctor_checks_root_state_version() {
   local check_block
   check_block="$(sed -n '/if \[\[ -r "\$ROOT_VERSION_FILE" \]\]; then/,/^  fi$/p' "$MANAGER")"
@@ -1542,11 +1643,13 @@ run_test "complete stack validation" installer_validates_complete_stack
 run_test "postgres package is a separate optional feature" postgres_package_is_a_separate_optional_feature
 run_test "validation skips checks for disabled features" validation_skips_checks_for_disabled_features
 run_test "install.sh records DevBox state" install_script_records_devbox_state
+run_test "install.sh classifies active-ref mode" install_script_classifies_active_ref_mode
 run_test "install.sh migrates legacy user-state features" install_script_migrates_legacy_user_state_features
 run_test "doctor is feature-aware" doctor_is_feature_aware
 run_test "devbox status composes existing status commands" devbox_status_composes_existing_status_commands
 run_test "workspace list/doctor report project health read-only" workspace_list_and_doctor_report_project_health_read_only
 run_test "doctor --json reports a valid summary matching the exit code" doctor_json_reports_a_valid_summary_matching_the_exit_code
+run_test "update and rollback round trip restores the active ref" update_and_rollback_round_trip_restores_the_active_ref
 run_test "doctor checks root state version" doctor_checks_root_state_version
 run_test "Happy daemon starts at boot" happy_daemon_starts_at_boot
 run_test "Happy .bashrc start remains a fallback" happy_bashrc_start_remains_as_fallback
