@@ -1074,6 +1074,74 @@ doctor_is_feature_aware() {
 # file is simply missing (installs from before P1.4). Extract just the
 # check (not the whole doctor(), which needs a real dev user/toolchain)
 # and exercise its three branches directly.
+# P2.6: devbox workspace list/doctor are read-only helpers over the dev
+# user's project directories. Strip "readonly" from the sourced copy so
+# WORKSPACE_DIR can point at a temp fixture instead of the real
+# /home/dev/workspace, same technique as the doctor --json test above.
+workspace_list_and_doctor_report_project_health_read_only() {
+  local ws_dir="${TEST_TMP}/workspace-fixture"
+  local manager_functions="${TEST_TMP}/manager-functions-workspace.sh"
+  local list_output doctor_git_output doctor_no_git_output doctor_missing_status=0
+
+  mkdir -p "${ws_dir}/project-a" "${ws_dir}/project-b"
+  git -C "${ws_dir}/project-a" init -q
+  : >"${ws_dir}/project-a/.env"
+
+  sed 's/^readonly //' "$MANAGER" | head -n -1 >"$manager_functions"
+
+  list_output="$(
+    bash -c '
+      # shellcheck source=/dev/null
+      source "'"$manager_functions"'"
+      WORKSPACE_DIR="'"$ws_dir"'"
+      require_dev() { :; }
+      workspace_list
+    '
+  )"
+
+  doctor_git_output="$(
+    bash -c '
+      # shellcheck source=/dev/null
+      source "'"$manager_functions"'"
+      WORKSPACE_DIR="'"$ws_dir"'"
+      require_dev() { :; }
+      workspace_doctor project-a
+    ' 2>&1
+  )"
+
+  doctor_no_git_output="$(
+    bash -c '
+      # shellcheck source=/dev/null
+      source "'"$manager_functions"'"
+      WORKSPACE_DIR="'"$ws_dir"'"
+      require_dev() { :; }
+      workspace_doctor project-b
+    ' 2>&1
+  )"
+
+  bash -c '
+    # shellcheck source=/dev/null
+    source "'"$manager_functions"'"
+    WORKSPACE_DIR="'"$ws_dir"'"
+    require_dev() { :; }
+    workspace_doctor does-not-exist
+  ' >/dev/null 2>&1 || doctor_missing_status=$?
+
+  grep -Fq 'project-a' <<<"$list_output" &&
+    grep -Fq 'project-b' <<<"$list_output" &&
+    grep -Fq 'Git repository' <<<"$doctor_git_output" &&
+    grep -Fq '.env present' <<<"$doctor_git_output" &&
+    grep -Fq 'Not a Git repository' <<<"$doctor_no_git_output" &&
+    grep -Fq '.env not present' <<<"$doctor_no_git_output" &&
+    [[ "$doctor_missing_status" -ne 0 ]] &&
+    # Read-only by construction: no command in workspace_doctor()/
+    # workspace_list() ever mutates the project directory it inspects.
+    ! sed -n '/^workspace_list() {/,/^workspace_doctor() {/p' "$MANAGER" \
+      | grep -Eq 'git (commit|checkout|branch -[dD]|push|reset)|rm -rf' &&
+    grep -Fq 'workspace:list)' "$MANAGER" &&
+    grep -Fq 'workspace:doctor)' "$MANAGER"
+}
+
 # P2.3: devbox doctor --json runs the exact same checks as devbox doctor
 # (no duplicated logic) and reports the result as the JSON schema from
 # #18's audit issue. Builds a fully stubbed environment (PATH shadow +
@@ -1477,6 +1545,7 @@ run_test "install.sh records DevBox state" install_script_records_devbox_state
 run_test "install.sh migrates legacy user-state features" install_script_migrates_legacy_user_state_features
 run_test "doctor is feature-aware" doctor_is_feature_aware
 run_test "devbox status composes existing status commands" devbox_status_composes_existing_status_commands
+run_test "workspace list/doctor report project health read-only" workspace_list_and_doctor_report_project_health_read_only
 run_test "doctor --json reports a valid summary matching the exit code" doctor_json_reports_a_valid_summary_matching_the_exit_code
 run_test "doctor checks root state version" doctor_checks_root_state_version
 run_test "Happy daemon starts at boot" happy_daemon_starts_at_boot
