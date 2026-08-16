@@ -1772,6 +1772,19 @@ EOF
     grep -Fq "Update available on branch 'feature-branch': aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa -> cccccccccccccccccccccccccccccccccccccccc" <<<"$stale_output"
 }
 
+# P2.3: `VAR=value curl ... | bash` only sets VAR in curl's process, not
+# bash's - README examples must put the override on the bash side of the
+# pipe (`curl ... | env VAR=value bash`) for it to actually reach the
+# installer.
+readme_pipe_examples_pass_env_vars_to_bash_not_curl() {
+  ! grep -Eq '^(DEVBOX_PROFILE|DEVBOX_FEATURES|DEVBOX_AUTONOMY|SSH_AUTHORIZED_KEY)=.*\\$' \
+    "${PROJECT_ROOT}/README.md" &&
+    grep -Fq 'env DEVBOX_PROFILE=minimal bash' "${PROJECT_ROOT}/README.md" &&
+    grep -Fq 'env DEVBOX_FEATURES=postgres bash' "${PROJECT_ROOT}/README.md" &&
+    grep -Fq 'env DEVBOX_AUTONOMY=autonomous bash' "${PROJECT_ROOT}/README.md" &&
+    grep -Fq 'env SSH_AUTHORIZED_KEY=' "${PROJECT_ROOT}/README.md"
+}
+
 doctor_checks_root_state_version() {
   local check_block
   check_block="$(sed -n '/if \[\[ -r "\$ROOT_VERSION_FILE" \]\]; then/,/^  fi$/p' "$MANAGER")"
@@ -2035,6 +2048,7 @@ run_test "postgres password reuse validates the persisted format" postgres_passw
 run_test "postgres password is validated before SQL interpolation" postgres_password_is_validated_before_sql_interpolation
 run_test "devbox version reports the installed commit" devbox_version_reports_the_installed_commit
 run_test "update --check compares branch commits" update_check_compares_branch_commits
+run_test "README pipe examples pass env vars to bash, not curl" readme_pipe_examples_pass_env_vars_to_bash_not_curl
 run_test "doctor checks root state version" doctor_checks_root_state_version
 run_test "Happy daemon starts at boot" happy_daemon_starts_at_boot
 run_test "Happy .bashrc start remains a fallback" happy_bashrc_start_remains_as_fallback
