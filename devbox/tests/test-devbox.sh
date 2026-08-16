@@ -1334,6 +1334,83 @@ devbox_status_composes_existing_status_commands() {
     grep -Fq 'status' "$NORM_MANAGER"
 }
 
+# P1.3: install.sh resolves DEVBOX_REF to a commit SHA once, up front, so
+# every module fetch in this run (lib/*.sh, features/*.sh, bin/devbox.sh -
+# ~10 separate downloads) uses the exact same commit even if the branch
+# moves mid-install. Extract the resolution block and exercise both the
+# success and the fallback path with a stubbed curl (no real GitHub API
+# dependency in this test).
+install_pins_module_fetches_to_a_resolved_commit() {
+  local resolve_block
+  resolve_block="$(sed -n '/^resolve_devbox_ref_to_commit() {/,/^fi$/p' "$INSTALL_SCRIPT")"
+
+  [[ -n "$resolve_block" ]] || return 1
+
+  local bin_dir="${TEST_TMP}/commit-pin-bin"
+  mkdir -p "$bin_dir"
+
+  cat <<'EOF' >"${bin_dir}/curl"
+#!/usr/bin/env bash
+printf '{"sha":"deadbeefdeadbeefdeadbeefdeadbeefdeadbeef","other":"noise"}'
+EOF
+  chmod 0755 "${bin_dir}/curl"
+
+  local output
+  output="$(
+    PATH="${bin_dir}:/usr/bin:/bin" \
+    bash -c '
+      msg_ok() { echo "OK: $*"; }
+      msg_info() { echo "INFO: $*"; }
+      DEVBOX_GITHUB_REPO="c4kingpin/Scripts"
+      DEVBOX_REF="master"
+      '"$resolve_block"'
+      echo "DEVBOX_REF=$DEVBOX_REF"
+      echo "devbox_resolved_commit=$devbox_resolved_commit"
+    '
+  )"
+
+  grep -Fq "OK: Pinned installer modules to commit deadbeefdeadbeefdeadbeefdeadbeefdeadbeef" <<<"$output" &&
+    grep -Fq "DEVBOX_REF=deadbeefdeadbeefdeadbeefdeadbeefdeadbeef" <<<"$output" &&
+    grep -Fq "devbox_resolved_commit=deadbeefdeadbeefdeadbeefdeadbeefdeadbeef" <<<"$output"
+}
+
+# A failed/empty API response (rate limit, network blip, nonexistent ref)
+# must not block the install - fall back to fetching modules by the ref
+# string directly, exactly like every install did before this feature.
+install_falls_back_to_the_ref_when_resolution_fails() {
+  local resolve_block
+  resolve_block="$(sed -n '/^resolve_devbox_ref_to_commit() {/,/^fi$/p' "$INSTALL_SCRIPT")"
+
+  [[ -n "$resolve_block" ]] || return 1
+
+  local bin_dir="${TEST_TMP}/commit-pin-fallback-bin"
+  mkdir -p "$bin_dir"
+
+  cat <<'EOF' >"${bin_dir}/curl"
+#!/usr/bin/env bash
+exit 22
+EOF
+  chmod 0755 "${bin_dir}/curl"
+
+  local output
+  output="$(
+    PATH="${bin_dir}:/usr/bin:/bin" \
+    bash -c '
+      msg_ok() { echo "OK: $*"; }
+      msg_info() { echo "INFO: $*"; }
+      DEVBOX_GITHUB_REPO="c4kingpin/Scripts"
+      DEVBOX_REF="master"
+      '"$resolve_block"'
+      echo "DEVBOX_REF=$DEVBOX_REF"
+      echo "devbox_resolved_commit=[$devbox_resolved_commit]"
+    '
+  )"
+
+  grep -Fq "INFO: Could not resolve 'master' to a commit" <<<"$output" &&
+    grep -Fq "DEVBOX_REF=master" <<<"$output" &&
+    grep -Fq "devbox_resolved_commit=[]" <<<"$output"
+}
+
 # P1.2: the LXC E2E test's idempotency re-run now uses the documented
 # `curl | bash` one-liner (where $0 is "bash", not a file path) instead of
 # downloading to a file first, so that invocation form is actually
@@ -1798,6 +1875,8 @@ run_test "postgres/elixir writes use the symlink-safe helper" postgres_and_elixi
 run_test "legacy previous-update state never executes file contents" migrate_legacy_previous_update_state_never_executes_file_contents
 run_test "update and rollback round trip restores the active ref" update_and_rollback_round_trip_restores_the_active_ref
 run_test "LXC integration test exercises the curl | bash path" lxc_integration_test_exercises_the_curl_pipe_path
+run_test "install pins module fetches to a resolved commit" install_pins_module_fetches_to_a_resolved_commit
+run_test "install falls back to the ref when resolution fails" install_falls_back_to_the_ref_when_resolution_fails
 run_test "doctor checks root state version" doctor_checks_root_state_version
 run_test "Happy daemon starts at boot" happy_daemon_starts_at_boot
 run_test "Happy .bashrc start remains a fallback" happy_bashrc_start_remains_as_fallback
