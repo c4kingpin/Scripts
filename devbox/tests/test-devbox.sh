@@ -74,6 +74,7 @@ readonly NORM_MANAGER="${TEST_TMP}/devbox.normalized"
 readonly NORM_LIB_USER="${TEST_TMP}/lib_user.normalized"
 readonly NORM_FEATURE_BASE="${TEST_TMP}/feature_base.normalized"
 readonly NORM_FEATURE_POSTGRES="${TEST_TMP}/feature_postgres.normalized"
+readonly NORM_FEATURE_HAPPY="${TEST_TMP}/feature_happy.normalized"
 readonly NORM_FEATURE_TOOLING="${TEST_TMP}/feature_tooling.normalized"
 readonly NORM_FEATURE_ELIXIR="${TEST_TMP}/feature_elixir.normalized"
 
@@ -765,7 +766,8 @@ remote_instructions_are_platform_agnostic() {
     grep -Fq 'happy claude' <<<"$output" &&
     grep -Fq 'happy codex' <<<"$output" &&
     grep -Fq 'devbox auth login' <<<"$output" &&
-    grep -Fq 'devbox ssh setup' <<<"$output"
+    grep -Fq 'devbox ssh setup' <<<"$output" &&
+    grep -Fq 'devbox-happy-daemon.service' <<<"$output"
 }
 
 manager_exposes_expected_commands() {
@@ -1105,12 +1107,143 @@ doctor_checks_root_state_version() {
     grep -Fq "OK: DevBox root state (1.0.0)" <<<"$output_match"
 }
 
+# Issue #19: Happy is the remote-access layer, so it has to come back on its
+# own after a reboot. Before this it was only ever started from the dev
+# user's .bashrc, i.e. after somebody had already logged in interactively.
+happy_daemon_starts_at_boot() {
+  grep -Fq 'install_happy_daemon_service() {' "$FEATURE_HAPPY" &&
+    grep -Fxq 'install_happy_daemon_service' "$INSTALL_SCRIPT" &&
+    grep -Fq 'HAPPY_SERVICE="devbox-happy-daemon.service"' "$FEATURE_HAPPY" &&
+    grep -Fq 'HAPPY_SERVICE_UNIT="/etc/systemd/system/${HAPPY_SERVICE}"' "$FEATURE_HAPPY" &&
+    # Runs as dev with a dev-shaped HOME, only once the network is up.
+    grep -Fxq 'User=${DEV_USER}' "$FEATURE_HAPPY" &&
+    grep -Fxq 'Environment=HOME=${DEV_HOME}' "$FEATURE_HAPPY" &&
+    grep -Fxq 'After=network-online.target' "$FEATURE_HAPPY" &&
+    grep -Fxq 'Wants=network-online.target' "$FEATURE_HAPPY" &&
+    grep -Fxq 'WantedBy=multi-user.target' "$FEATURE_HAPPY" &&
+    # No aggressive restart loop on a box that cannot start the daemon.
+    grep -Fxq 'Restart=no' "$FEATURE_HAPPY" &&
+    grep -Fq 'systemctl daemon-reload' "$FEATURE_HAPPY" &&
+    grep -Fq 'systemctl enable --now "$HAPPY_SERVICE"' "$NORM_FEATURE_HAPPY" &&
+    grep -Fq 'systemctl is-enabled --quiet devbox-happy-daemon.service' "$NORM_INSTALL"
+}
+
+# The .bashrc logic stays as a fallback for boxes whose service is missing
+# or disabled (issue #19 explicitly asks for it to be kept).
+happy_bashrc_start_remains_as_fallback() {
+  grep -Fq '# DevBox Happy' "$INSTALL_SCRIPT" &&
+    grep -Fq 'HAPPY_DAEMON_CHECKED' "$INSTALL_SCRIPT" &&
+    grep -Fq 'happy daemon start' "$INSTALL_SCRIPT"
+}
+
+extract_happy_daemon_start_script() {
+  sed -n '/^  cat <<'\''EOF'\'' >"\$HAPPY_DAEMON_START_SCRIPT"$/,/^EOF$/p' \
+    "$FEATURE_HAPPY" \
+    | sed '1d;$d' \
+    >"$1"
+
+  [[ -s "$1" ]] || return 1
+
+  chmod 0755 "$1"
+}
+
+# The guard is what keeps an unpaired DevBox from producing a failed unit,
+# and what keeps a reboot from stomping on a daemon that is already running.
+# Cheap enough to run for real against a fake HOME and a `happy` stub.
+happy_daemon_guard_starts_only_a_paired_idle_daemon() {
+  local guard="${TEST_TMP}/happy-daemon-start.sh"
+  local stub_dir="${TEST_TMP}/happy-stub"
+  local marker="${TEST_TMP}/happy-stub-calls"
+  local fake_home
+
+  extract_happy_daemon_start_script "$guard" || return 1
+
+  mkdir -p "$stub_dir"
+  cat <<EOF >"${stub_dir}/happy"
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >>"$marker"
+EOF
+  chmod 0755 "${stub_dir}/happy"
+
+  run_guard() {
+    HOME="$1" \
+      PATH="${stub_dir}:/usr/local/bin:/usr/bin:/bin" \
+      "$guard" \
+      >/dev/null 2>&1
+  }
+
+  # Unpaired box: no credentials at all.
+  fake_home="${TEST_TMP}/home-unpaired"
+  mkdir -p "${fake_home}/.happy"
+  : >"$marker"
+  run_guard "$fake_home" || return 1
+  [[ ! -s "$marker" ]] || return 1
+
+  # Credentials present but no machine registration.
+  fake_home="${TEST_TMP}/home-unregistered"
+  mkdir -p "${fake_home}/.happy"
+  printf 'key\n' >"${fake_home}/.happy/access.key"
+  printf '{}\n' >"${fake_home}/.happy/settings.json"
+  : >"$marker"
+  run_guard "$fake_home" || return 1
+  [[ ! -s "$marker" ]] || return 1
+
+  # Paired box, daemon not running (stale pid): start it.
+  fake_home="${TEST_TMP}/home-paired-idle"
+  mkdir -p "${fake_home}/.happy"
+  printf 'key\n' >"${fake_home}/.happy/access.key"
+  printf '{"machineId":"m1"}\n' >"${fake_home}/.happy/settings.json"
+  printf '{"pid":999999999}\n' >"${fake_home}/.happy/daemon.state.json"
+  : >"$marker"
+  run_guard "$fake_home" || return 1
+  grep -Fxq 'daemon start' "$marker" || return 1
+
+  # Paired box, daemon already running: leave it alone.
+  fake_home="${TEST_TMP}/home-paired-running"
+  mkdir -p "${fake_home}/.happy"
+  printf 'key\n' >"${fake_home}/.happy/access.key"
+  printf '{"machineId":"m1"}\n' >"${fake_home}/.happy/settings.json"
+  printf '{"pid":%s}\n' "$$" >"${fake_home}/.happy/daemon.state.json"
+  : >"$marker"
+  run_guard "$fake_home" || return 1
+  [[ ! -s "$marker" ]] || return 1
+
+  # Happy not installed at all: still a clean exit. A PATH holding nothing
+  # but bash (needed by the script's own shebang) keeps a Happy that happens
+  # to be installed on the test host out of the way.
+  local no_happy_dir="${TEST_TMP}/no-happy"
+  mkdir -p "$no_happy_dir"
+  ln -sf "$(command -v bash)" "${no_happy_dir}/bash"
+
+  fake_home="${TEST_TMP}/home-paired-idle"
+  : >"$marker"
+  HOME="$fake_home" \
+    PATH="$no_happy_dir" \
+    "$guard" \
+    >/dev/null 2>&1 ||
+    return 1
+
+  [[ ! -s "$marker" ]]
+}
+
+# doctor/auth status have to surface a box that would silently lose remote
+# access on the next reboot (service missing, disabled or failed).
+doctor_checks_happy_daemon_service() {
+  grep -Fq 'readonly HAPPY_SERVICE="devbox-happy-daemon.service"' "$MANAGER" &&
+    grep -Fq 'happy_daemon_service_is_installed() {' "$MANAGER" &&
+    grep -Fq 'happy_daemon_service_is_enabled() {' "$MANAGER" &&
+    grep -Fq 'systemctl is-enabled --quiet "$HAPPY_SERVICE"' "$NORM_MANAGER" &&
+    grep -Fq 'systemctl is-failed --quiet "$HAPPY_SERVICE"' "$NORM_MANAGER" &&
+    grep -Fq 'is not installed; Happy only starts from an interactive dev shell' "$MANAGER"
+}
+
 extract_manager
 normalize_continuations "$INSTALL_SCRIPT" >"$NORM_INSTALL"
 normalize_continuations "$MANAGER" >"$NORM_MANAGER"
 normalize_continuations "$LIB_USER" >"$NORM_LIB_USER"
 normalize_continuations "$FEATURE_BASE" >"$NORM_FEATURE_BASE"
 normalize_continuations "$FEATURE_POSTGRES" >"$NORM_FEATURE_POSTGRES"
+normalize_continuations "$FEATURE_HAPPY" >"$NORM_FEATURE_HAPPY"
 normalize_continuations "$FEATURE_TOOLING" >"$NORM_FEATURE_TOOLING"
 normalize_continuations "$FEATURE_ELIXIR" >"$NORM_FEATURE_ELIXIR"
 
@@ -1169,6 +1302,10 @@ run_test "install.sh records DevBox state" install_script_records_devbox_state
 run_test "install.sh migrates legacy user-state features" install_script_migrates_legacy_user_state_features
 run_test "doctor is feature-aware" doctor_is_feature_aware
 run_test "doctor checks root state version" doctor_checks_root_state_version
+run_test "Happy daemon starts at boot" happy_daemon_starts_at_boot
+run_test "Happy .bashrc start remains a fallback" happy_bashrc_start_remains_as_fallback
+run_test "Happy boot guard only starts a paired, idle daemon" happy_daemon_guard_starts_only_a_paired_idle_daemon
+run_test "doctor checks the Happy daemon service" doctor_checks_happy_daemon_service
 
 printf '\n%d passed, %d failed\n' "$PASSED" "$FAILED"
 ((FAILED == 0))

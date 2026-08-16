@@ -118,6 +118,39 @@ as_dev bash -c 'codex --version' || fail "codex --version failed"
 as_dev bash -c 'claude --version' || fail "claude --version failed"
 as_dev bash -c 'npm list --global --depth=0 happy' || fail "happy npm package missing"
 
+log "Checking Happy daemon boot service"
+in_container systemctl is-enabled --quiet devbox-happy-daemon.service ||
+  fail "devbox-happy-daemon.service is not enabled"
+
+# This container is never paired with Happy, so the guard must no-op: the
+# unit has to end up clean (active/exited), never failed (issue #19).
+in_container systemctl is-failed --quiet devbox-happy-daemon.service &&
+  fail "devbox-happy-daemon.service failed on an unpaired box"
+
+log "Rebooting to verify the service survives a restart"
+lxc restart "$CONTAINER"
+
+service_ready=0
+for _ in $(seq 1 30); do
+  if in_container systemctl is-system-running --wait >/dev/null 2>&1 ||
+    in_container systemctl is-active --quiet devbox-happy-daemon.service; then
+
+    service_ready=1
+    break
+  fi
+
+  sleep 5
+done
+
+[[ "$service_ready" -eq 1 ]] ||
+  fail "Container did not come back up after a restart"
+
+in_container systemctl is-active --quiet devbox-happy-daemon.service ||
+  fail "devbox-happy-daemon.service is not active after a reboot"
+
+in_container systemctl is-failed --quiet devbox-happy-daemon.service &&
+  fail "devbox-happy-daemon.service failed after a reboot"
+
 log "Checking PostgreSQL connection"
 as_dev bash -c '
   psql --host 127.0.0.1 --username dev --dbname devbox --no-password \
