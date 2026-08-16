@@ -472,6 +472,17 @@ solange `postgres.env` bereits existiert.
 
 ## Betrieb und Updates
 
+Überblick, wie diese konkrete Box konfiguriert ist (Version, Profil,
+Features, SSH, Agenten-Auth, GitHub, OpenRouter):
+
+```bash
+devbox status
+```
+
+`status` setzt sich aus den bereits bestehenden Einzelkommandos zusammen
+(`ssh status`, `auth status`, `github status`, `openrouter status`) und
+dupliziert deren Prüflogik nicht.
+
 Diagnose:
 
 ```bash
