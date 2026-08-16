@@ -1879,23 +1879,46 @@ version_is_newer() {
 
 # Migrates the P1.3-era single env-file (user-state) into the P1.4
 # root-state files, once, the first time this runs after an upgrade.
+#
+# P0.2: this file lives under the dev-writable user-state directory but is
+# read here as root (via update_devbox()/rollback_devbox()). It must never
+# be `source`d or `eval`d - a KEY=VALUE line is data, parsed by hand, and
+# only the three known keys are recognized; anything else (including a
+# line crafted to look like shell code) is silently ignored.
 migrate_legacy_previous_update_state() {
   [[ -f "$LEGACY_PREVIOUS_UPDATE_FILE" ]] || return 0
   [[ -f "$PREVIOUS_REF_FILE" ]] && return 0
 
-  local PREVIOUS_MODE=""
-  local PREVIOUS_TARGET=""
-  local PREVIOUS_VERSION=""
+  local previous_mode=""
+  local previous_target=""
+  local previous_version=""
+  local key value
 
-  # shellcheck source=/dev/null
-  source "$LEGACY_PREVIOUS_UPDATE_FILE"
+  while IFS='=' read -r key value; do
+    case "$key" in
+      PREVIOUS_MODE)
+        [[ "$value" =~ ^(release|branch)$ ]] &&
+          previous_mode="$value"
+        ;;
 
-  if [[ -n "$PREVIOUS_MODE" && -n "$PREVIOUS_TARGET" ]]; then
-    printf '%s:%s\n' "$PREVIOUS_MODE" "$PREVIOUS_TARGET" >"$PREVIOUS_REF_FILE"
+      PREVIOUS_TARGET)
+        [[ "$value" =~ ^[A-Za-z0-9._/-]+$ ]] &&
+          previous_target="$value"
+        ;;
+
+      PREVIOUS_VERSION)
+        [[ "$value" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] &&
+          previous_version="$value"
+        ;;
+    esac
+  done <"$LEGACY_PREVIOUS_UPDATE_FILE"
+
+  if [[ -n "$previous_mode" && -n "$previous_target" ]]; then
+    printf '%s:%s\n' "$previous_mode" "$previous_target" >"$PREVIOUS_REF_FILE"
   fi
 
-  if [[ -n "$PREVIOUS_VERSION" ]]; then
-    printf '%s\n' "$PREVIOUS_VERSION" >"$PREVIOUS_VERSION_FILE"
+  if [[ -n "$previous_version" ]]; then
+    printf '%s\n' "$previous_version" >"$PREVIOUS_VERSION_FILE"
   fi
 
   rm -f "$LEGACY_PREVIOUS_UPDATE_FILE"

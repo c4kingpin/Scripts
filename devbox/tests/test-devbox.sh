@@ -1299,6 +1299,54 @@ devbox_status_composes_existing_status_commands() {
     grep -Fq 'status' "$NORM_MANAGER"
 }
 
+# P0.2: migrate_legacy_previous_update_state() reads a dev-writable file
+# as root (via update_devbox()/rollback_devbox()). It must never `source`
+# or `eval` that file's contents - extract the function and run it against
+# a file containing a shell-injection payload disguised as a third env
+# line, confirming nothing executes, while legitimate KEY=VALUE lines
+# still migrate correctly (regression coverage for the existing behavior).
+migrate_legacy_previous_update_state_never_executes_file_contents() {
+  local migrate_fn
+  migrate_fn="$(sed -n '/^migrate_legacy_previous_update_state() {/,/^}/p' "$MANAGER")"
+
+  [[ -n "$migrate_fn" ]] || return 1
+
+  local legacy_file="${TEST_TMP}/legacy-previous-update.env"
+  local previous_ref_file="${TEST_TMP}/legacy-previous-ref"
+  local previous_version_file="${TEST_TMP}/legacy-previous-version"
+  local canary="${TEST_TMP}/legacy-payload-canary"
+  local output
+
+  rm -f "$canary" "$previous_ref_file" "$previous_version_file"
+
+  cat <<'EOF' >"$legacy_file"
+PREVIOUS_MODE=release
+PREVIOUS_TARGET=v1.2.3
+PREVIOUS_VERSION=1.2.3
+touch TEST_TMP_PLACEHOLDER/legacy-payload-canary
+PREVIOUS_TARGET=$(touch TEST_TMP_PLACEHOLDER/legacy-payload-canary)
+EOF
+
+  sed -i "s#TEST_TMP_PLACEHOLDER#${TEST_TMP}#g" "$legacy_file"
+
+  output="$(
+    bash -c '
+      LEGACY_PREVIOUS_UPDATE_FILE="'"$legacy_file"'"
+      PREVIOUS_REF_FILE="'"$previous_ref_file"'"
+      PREVIOUS_VERSION_FILE="'"$previous_version_file"'"
+      '"$migrate_fn"'
+      migrate_legacy_previous_update_state
+    ' 2>&1
+  )"
+
+  [[ ! -e "$canary" ]] &&
+    [[ "$(<"$previous_ref_file")" == "release:v1.2.3" ]] &&
+    [[ "$(<"$previous_version_file")" == "1.2.3" ]] &&
+    [[ ! -f "$legacy_file" ]] &&
+    ! grep -Fq 'source' <<<"$(sed -n '/^migrate_legacy_previous_update_state() {/,/^}/p' "$MANAGER")" &&
+    [[ -z "$output" ]]
+}
+
 # P0.1: a root-executed write into a dev-controlled path must not follow a
 # symlink dev planted there in advance. write_root_owned_file() is shared
 # by ssh_setup()/ssh_disable() (bin/devbox.sh) and the install.sh feature
@@ -1632,6 +1680,7 @@ run_test "write_root_owned_file refuses to follow a symlink" write_root_owned_fi
 run_test "developer scaffold directories are symlink-guarded" developer_scaffold_dirs_are_symlink_guarded
 run_test "ssh commands use symlink-safe writes" ssh_commands_use_symlink_safe_writes
 run_test "postgres/elixir writes use the symlink-safe helper" postgres_and_elixir_writes_use_symlink_safe_helper
+run_test "legacy previous-update state never executes file contents" migrate_legacy_previous_update_state_never_executes_file_contents
 run_test "doctor checks root state version" doctor_checks_root_state_version
 run_test "Happy daemon starts at boot" happy_daemon_starts_at_boot
 run_test "Happy .bashrc start remains a fallback" happy_bashrc_start_remains_as_fallback
