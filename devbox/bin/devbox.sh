@@ -1433,7 +1433,7 @@ status() {
 
   printf 'Features:\n'
 
-  for feature in elixir postgres; do
+  for feature in elixir postgres redis; do
     if feature_was_installed "$feature"; then
       printf '  %-18s enabled\n' "$feature"
     else
@@ -1470,6 +1470,7 @@ doctor() {
   local runtime_erlang=""
   local runtime_elixir=""
   local service_postgres=""
+  local service_redis=""
   local service_happy_daemon="unknown"
   local auth_codex=false
   local auth_claude=false
@@ -1524,6 +1525,10 @@ doctor() {
     commands+=(psql)
   fi
 
+  if feature_was_installed redis; then
+    commands+=(redis-cli)
+  fi
+
   for command in "${commands[@]}"; do
     if run_as_dev \
       bash \
@@ -1557,6 +1562,20 @@ doctor() {
       warn "PostgreSQL service is not active"
       status=1
       service_postgres="not running"
+    fi
+  fi
+
+  if feature_was_installed redis; then
+    if systemctl is-active \
+      --quiet \
+      redis-server.service; then
+
+      ok "Redis service"
+      service_redis="running"
+    else
+      warn "Redis service is not active"
+      status=1
+      service_redis="not running"
     fi
   fi
 
@@ -1819,6 +1838,7 @@ doctor() {
       --arg erlang "$runtime_erlang" \
       --arg elixir "$runtime_elixir" \
       --arg postgres "$service_postgres" \
+      --arg redis "$service_redis" \
       --arg happy_daemon "$service_happy_daemon" \
       --argjson auth_codex "$auth_codex" \
       --argjson auth_claude "$auth_claude" \
@@ -1838,6 +1858,7 @@ doctor() {
         },
         services: {
           postgres: (if $postgres == "" then null else $postgres end),
+          redis: (if $redis == "" then null else $redis end),
           happy_daemon: $happy_daemon
         },
         authentication: {
