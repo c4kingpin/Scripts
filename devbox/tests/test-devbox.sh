@@ -8,6 +8,14 @@ readonly PROJECT_ROOT
 readonly INSTALL_SCRIPT="${PROJECT_ROOT}/install.sh"
 readonly MANAGER_SOURCE="${PROJECT_ROOT}/bin/devbox.sh"
 readonly LIB_COMMON="${PROJECT_ROOT}/lib/common.sh"
+readonly LIB_USER="${PROJECT_ROOT}/lib/user.sh"
+readonly FEATURE_BASE="${PROJECT_ROOT}/features/base.sh"
+readonly FEATURE_NODE="${PROJECT_ROOT}/features/node.sh"
+readonly FEATURE_POSTGRES="${PROJECT_ROOT}/features/postgres.sh"
+readonly FEATURE_AGENTS="${PROJECT_ROOT}/features/agents.sh"
+readonly FEATURE_HAPPY="${PROJECT_ROOT}/features/happy.sh"
+readonly FEATURE_TOOLING="${PROJECT_ROOT}/features/tooling.sh"
+readonly FEATURE_ELIXIR="${PROJECT_ROOT}/features/elixir.sh"
 TEST_TMP="$(mktemp -d /tmp/devbox-tests.XXXXXX)"
 readonly TEST_TMP
 readonly MANAGER="${TEST_TMP}/devbox"
@@ -63,9 +71,25 @@ normalize_continuations() {
 
 readonly NORM_INSTALL="${TEST_TMP}/install.normalized"
 readonly NORM_MANAGER="${TEST_TMP}/devbox.normalized"
+readonly NORM_LIB_USER="${TEST_TMP}/lib_user.normalized"
+readonly NORM_FEATURE_BASE="${TEST_TMP}/feature_base.normalized"
+readonly NORM_FEATURE_POSTGRES="${TEST_TMP}/feature_postgres.normalized"
+readonly NORM_FEATURE_TOOLING="${TEST_TMP}/feature_tooling.normalized"
+readonly NORM_FEATURE_ELIXIR="${TEST_TMP}/feature_elixir.normalized"
 
 scripts_have_valid_syntax() {
-  bash -n "$INSTALL_SCRIPT" "$MANAGER" "$LIB_COMMON"
+  bash -n \
+    "$INSTALL_SCRIPT" \
+    "$MANAGER" \
+    "$LIB_COMMON" \
+    "$LIB_USER" \
+    "$FEATURE_BASE" \
+    "$FEATURE_NODE" \
+    "$FEATURE_POSTGRES" \
+    "$FEATURE_AGENTS" \
+    "$FEATURE_HAPPY" \
+    "$FEATURE_TOOLING" \
+    "$FEATURE_ELIXIR"
 }
 
 standalone_no_proxmox_framework() {
@@ -98,19 +122,39 @@ install_script_fetches_matching_manager_version() {
     grep -Fq 'fetch_devbox_module "bin/devbox.sh" "/usr/local/bin/devbox"' "$INSTALL_SCRIPT"
 }
 
-# lib/common.sh holds operational helpers (verify_checksum, run_as_dev) that
-# are only needed after the bootstrap preflight has already run; it must not
-# be defined inline in install.sh anymore, only downloaded and sourced, and
-# the bootstrap chain itself (root/OS/network checks, curl_with_retry,
-# fetch_devbox_module) must stay inline since it's needed to fetch this file
-# in the first place.
-install_script_loads_common_lib_after_bootstrap() {
-  grep -Fq 'fetch_devbox_module "lib/common.sh" "$devbox_lib_common"' "$INSTALL_SCRIPT" &&
-    grep -Fq 'source "$devbox_lib_common"' "$INSTALL_SCRIPT" &&
+# lib/*.sh and features/*.sh hold operational helpers and installation
+# phases that are only needed after the bootstrap preflight has already run;
+# none of them may be defined inline in install.sh anymore, only downloaded
+# and sourced in a loop, and the bootstrap chain itself (root/OS/network
+# checks, curl_with_retry, fetch_devbox_module) must stay inline since it's
+# needed to fetch these files in the first place.
+install_script_loads_all_modules_after_bootstrap() {
+  local module
+
+  for module in \
+    lib/common.sh \
+    lib/user.sh \
+    features/base.sh \
+    features/node.sh \
+    features/postgres.sh \
+    features/agents.sh \
+    features/happy.sh \
+    features/tooling.sh \
+    features/elixir.sh; do
+
+    grep -Fq "$module" "$NORM_INSTALL" || return 1
+  done
+
+  grep -Fq 'fetch_devbox_module "$devbox_module" "$devbox_module_tmp"' "$INSTALL_SCRIPT" &&
+    grep -Fq 'source "$devbox_module_tmp"' "$INSTALL_SCRIPT" &&
     ! grep -Fq 'verify_checksum() {' "$INSTALL_SCRIPT" &&
     ! grep -Fq 'run_as_dev() (' "$INSTALL_SCRIPT" &&
+    ! grep -Fq 'create_developer_user() {' "$INSTALL_SCRIPT" &&
+    ! grep -Fq 'install_erlang() {' "$INSTALL_SCRIPT" &&
     grep -Fq 'verify_checksum() {' "$LIB_COMMON" &&
-    grep -Fq 'run_as_dev() (' "$LIB_COMMON"
+    grep -Fq 'run_as_dev() (' "$LIB_COMMON" &&
+    grep -Fq 'create_developer_user() {' "$LIB_USER" &&
+    grep -Fq 'install_erlang() {' "$FEATURE_ELIXIR"
 }
 
 install_script_runs_standalone_preflight() {
@@ -140,24 +184,24 @@ install_script_is_bare_metal() {
 # during kernel startup. Erlang and Elixir live in /opt and are reached by
 # plain symlinks in /usr/local/bin.
 toolchain_is_installed_outside_the_version_manager() {
-  grep -Fq 'OTP_ROOT="/opt/devbox/otp"' "$INSTALL_SCRIPT" &&
-    grep -Fq 'ELIXIR_ROOT="/opt/devbox/elixir"' "$INSTALL_SCRIPT" &&
-    grep -Fq './Install -minimal "$OTP_ROOT"' "$NORM_INSTALL" &&
+  grep -Fq 'OTP_ROOT="/opt/devbox/otp"' "$FEATURE_ELIXIR" &&
+    grep -Fq 'ELIXIR_ROOT="/opt/devbox/elixir"' "$FEATURE_ELIXIR" &&
+    grep -Fq './Install -minimal "$OTP_ROOT"' "$NORM_FEATURE_ELIXIR" &&
     grep -Fq 'ln -sfn "${OTP_ROOT}/bin/${otp_bin}" "/usr/local/bin/${otp_bin}"' \
-      "$NORM_INSTALL" &&
+      "$NORM_FEATURE_ELIXIR" &&
     grep -Fq 'ln -sfn "${ELIXIR_ROOT}/bin/${elixir_bin}" "/usr/local/bin/${elixir_bin}"' \
-      "$NORM_INSTALL" &&
+      "$NORM_FEATURE_ELIXIR" &&
     # mise must never be told to provide erlang or elixir ...
-    ! grep -Eq 'mise[^\n]*(use|exec|reshim)[^\n]*(erlang|elixir)' "$INSTALL_SCRIPT" &&
-    ! grep -Eq 'MISE_ERLANG|erlang@|elixir@' "$INSTALL_SCRIPT" &&
+    ! grep -Eq 'mise[^\n]*(use|exec|reshim)[^\n]*(erlang|elixir)' "$FEATURE_TOOLING" "$FEATURE_ELIXIR" &&
+    ! grep -Eq 'MISE_ERLANG|erlang@|elixir@' "$FEATURE_TOOLING" "$FEATURE_ELIXIR" &&
     # ... and its shims must stay off the PATH the installer hands to dev.
-    ! grep -Fq 'mise/shims:' "$INSTALL_SCRIPT"
+    ! grep -Fq 'mise/shims:' "$FEATURE_TOOLING"
 }
 
 # mise stays available for other languages a project may need.
 mise_is_available_as_a_developer_tool() {
-  grep -Fq 'curl_with_retry "https://mise.run" "$mise_installer"' "$NORM_INSTALL" &&
-    grep -Fq 'MISE_INSTALL_PATH="${DEV_HOME}/.local/bin/mise"' "$INSTALL_SCRIPT"
+  grep -Fq 'curl_with_retry "https://mise.run" "$mise_installer"' "$NORM_FEATURE_TOOLING" &&
+    grep -Fq 'MISE_INSTALL_PATH="${DEV_HOME}/.local/bin/mise"' "$FEATURE_TOOLING"
 }
 
 # OTP 28 crashed on boot in this container class; 29.0.5 is the verified one
@@ -169,17 +213,17 @@ erlang_is_pinned_to_a_verified_release() {
 
 erlang_comes_from_the_precompiled_ubuntu_build() {
   grep -Fq 'builds.hex.pm/builds/otp/${otp_arch}/${otp_os}/OTP-${ERLANG_VERSION}.tar.gz' \
-    "$INSTALL_SCRIPT" &&
-    grep -Fq 'otp_arch="$(dpkg --print-architecture)"' "$INSTALL_SCRIPT" &&
-    ! grep -Fq 'KERL_CONFIGURE_OPTIONS' "$INSTALL_SCRIPT" &&
-    grep -Fq "run_as_dev erl -noshell -eval 'halt(0).'" "$NORM_INSTALL"
+    "$FEATURE_ELIXIR" &&
+    grep -Fq 'otp_arch="$(dpkg --print-architecture)"' "$FEATURE_ELIXIR" &&
+    ! grep -Fq 'KERL_CONFIGURE_OPTIONS' "$FEATURE_ELIXIR" &&
+    grep -Fq "run_as_dev erl -noshell -eval 'halt(0).'" "$NORM_FEATURE_ELIXIR"
 }
 
 # Erlang writes ~/.erlang.cookie when the kernel application starts; an
 # unwritable HOME took the whole runtime down during the original failure.
 erlang_cookie_is_provisioned() {
-  grep -Fq '"${DEV_HOME}/.erlang.cookie"' "$INSTALL_SCRIPT" &&
-    grep -Fq 'chmod 0400 "${DEV_HOME}/.erlang.cookie"' "$NORM_INSTALL" &&
+  grep -Fq '"${DEV_HOME}/.erlang.cookie"' "$FEATURE_ELIXIR" &&
+    grep -Fq 'chmod 0400 "${DEV_HOME}/.erlang.cookie"' "$NORM_FEATURE_ELIXIR" &&
     grep -Fq 'HOME="$DEV_HOME"' "$LIB_COMMON"
 }
 
@@ -188,20 +232,23 @@ installer_requires_ubuntu() {
     grep -Fxq 'require_supported_os' "$INSTALL_SCRIPT" &&
     ! grep -Fq 'require_debian_like' "$INSTALL_SCRIPT" &&
     grep -Fq 'ubuntu-24.04 | ubuntu-22.04 | ubuntu-20.04)' "$INSTALL_SCRIPT" &&
-    grep -Fq 'add-apt-repository -y universe' "$NORM_INSTALL"
+    grep -Fq 'add-apt-repository -y universe' "$NORM_FEATURE_BASE"
 }
 
 elixir_is_pinned_to_the_erlang_otp_major() {
   # Elixir releases are published per OTP major, so deriving the artifact from
   # ERLANG_VERSION keeps the pair from drifting apart on version bumps.
-  grep -Fq 'ERLANG_OTP_MAJOR="${ERLANG_VERSION%%.*}"' "$INSTALL_SCRIPT" &&
+  grep -Fq 'ERLANG_OTP_MAJOR="${ERLANG_VERSION%%.*}"' "$FEATURE_ELIXIR" &&
     grep -Fq 'releases/download/v${ELIXIR_VERSION}/elixir-otp-${ERLANG_OTP_MAJOR}.zip' \
-      "$INSTALL_SCRIPT"
+      "$FEATURE_ELIXIR"
 }
 
 claude_cli_is_installed() {
-  grep -Fq 'npm install --global "@anthropic-ai/claude-code@${CLAUDE_VERSION}"' "$NORM_INSTALL" &&
-    grep -Fq 'npm install --global "@openai/codex@${CODEX_VERSION}"' "$NORM_INSTALL" &&
+  local norm_feature_agents="${TEST_TMP}/feature_agents.normalized"
+  normalize_continuations "$FEATURE_AGENTS" >"$norm_feature_agents"
+
+  grep -Fq 'npm install --global "@anthropic-ai/claude-code@${CLAUDE_VERSION}"' "$norm_feature_agents" &&
+    grep -Fq 'npm install --global "@openai/codex@${CODEX_VERSION}"' "$norm_feature_agents" &&
     grep -Fq 'claude' "$MANAGER" &&
     # Agent CLIs are runtime tools for the dev account, so the installer's
     # own final validation step runs them via run_as_dev, not bare.
@@ -339,7 +386,7 @@ developer_user_is_least_privilege() {
   # AllowUsers directive), so administrative/root SSH access is never
   # touched by DevBox.
   grep -Fq 'useradd --create-home --user-group --shell /bin/bash' \
-    "$NORM_INSTALL" &&
+    "$NORM_LIB_USER" &&
     grep -Fq 'Match User dev' "$INSTALL_SCRIPT" &&
     grep -Fq 'PasswordAuthentication no' "$INSTALL_SCRIPT" &&
     grep -Fq 'AuthenticationMethods publickey' "$INSTALL_SCRIPT" &&
@@ -351,14 +398,14 @@ developer_user_is_least_privilege() {
 }
 
 developer_password_only_set_on_creation() {
-  python3 - "$NORM_INSTALL" <<'PY'
+  python3 - "$NORM_LIB_USER" <<'PY'
 import pathlib
 import re
 import sys
 
 install = pathlib.Path(sys.argv[1]).read_text()
 match = re.search(
-    r'if ! id "\$DEV_USER".*?\n(.*?)\nfi\n',
+    r'if ! id "\$DEV_USER".*?\n(.*?)\n[ \t]*fi\n',
     install,
     re.S,
 )
@@ -373,7 +420,8 @@ PY
 developer_home_parents_are_writable() {
   local config_line
   local state_line
-  local toolchain_line
+  local user_call_line
+  local toolchain_call_line
   local permissions_root="${TEST_TMP}/permissions"
 
   # Each install -d entry is one argument per line ending in a backslash;
@@ -381,20 +429,24 @@ developer_home_parents_are_writable() {
   # actually creates the directory, not the migration guard that also names
   # the same path (on a line ending in "]]; then" instead).
   # shellcheck disable=SC1003
-  config_line="$(grep -nF '"${DEV_HOME}/.config" \' "$INSTALL_SCRIPT" | head -n 1 | cut -d: -f1)"
+  config_line="$(grep -nF '"${DEV_HOME}/.config" \' "$LIB_USER" | head -n 1 | cut -d: -f1)"
   # shellcheck disable=SC1003
-  state_line="$(grep -nF '"${DEV_HOME}/.config/devbox" \' "$INSTALL_SCRIPT" | head -n 1 | cut -d: -f1)"
-  toolchain_line="$(grep -nF 'OTP_ROOT="/opt/devbox/otp"' "$INSTALL_SCRIPT" | head -n 1 | cut -d: -f1)"
+  state_line="$(grep -nF '"${DEV_HOME}/.config/devbox" \' "$LIB_USER" | head -n 1 | cut -d: -f1)"
+  # The dev-user directories must exist before the toolchain install runs;
+  # since that's now two separate sourced files, check the call order in
+  # install.sh instead of a shared line-number space.
+  user_call_line="$(grep -nFx 'create_developer_user' "$INSTALL_SCRIPT" | head -n 1 | cut -d: -f1)"
+  toolchain_call_line="$(grep -nFx 'install_erlang' "$INSTALL_SCRIPT" | head -n 1 | cut -d: -f1)"
 
-  grep -Fq 'run_as_dev test -w "$developer_dir"' "$NORM_INSTALL" &&
-    grep -Fq 'Developer directory is not writable:' "$INSTALL_SCRIPT" ||
+  grep -Fq 'run_as_dev test -w "$developer_dir"' "$NORM_LIB_USER" &&
+    grep -Fq 'Developer directory is not writable:' "$LIB_USER" ||
     return 1
 
-  [[ -n "$config_line" && -n "$state_line" && -n "$toolchain_line" ]] &&
-    ((config_line < state_line && state_line < toolchain_line)) &&
-    grep -Fq '"${DEV_HOME}/.cache"' "$INSTALL_SCRIPT" &&
-    grep -Fq '"${DEV_HOME}/.local"' "$INSTALL_SCRIPT" &&
-    grep -Fq '"${DEV_HOME}/.local/bin"' "$INSTALL_SCRIPT" || return 1
+  [[ -n "$config_line" && -n "$state_line" && -n "$user_call_line" && -n "$toolchain_call_line" ]] &&
+    ((config_line < state_line && user_call_line < toolchain_call_line)) &&
+    grep -Fq '"${DEV_HOME}/.cache"' "$LIB_USER" &&
+    grep -Fq '"${DEV_HOME}/.local"' "$LIB_USER" &&
+    grep -Fq '"${DEV_HOME}/.local/bin"' "$LIB_USER" || return 1
 
   install -d -m 0500 "${permissions_root}/.config"
   if mkdir "${permissions_root}/.config/devbox" 2>/dev/null; then
@@ -411,20 +463,20 @@ rerunning_installer_is_idempotent() {
     # A re-run without SSH_AUTHORIZED_KEY or a disabled marker leaves an
     # already-managed SSH policy alone instead of clobbering it.
     grep -Fq 'elif [[ -e "$SSH_DISABLED_MARKER" ]]; then' "$INSTALL_SCRIPT" &&
-    grep -Fq "SELECT 1 FROM pg_roles WHERE rolname = '\${PG_DB_USER}'" "$INSTALL_SCRIPT" &&
-    grep -Fq "SELECT 1 FROM pg_database WHERE datname = '\${PG_DB_NAME}'" "$INSTALL_SCRIPT" &&
-    grep -Fq "grep -q '^PGPASSWORD='" "$NORM_INSTALL"
+    grep -Fq "SELECT 1 FROM pg_roles WHERE rolname = '\${PG_DB_USER}'" "$FEATURE_POSTGRES" &&
+    grep -Fq "SELECT 1 FROM pg_database WHERE datname = '\${PG_DB_NAME}'" "$FEATURE_POSTGRES" &&
+    grep -Fq "grep -q '^PGPASSWORD='" "$NORM_FEATURE_POSTGRES"
 }
 
 # Everything the old name owned must be carried over or removed; the state
 # directory holds the only copy of the DB password and the OpenRouter key.
 renaming_migrates_existing_installations() {
   grep -Fq 'mv "${DEV_HOME}/.config/codex-devbox" "${DEV_HOME}/.config/devbox"' \
-    "$INSTALL_SCRIPT" &&
-    grep -Fq '/usr/local/bin/codex-devbox' "$INSTALL_SCRIPT" &&
-    grep -Fq '/etc/sudoers.d/90-codex-devbox' "$INSTALL_SCRIPT" &&
+    "$NORM_LIB_USER" &&
+    grep -Fq '/usr/local/bin/codex-devbox' "$LIB_USER" &&
+    grep -Fq '/etc/sudoers.d/90-codex-devbox' "$LIB_USER" &&
     grep -Fq '/etc/ssh/sshd_config.d/00-codex-devbox.conf' "$INSTALL_SCRIPT" &&
-    grep -Fq '/etc/profile.d/codex-devbox.sh' "$INSTALL_SCRIPT" &&
+    grep -Fq '/etc/profile.d/codex-devbox.sh' "$LIB_USER" &&
     grep -Fq "s/# Codex Dev Box/# DevBox/" "$INSTALL_SCRIPT" &&
     grep -Eq 'Managed by \(devbox\|codex-devbox\) openrouter setup' "$MANAGER"
 }
@@ -498,8 +550,9 @@ no_hardcoded_default_credentials() {
 
 managed_secrets_have_restricted_permissions() {
   grep -Fq 'chmod 0600' "$NORM_INSTALL" &&
-    grep -Fq '"${DEV_HOME}/.pgpass"' "$INSTALL_SCRIPT" &&
-    grep -Fq '"$PG_ENV_FILE"' "$INSTALL_SCRIPT" &&
+    grep -Fq 'chmod 0600' "$NORM_FEATURE_POSTGRES" &&
+    grep -Fq '"${DEV_HOME}/.pgpass"' "$FEATURE_POSTGRES" &&
+    grep -Fq '"$PG_ENV_FILE"' "$FEATURE_POSTGRES" &&
     grep -Fq '"${DEV_HOME}/.codex/config.toml"' "$INSTALL_SCRIPT" &&
     grep -Fq '"${DEV_HOME}/.claude/settings.json"' "$INSTALL_SCRIPT" &&
     grep -Fq 'chmod 0600 "$OPENROUTER_ENV"' "$NORM_MANAGER"
@@ -564,10 +617,10 @@ update_preserves_user_state() {
 # P0.2: no actively managed npm component may float on @latest.
 managed_agent_clis_are_pinned_not_latest() {
   ! grep -Eq '(@openai/codex|@anthropic-ai/claude-code|[[:space:]]happy)@latest' \
-    "$INSTALL_SCRIPT" &&
-    grep -Fq '"@openai/codex@${CODEX_VERSION}"' "$INSTALL_SCRIPT" &&
-    grep -Fq '"@anthropic-ai/claude-code@${CLAUDE_VERSION}"' "$INSTALL_SCRIPT" &&
-    grep -Fq '"happy@${HAPPY_VERSION}"' "$INSTALL_SCRIPT"
+    "$INSTALL_SCRIPT" "$FEATURE_AGENTS" "$FEATURE_HAPPY" &&
+    grep -Fq '"@openai/codex@${CODEX_VERSION}"' "$FEATURE_AGENTS" &&
+    grep -Fq '"@anthropic-ai/claude-code@${CLAUDE_VERSION}"' "$FEATURE_AGENTS" &&
+    grep -Fq '"happy@${HAPPY_VERSION}"' "$FEATURE_HAPPY"
 }
 
 # install.sh must stay a single, standalone, curl-pipeable file, so it embeds
@@ -641,14 +694,14 @@ downloaded_toolchain_artifacts_are_checksum_verified() {
     grep -Fq 'No known checksum for' "$LIB_COMMON" &&
     grep -Fq 'rm -f "$file"' "$LIB_COMMON" &&
     grep -Fq 'DEVBOX_CHECKSUMS["otp:${ERLANG_VERSION}:${otp_os}:${otp_arch}"]' \
-      "$INSTALL_SCRIPT" &&
+      "$FEATURE_ELIXIR" &&
     grep -Fq 'DEVBOX_CHECKSUMS["elixir:${ELIXIR_VERSION}:${ERLANG_OTP_MAJOR}"]' \
-      "$INSTALL_SCRIPT" ||
+      "$FEATURE_ELIXIR" ||
     return 1
 
   # Verified before the archive is extracted, not after.
-  otp_verify_line="$(grep -n 'verify_checksum ' "$INSTALL_SCRIPT" | head -n1 | cut -d: -f1)"
-  otp_extract_line="$(grep -n 'rm -rf "$OTP_ROOT"' "$INSTALL_SCRIPT" | head -n1 | cut -d: -f1)"
+  otp_verify_line="$(grep -n 'verify_checksum ' "$FEATURE_ELIXIR" | head -n1 | cut -d: -f1)"
+  otp_extract_line="$(grep -n 'rm -rf "$OTP_ROOT"' "$FEATURE_ELIXIR" | head -n1 | cut -d: -f1)"
 
   [[ -n "$otp_verify_line" && -n "$otp_extract_line" ]] &&
     ((otp_verify_line < otp_extract_line))
@@ -694,6 +747,11 @@ installer_validates_complete_stack() {
 extract_manager
 normalize_continuations "$INSTALL_SCRIPT" >"$NORM_INSTALL"
 normalize_continuations "$MANAGER" >"$NORM_MANAGER"
+normalize_continuations "$LIB_USER" >"$NORM_LIB_USER"
+normalize_continuations "$FEATURE_BASE" >"$NORM_FEATURE_BASE"
+normalize_continuations "$FEATURE_POSTGRES" >"$NORM_FEATURE_POSTGRES"
+normalize_continuations "$FEATURE_TOOLING" >"$NORM_FEATURE_TOOLING"
+normalize_continuations "$FEATURE_ELIXIR" >"$NORM_FEATURE_ELIXIR"
 
 run_test "Bash syntax" scripts_have_valid_syntax
 run_test "standalone, no Proxmox/community-scripts framework" standalone_no_proxmox_framework
@@ -701,7 +759,7 @@ run_test "standalone preflight checks" install_script_runs_standalone_preflight
 run_test "curl-pipeable from master" installer_curl_pipeable_from_master
 run_test "project is self-contained under devbox/" project_is_self_contained
 run_test "install.sh fetches a version-matched manager" install_script_fetches_matching_manager_version
-run_test "install.sh loads lib/common.sh after bootstrap" install_script_loads_common_lib_after_bootstrap
+run_test "install.sh loads all modules after bootstrap" install_script_loads_all_modules_after_bootstrap
 run_test "bare-metal install" install_script_is_bare_metal
 run_test "BEAM toolchain outside the version manager" toolchain_is_installed_outside_the_version_manager
 run_test "mise available as a developer tool" mise_is_available_as_a_developer_tool

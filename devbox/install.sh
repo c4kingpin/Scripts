@@ -222,15 +222,30 @@ declare -A DEVBOX_CHECKSUMS=(
   ["otp:29.0.5:ubuntu-22.04:arm64"]="22bb49411e0a6dbb1829a32a2d31cc1cecc994e0c828d97845696ded66cd9c09"
   ["elixir:1.20.3:29"]="51f799b78374d569a5df659bdedeb0dd9ef8251230bcdaef00c533019086e625"
 )
+# shellcheck disable=SC2034 # read by features/elixir.sh after it's sourced
 readonly DEVBOX_CHECKSUMS
 
 msg_info "Loading DevBox modules"
 
-devbox_lib_common="$(mktemp)"
-fetch_devbox_module "lib/common.sh" "$devbox_lib_common"
-# shellcheck source=lib/common.sh
-source "$devbox_lib_common"
-rm -f "$devbox_lib_common"
+devbox_module_tmp="$(mktemp)"
+
+for devbox_module in \
+  lib/common.sh \
+  lib/user.sh \
+  features/base.sh \
+  features/node.sh \
+  features/postgres.sh \
+  features/agents.sh \
+  features/happy.sh \
+  features/tooling.sh \
+  features/elixir.sh; do
+
+  fetch_devbox_module "$devbox_module" "$devbox_module_tmp"
+  # shellcheck disable=SC1090
+  source "$devbox_module_tmp"
+done
+
+rm -f "$devbox_module_tmp"
 
 msg_ok "Loaded DevBox modules"
 
@@ -293,500 +308,32 @@ EOF
 
 select_autonomy
 
-msg_info "Ensuring Ubuntu universe component is enabled"
-
-if apt-cache policy 2>/dev/null | grep -q universe; then
-  msg_ok "universe component already enabled"
-else
-  silent apt-get install \
-    -y \
-    --no-install-recommends \
-    software-properties-common
-
-  silent add-apt-repository \
-    -y \
-    universe
-
-  silent apt-get update
-
-  msg_ok "Enabled universe component"
-fi
-
-msg_info "Installing Dependencies"
-
-silent apt-get install \
-  -y \
-  --no-install-recommends \
-  bash-completion \
-  build-essential \
-  ca-certificates \
-  curl \
-  fd-find \
-  git \
-  git-lfs \
-  gh \
-  gnupg \
-  inotify-tools \
-  jq \
-  less \
-  libssl-dev \
-  locales \
-  nano \
-  openssh-server \
-  openssl \
-  pipx \
-  postgresql \
-  python3 \
-  python3-pip \
-  python3-venv \
-  ripgrep \
-  rsync \
-  shellcheck \
-  sudo \
-  tmux \
-  unattended-upgrades \
-  unzip \
-  vim \
-  wget \
-  xz-utils \
-  zip
-
-msg_ok "Installed Dependencies"
+enable_ubuntu_universe
+install_os_dependencies
 
 ensure_sshd_runtime
 
-msg_info "Installing Node.js ${NODE_VERSION}"
+install_nodejs
 
-if [[ "$(node --version 2>/dev/null || true)" != "v${NODE_VERSION}."* ]]; then
-  nodesource_setup="$(mktemp)"
+enable_postgresql_service
 
-  curl_with_retry \
-    "https://deb.nodesource.com/setup_${NODE_VERSION}.x" \
-    "$nodesource_setup"
+create_developer_user
 
-  silent bash "$nodesource_setup"
+install_codex_cli
+install_claude_cli
+install_happy
 
-  rm -f "$nodesource_setup"
+install_mise
 
-  silent apt-get install \
-    -y \
-    --no-install-recommends \
-    nodejs
-fi
-
-if [[ "$(node --version)" != "v${NODE_VERSION}."* ]]; then
-  msg_error "Unexpected Node.js version: $(node --version 2>/dev/null || echo none)"
-  exit 1
-fi
-
-msg_ok "Installed Node.js $(node --version)"
-
-msg_info "Enabling PostgreSQL"
-
-systemctl enable \
-  --now \
-  postgresql.service
-
-msg_ok "Enabled PostgreSQL"
-
-msg_info "Creating Developer User"
-
-if ! id "$DEV_USER" >/dev/null 2>&1; then
-  useradd \
-    --create-home \
-    --user-group \
-    --shell /bin/bash \
-    "$DEV_USER"
-
-  random_password="$(openssl rand -hex 32)"
-  password_hash="$(openssl passwd -6 "$random_password")"
-
-  usermod \
-    --password "$password_hash" \
-    "$DEV_USER"
-
-  unset random_password
-  unset password_hash
-fi
-
-if [[ -d "${DEV_HOME}/.config/codex-devbox" &&
-      ! -d "${DEV_HOME}/.config/devbox" ]]; then
-
-  msg_info "Migrating state from ~/.config/codex-devbox"
-
-  mv \
-    "${DEV_HOME}/.config/codex-devbox" \
-    "${DEV_HOME}/.config/devbox"
-
-  msg_ok "Migrated state to ~/.config/devbox"
-fi
-
-rm -f \
-  /usr/local/bin/codex-devbox \
-  /etc/sudoers.d/90-codex-devbox \
-  /etc/profile.d/codex-devbox.sh
-
-if [[ -d "${DEV_HOME}/.local/share/mise" ]]; then
-  msg_info "Removing previously mise-managed BEAM toolchain"
-
-  rm -rf \
-    "${DEV_HOME}/.local/share/mise/installs/erlang" \
-    "${DEV_HOME}/.local/share/mise/installs/elixir" \
-    "${DEV_HOME}/.local/share/elixir"
-
-  for stale_bin in \
-    elixir \
-    elixirc \
-    iex \
-    mix \
-    erl \
-    erlc \
-    escript; do
-
-    rm -f \
-      "${DEV_HOME}/.local/share/mise/shims/${stale_bin}" \
-      "${DEV_HOME}/.local/bin/${stale_bin}"
-  done
-
-  if [[ -f "${DEV_HOME}/.config/mise/config.toml" ]]; then
-    sed \
-      -i \
-      '/^\(erlang\|elixir\) *=/d' \
-      "${DEV_HOME}/.config/mise/config.toml"
-  fi
-
-  msg_ok "Removed previously mise-managed BEAM toolchain"
-fi
-
-install \
-  -d \
-  -m 0700 \
-  -o "$DEV_USER" \
-  -g "$DEV_USER" \
-  "${DEV_HOME}/.ssh" \
-  "${DEV_HOME}/.codex" \
-  "${DEV_HOME}/.claude" \
-  "${DEV_HOME}/.happy" \
-  "${DEV_HOME}/.config" \
-  "${DEV_HOME}/.config/devbox" \
-  "${DEV_HOME}/.cache"
-
-install \
-  -d \
-  -m 0755 \
-  -o "$DEV_USER" \
-  -g "$DEV_USER" \
-  "${DEV_HOME}/.local" \
-  "${DEV_HOME}/.local/bin" \
-  "${DEV_HOME}/workspace"
-
-for developer_dir in \
-  "${DEV_HOME}/.config" \
-  "${DEV_HOME}/.cache" \
-  "${DEV_HOME}/.local" \
-  "${DEV_HOME}/.happy" \
-  "${DEV_HOME}/workspace"; do
-
-  if ! run_as_dev test \
-    -w "$developer_dir"; then
-
-    msg_error "Developer directory is not writable: ${developer_dir}"
-    exit 1
-  fi
-done
-
-msg_ok "Created Developer User"
-
-msg_info "Installing Codex CLI ${CODEX_VERSION}"
-
-silent npm install \
-  --global \
-  "@openai/codex@${CODEX_VERSION}"
-
-msg_ok "Installed Codex CLI ${CODEX_VERSION}"
-
-msg_info "Installing Claude Code ${CLAUDE_VERSION}"
-
-silent npm install \
-  --global \
-  "@anthropic-ai/claude-code@${CLAUDE_VERSION}"
-
-msg_ok "Installed Claude Code ${CLAUDE_VERSION}"
-
-msg_info "Installing Happy ${HAPPY_VERSION}"
-
-silent npm install \
-  --global \
-  "happy@${HAPPY_VERSION}"
-
-if ! npm list \
-  --global \
-  --depth=0 \
-  happy \
-  >/dev/null 2>&1; then
-
-  msg_error "Happy npm package was not installed correctly."
-  exit 1
-fi
-
-msg_ok "Installed Happy"
-
-msg_info "Installing mise"
-
-mise_installer="/tmp/devbox-mise-install.sh"
-
-curl_with_retry \
-  "https://mise.run" \
-  "$mise_installer"
-
-chmod \
-  0755 \
-  "$mise_installer"
-
-run_as_dev \
-  env \
-  MISE_INSTALL_PATH="${DEV_HOME}/.local/bin/mise" \
-  sh "$mise_installer" \
-  >>"$LOG_FILE" 2>&1
-
-rm -f "$mise_installer"
-
-msg_ok "Installed mise"
-
-readonly OTP_ROOT="/opt/devbox/otp"
-readonly ELIXIR_ROOT="/opt/devbox/elixir"
-
-ERLANG_OTP_MAJOR="${ERLANG_VERSION%%.*}"
-
-msg_info "Installing Erlang/OTP ${ERLANG_VERSION}"
-
-otp_arch="$(dpkg --print-architecture)"
-
-otp_os="ubuntu-$(
-  . /etc/os-release
-  printf '%s' "${VERSION_ID}"
-)"
-
-otp_tarball="/tmp/devbox-otp.tar.gz"
-
-curl_with_retry \
-  "https://builds.hex.pm/builds/otp/${otp_arch}/${otp_os}/OTP-${ERLANG_VERSION}.tar.gz" \
-  "$otp_tarball"
-
-verify_checksum \
-  "$otp_tarball" \
-  "${DEVBOX_CHECKSUMS["otp:${ERLANG_VERSION}:${otp_os}:${otp_arch}"]:-}" \
-  "Erlang/OTP ${ERLANG_VERSION} (${otp_os}, ${otp_arch})"
-
-rm -rf "$OTP_ROOT"
-
-install \
-  -d \
-  -m 0755 \
-  "$OTP_ROOT"
-
-tar \
-  -xzf "$otp_tarball" \
-  -C "$OTP_ROOT" \
-  --strip-components=1
-
-rm -f "$otp_tarball"
-
-(
-  cd "$OTP_ROOT"
-
-  ./Install \
-    -minimal \
-    "$OTP_ROOT"
-) >>"$LOG_FILE" 2>&1
-
-for otp_bin in \
-  erl \
-  erlc \
-  escript \
-  epmd \
-  dialyzer \
-  typer \
-  ct_run \
-  run_erl \
-  to_erl; do
-
-  if [[ -x "${OTP_ROOT}/bin/${otp_bin}" ]]; then
-    ln \
-      -sfn \
-      "${OTP_ROOT}/bin/${otp_bin}" \
-      "/usr/local/bin/${otp_bin}"
-  fi
-done
-
-if [[ ! -f "${DEV_HOME}/.erlang.cookie" ]]; then
-  openssl rand \
-    -hex 32 \
-    >"${DEV_HOME}/.erlang.cookie"
-fi
-
-chown \
-  "$DEV_USER:$DEV_USER" \
-  "${DEV_HOME}/.erlang.cookie"
-
-chmod \
-  0400 \
-  "${DEV_HOME}/.erlang.cookie"
-
-if ! run_as_dev erl \
-  -noshell \
-  -eval 'halt(0).'; then
-
-  msg_error "Erlang ${ERLANG_VERSION} was installed but cannot execute BEAM code."
-  exit 1
-fi
-
-msg_ok "Installed Erlang/OTP ${ERLANG_VERSION}"
-
-msg_info "Installing Elixir ${ELIXIR_VERSION} and Phoenix ${PHOENIX_VERSION}"
-
-elixir_zip="/tmp/devbox-elixir.zip"
-
-curl_with_retry \
-  "https://github.com/elixir-lang/elixir/releases/download/v${ELIXIR_VERSION}/elixir-otp-${ERLANG_OTP_MAJOR}.zip" \
-  "$elixir_zip"
-
-verify_checksum \
-  "$elixir_zip" \
-  "${DEVBOX_CHECKSUMS["elixir:${ELIXIR_VERSION}:${ERLANG_OTP_MAJOR}"]:-}" \
-  "Elixir ${ELIXIR_VERSION} (OTP ${ERLANG_OTP_MAJOR})"
-
-rm -rf "$ELIXIR_ROOT"
-
-install \
-  -d \
-  -m 0755 \
-  "$ELIXIR_ROOT"
-
-unzip \
-  -q \
-  "$elixir_zip" \
-  -d "$ELIXIR_ROOT"
-
-rm -f "$elixir_zip"
-
-chmod \
-  0755 \
-  "$ELIXIR_ROOT"/bin/*
-
-for elixir_bin in \
-  elixir \
-  elixirc \
-  iex \
-  mix; do
-
-  ln \
-    -sfn \
-    "${ELIXIR_ROOT}/bin/${elixir_bin}" \
-    "/usr/local/bin/${elixir_bin}"
-done
-
-run_as_dev mix local.hex --force
-run_as_dev mix local.rebar --force
-
-run_as_dev mix archive.install \
-  hex \
-  phx_new \
-  "$PHOENIX_VERSION" \
-  --force
-
-msg_ok "Installed Elixir ${ELIXIR_VERSION} (OTP ${ERLANG_OTP_MAJOR}) and Phoenix ${PHOENIX_VERSION}"
+install_erlang
+install_elixir_and_phoenix
 
 readonly PG_DB_NAME="devbox"
 readonly PG_DB_USER="dev"
+# shellcheck disable=SC2034 # read by configure_postgres_dev_access() in features/postgres.sh
 readonly PG_ENV_FILE="${DEV_HOME}/.config/devbox/postgres.env"
 
-msg_info "Configuring PostgreSQL Development Access"
-
-if [[ -r "$PG_ENV_FILE" ]] &&
-  grep \
-    -q \
-    '^PGPASSWORD=' \
-    "$PG_ENV_FILE"; then
-
-  PG_DB_PASS="$(
-    sed \
-      -n \
-      's/^PGPASSWORD=//p' \
-      "$PG_ENV_FILE"
-  )"
-else
-  PG_DB_PASS="$(openssl rand -hex 24)"
-fi
-
-if runuser \
-  -u postgres \
-  -- \
-  psql \
-    --tuples-only \
-    --no-align \
-    --command "SELECT 1 FROM pg_roles WHERE rolname = '${PG_DB_USER}';" \
-  | grep -q '^1$'; then
-
-  runuser \
-    -u postgres \
-    -- \
-    psql \
-      --set ON_ERROR_STOP=on \
-      --command "ALTER ROLE ${PG_DB_USER} WITH PASSWORD '${PG_DB_PASS}' CREATEDB;"
-else
-  runuser \
-    -u postgres \
-    -- \
-    psql \
-      --set ON_ERROR_STOP=on \
-      --command "CREATE ROLE ${PG_DB_USER} WITH LOGIN PASSWORD '${PG_DB_PASS}' CREATEDB;"
-fi
-
-if ! runuser \
-  -u postgres \
-  -- \
-  psql \
-    --tuples-only \
-    --no-align \
-    --command "SELECT 1 FROM pg_database WHERE datname = '${PG_DB_NAME}';" \
-  | grep -q '^1$'; then
-
-  runuser \
-    -u postgres \
-    -- \
-    psql \
-      --set ON_ERROR_STOP=on \
-      --command "CREATE DATABASE ${PG_DB_NAME} OWNER ${PG_DB_USER};"
-fi
-
-cat <<EOF >"${DEV_HOME}/.pgpass"
-127.0.0.1:5432:*:${PG_DB_USER}:${PG_DB_PASS}
-localhost:5432:*:${PG_DB_USER}:${PG_DB_PASS}
-EOF
-
-cat <<EOF >"$PG_ENV_FILE"
-PGHOST=127.0.0.1
-PGPORT=5432
-PGUSER=${PG_DB_USER}
-PGPASSWORD=${PG_DB_PASS}
-PGDATABASE=${PG_DB_NAME}
-DATABASE_URL=ecto://${PG_DB_USER}:${PG_DB_PASS}@127.0.0.1/${PG_DB_NAME}
-EOF
-
-chown \
-  "$DEV_USER:$DEV_USER" \
-  "${DEV_HOME}/.pgpass" \
-  "$PG_ENV_FILE"
-
-chmod \
-  0600 \
-  "${DEV_HOME}/.pgpass" \
-  "$PG_ENV_FILE"
-
-unset PG_DB_PASS
-
-msg_ok "Configured PostgreSQL Development Access"
+configure_postgres_dev_access
 
 msg_info "Configuring Development Environment"
 
