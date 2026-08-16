@@ -575,6 +575,12 @@ Stellen nicht auseinanderlaufen. Keine der verwalteten npm-Komponenten nutzt
 devbox version
 ```
 
+Maschinenlesbar für Agenten/Tooling:
+
+```bash
+devbox version --json
+```
+
 Die heruntergeladenen Erlang/OTP- und Elixir-Artefakte werden vor der
 Installation gegen bekannte SHA256-Prüfsummen aus
 [`checksums.env`](checksums.env) verifiziert; ein manipuliertes oder falsches
