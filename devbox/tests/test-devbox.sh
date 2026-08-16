@@ -1785,6 +1785,27 @@ readme_pipe_examples_pass_env_vars_to_bash_not_curl() {
     grep -Fq 'env SSH_AUTHORIZED_KEY=' "${PROJECT_ROOT}/README.md"
 }
 
+# P2.4: SC2086/SC2154 catch real word-splitting/quoting and
+# unassigned-variable bugs; a global --exclude for them can let a real new
+# finding pass silently. A repo-wide `shellcheck -x --exclude=SC1090,SC1091`
+# pass (i.e. everything except the two that are structurally unavoidable -
+# dynamically sourced, downloaded modules shellcheck can't statically
+# follow) currently finds nothing to disable locally, so no per-line
+# `# shellcheck disable=SC2086` exceptions exist anywhere in the repo
+# either. This only guards against the global exclusion creeping back into
+# CI/docs; it isn't itself a substitute for the "Run ShellCheck" CI step.
+shellcheck_exceptions_are_not_globally_disabled() {
+  local repo_root="${PROJECT_ROOT}/.."
+
+  ! grep -Fq 'SC2086' "${repo_root}/.github/workflows/ci.yml" &&
+    ! grep -Fq 'SC2154' "${repo_root}/.github/workflows/ci.yml" &&
+    ! grep -Fq 'SC2086' "${repo_root}/README.md" &&
+    ! grep -Fq 'SC2154' "${repo_root}/README.md" &&
+    ! grep -Fq 'SC2086' "${PROJECT_ROOT}/README.md" &&
+    ! grep -Fq 'SC2154' "${PROJECT_ROOT}/README.md" &&
+    grep -Fq 'exclude=SC1090,SC1091' "${repo_root}/.github/workflows/ci.yml"
+}
+
 doctor_checks_root_state_version() {
   local check_block
   check_block="$(sed -n '/if \[\[ -r "\$ROOT_VERSION_FILE" \]\]; then/,/^  fi$/p' "$MANAGER")"
@@ -2049,6 +2070,7 @@ run_test "postgres password is validated before SQL interpolation" postgres_pass
 run_test "devbox version reports the installed commit" devbox_version_reports_the_installed_commit
 run_test "update --check compares branch commits" update_check_compares_branch_commits
 run_test "README pipe examples pass env vars to bash, not curl" readme_pipe_examples_pass_env_vars_to_bash_not_curl
+run_test "shellcheck exceptions are not globally disabled" shellcheck_exceptions_are_not_globally_disabled
 run_test "doctor checks root state version" doctor_checks_root_state_version
 run_test "Happy daemon starts at boot" happy_daemon_starts_at_boot
 run_test "Happy .bashrc start remains a fallback" happy_bashrc_start_remains_as_fallback
