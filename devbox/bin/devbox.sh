@@ -103,6 +103,9 @@ Commands:
   version
       Show centrally managed DevBox tool versions.
 
+  version --json
+      Same as version, as a JSON object.
+
   auth status
       Show Happy, Codex and Claude authentication status.
 
@@ -540,6 +543,29 @@ Codex CLI:     ${CODEX_VERSION}
 Claude Code:   ${CLAUDE_VERSION}
 Happy:         ${HAPPY_VERSION}
 EOF
+}
+
+show_version_json() {
+  jq \
+    -n \
+    --arg devbox "$DEVBOX_VERSION" \
+    --arg node "$NODE_MAJOR" \
+    --arg erlang "$ERLANG_VERSION" \
+    --arg elixir "$ELIXIR_VERSION" \
+    --arg phoenix "$PHOENIX_VERSION" \
+    --arg codex_cli "$CODEX_VERSION" \
+    --arg claude_code "$CLAUDE_VERSION" \
+    --arg happy "$HAPPY_VERSION" \
+    '{
+      devbox: $devbox,
+      node: $node,
+      erlang: $erlang,
+      elixir: $elixir,
+      phoenix: $phoenix,
+      codex_cli: $codex_cli,
+      claude_code: $claude_code,
+      happy: $happy
+    }'
 }
 
 codex_is_authenticated() {
@@ -1901,6 +1927,10 @@ main() {
 
     version:)
       show_version
+      ;;
+
+    version:--json)
+      show_version_json
       ;;
 
     auth:status)
