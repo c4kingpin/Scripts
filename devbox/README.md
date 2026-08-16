@@ -7,6 +7,29 @@ LXD/Incus oder jede andere Plattform), wird als `root` ausgeführt und richtet
 dabei auch den `devbox`-Manager ein. Es hat keine Abhängigkeit zu Proxmox
 selbst oder zu einem Framework.
 
+Der `devbox`-Manager selbst liegt als eigenständige Quelldatei unter
+[`bin/devbox.sh`](bin/devbox.sh) und wird von `install.sh` während der
+Installation aus demselben Branch/Commit heruntergeladen und unverändert nach
+`/usr/local/bin/devbox` geschrieben — so bleiben Installer und Manager immer
+versionsgleich. Am dokumentierten Curl-Einzeiler ändert das nichts: `install.sh`
+lädt ohnehin schon während der Installation weitere Artefakte (Pakete, Node.js,
+Erlang/Elixir, Codex/Claude/Happy) nach.
+
+Betriebslogik, die `install.sh` erst nach seiner Bootstrap-Phase (Root-/OS-/
+Netzwerk-Check) braucht, wandert schrittweise in eigene, ebenfalls
+nachgeladene Module unter [`lib/`](lib) und [`features/`](features):
+[`lib/common.sh`](lib/common.sh) (Checksum-Verifikation, `run_as_dev`-Helfer)
+und [`lib/user.sh`](lib/user.sh) (Dev-User-Anlage) sind quer genutzte
+Bausteine; [`features/`](features) enthält je eine Datei pro
+Installationsphase (`base.sh`, `node.sh`, `postgres.sh`, `agents.sh`,
+`happy.sh`, `tooling.sh`, `elixir.sh`). Jede Datei definiert nur Funktionen —
+`install.sh` ruft sie in derselben Reihenfolge auf, in der die Phasen früher
+inline standen. Die Bootstrap-Kette selbst bleibt bewusst in `install.sh`, da
+sie gebraucht wird, um diese Module überhaupt herunterzuladen. `bin/devbox.sh`
+bleibt davon unabhängig eine einzelne, in sich geschlossene Datei ohne
+Laufzeit-Abhängigkeit auf `lib/`, damit `devbox`-Befehle nach der
+Installation ohne Netzwerkzugriff funktionieren.
+
 Das Skript erstellt oder konfiguriert den Container selbst nicht. Storage,
 Netzwerk, Template und Ressourcen des Containers müssen vor dem Aufruf bereits
 über das jeweilige Hypervisor-Tooling (`pct create`, `lxc launch`,
@@ -455,12 +478,15 @@ Artefakt bricht die Installation sofort ab, bevor es entpackt wird.
 Lokale Prüfungen, aus diesem Verzeichnis heraus:
 
 ```bash
-bash -n install.sh tests/test-devbox.sh
+bash -n install.sh bin/devbox.sh lib/*.sh features/*.sh tests/test-devbox.sh
 
 bash tests/test-devbox.sh
 
 shellcheck -x --exclude=SC1090,SC1091,SC2086,SC2154 \
   install.sh \
+  bin/devbox.sh \
+  lib/*.sh \
+  features/*.sh \
   tests/test-devbox.sh
 ```
 
