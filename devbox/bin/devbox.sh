@@ -19,6 +19,7 @@ readonly ROOT_VERSION_FILE="${ROOT_STATE_DIR}/version"
 readonly PREVIOUS_VERSION_FILE="${ROOT_STATE_DIR}/previous-version"
 readonly PREVIOUS_REF_FILE="${ROOT_STATE_DIR}/previous-ref"
 readonly ACTIVE_REF_FILE="${ROOT_STATE_DIR}/active-ref"
+readonly REMOTE_PROVIDER_FILE="${ROOT_STATE_DIR}/remote-provider"
 readonly ROOT_COMMIT_FILE="${ROOT_STATE_DIR}/commit"
 readonly INSTALL_STATE_FILE="${ROOT_STATE_DIR}/install-state.json"
 
@@ -1409,6 +1410,17 @@ feature_was_installed() {
   grep -Fqw "$1" "$FEATURES_FILE"
 }
 
+# #43: the configured remote provider ("happy" or "none"). No
+# REMOTE_PROVIDER_FILE means the box predates this feature, when Happy was
+# unconditionally installed - "happy" is the correct migrated value.
+configured_remote_provider() {
+  if [[ -r "$REMOTE_PROVIDER_FILE" ]]; then
+    printf '%s' "$(<"$REMOTE_PROVIDER_FILE")"
+  else
+    printf 'happy'
+  fi
+}
+
 # P2.2: "How is this specific box configured?" A composite view built from
 # the Root-State files and the existing per-domain status commands
 # (ssh_status, auth/github/openrouter status) rather than reimplementing
@@ -1429,7 +1441,8 @@ status() {
 
   printf 'DevBox version:      %s\n' "$devbox_version"
   printf 'Commit:              %s\n' "$(installed_commit)"
-  printf 'Profile:             %s\n\n' "$profile"
+  printf 'Profile:             %s\n' "$profile"
+  printf 'Remote provider:     %s\n\n' "$(configured_remote_provider)"
 
   printf 'Features:\n'
 
@@ -1483,6 +1496,18 @@ doctor() {
   local checks_target=/dev/stdout
   [[ "$json_mode" == 1 ]] && checks_target=/dev/null
 
+  # #43: doctor only checks the configured remote provider. A box with
+  # DEVBOX_REMOTE=none never installed Happy, so none of its checks apply
+  # there - "not configured" rather than a failure.
+  local remote_provider
+  remote_provider="$(configured_remote_provider)"
+
+  if [[ "$remote_provider" != "happy" ]]; then
+    service_happy_daemon="not configured"
+    security_happy_dir_permissions=true
+    security_secret_permissions=true
+  fi
+
   {
 
   if [[ -r /etc/os-release ]]; then
@@ -1504,7 +1529,6 @@ doctor() {
   local commands=(
     claude
     codex
-    happy
     fd
     gh
     git
@@ -1514,6 +1538,10 @@ doctor() {
     python3
     rg
   )
+
+  if [[ "$remote_provider" == "happy" ]]; then
+    commands+=(happy)
+  fi
 
   if feature_was_installed elixir; then
     commands+=(elixir erl mix)
@@ -1601,27 +1629,29 @@ doctor() {
 
   # Do not invoke `happy --version`: current Happy versions may continue into
   # normal first-use startup. Validate the globally installed npm package.
-  if run_as_dev npm list \
-    --global \
-    --depth=0 \
-    happy \
-    >/dev/null 2>&1; then
+  if [[ "$remote_provider" == "happy" ]]; then
+    if run_as_dev npm list \
+      --global \
+      --depth=0 \
+      happy \
+      >/dev/null 2>&1; then
 
-    happy_version="$(
-      run_as_dev npm list \
-        --global \
-        --depth=0 \
-        happy \
-        2>/dev/null \
-      | grep -E 'happy@' \
-      | head -n1 \
-      || true
-    )"
+      happy_version="$(
+        run_as_dev npm list \
+          --global \
+          --depth=0 \
+          happy \
+          2>/dev/null \
+        | grep -E 'happy@' \
+        | head -n1 \
+        || true
+      )"
 
-    ok "${happy_version:-Happy npm package}"
-  else
-    warn "Happy npm package is missing"
-    status=1
+      ok "${happy_version:-Happy npm package}"
+    else
+      warn "Happy npm package is missing"
+      status=1
+    fi
   fi
 
   if feature_was_installed elixir; then
@@ -1669,110 +1699,112 @@ doctor() {
     warn "GitHub CLI is not authenticated (run: devbox github setup)"
   fi
 
-  # shellcheck disable=SC2016 # single-quoted on purpose: expands inside the nested `bash -lc` shell, not here
-  if run_as_dev \
-    bash \
-    -lc \
-    '
-      [[ -s "$HOME/.happy/access.key" ]] &&
-      [[ -s "$HOME/.happy/settings.json" ]] &&
-      jq -e "
-        (.machineId? | type == \"string\")
-        and
-        (.machineId | length > 0)
-      " "$HOME/.happy/settings.json" >/dev/null 2>&1
-    '; then
+  if [[ "$remote_provider" == "happy" ]]; then
+    # shellcheck disable=SC2016 # single-quoted on purpose: expands inside the nested `bash -lc` shell, not here
+    if run_as_dev \
+      bash \
+      -lc \
+      '
+        [[ -s "$HOME/.happy/access.key" ]] &&
+        [[ -s "$HOME/.happy/settings.json" ]] &&
+        jq -e "
+          (.machineId? | type == \"string\")
+          and
+          (.machineId | length > 0)
+        " "$HOME/.happy/settings.json" >/dev/null 2>&1
+      '; then
 
-    ok "Happy is paired"
-    auth_happy=true
-  else
-    warn "Happy is not paired (run: devbox auth login)"
-  fi
-
-  # shellcheck disable=SC2016 # single-quoted on purpose: expands inside the nested `bash -lc` shell, not here
-  if run_as_dev \
-    bash \
-    -lc \
-    '
-      state="$HOME/.happy/daemon.state.json"
-
-      [[ -s "$state" ]] ||
-        exit 1
-
-      pid="$(
-        jq -r ".pid // empty" "$state" 2>/dev/null ||
-        true
-      )"
-
-      [[ "$pid" =~ ^[0-9]+$ ]] ||
-        exit 1
-
-      kill -0 "$pid" 2>/dev/null
-    '; then
-
-    ok "Happy daemon"
-    service_happy_daemon="running"
-  else
-    warn "Happy daemon is not running"
-    service_happy_daemon="not running"
-  fi
-
-  # Remote access has to survive a reboot on its own (issue #19): without
-  # the boot service, Happy only comes back once somebody opens an
-  # interactive dev shell.
-  if happy_daemon_service_is_installed; then
-    if happy_daemon_service_is_enabled; then
-      ok "Happy daemon service (${HAPPY_SERVICE})"
+      ok "Happy is paired"
+      auth_happy=true
     else
-      warn "${HAPPY_SERVICE} is installed but not enabled"
+      warn "Happy is not paired (run: devbox auth login)"
+    fi
+
+    # shellcheck disable=SC2016 # single-quoted on purpose: expands inside the nested `bash -lc` shell, not here
+    if run_as_dev \
+      bash \
+      -lc \
+      '
+        state="$HOME/.happy/daemon.state.json"
+
+        [[ -s "$state" ]] ||
+          exit 1
+
+        pid="$(
+          jq -r ".pid // empty" "$state" 2>/dev/null ||
+          true
+        )"
+
+        [[ "$pid" =~ ^[0-9]+$ ]] ||
+          exit 1
+
+        kill -0 "$pid" 2>/dev/null
+      '; then
+
+      ok "Happy daemon"
+      service_happy_daemon="running"
+    else
+      warn "Happy daemon is not running"
+      service_happy_daemon="not running"
+    fi
+
+    # Remote access has to survive a reboot on its own (issue #19): without
+    # the boot service, Happy only comes back once somebody opens an
+    # interactive dev shell.
+    if happy_daemon_service_is_installed; then
+      if happy_daemon_service_is_enabled; then
+        ok "Happy daemon service (${HAPPY_SERVICE})"
+      else
+        warn "${HAPPY_SERVICE} is installed but not enabled"
+        status=1
+      fi
+
+      if systemctl is-failed \
+        --quiet \
+        "$HAPPY_SERVICE" \
+        2>/dev/null; then
+
+        warn "${HAPPY_SERVICE} is in a failed state (systemctl status ${HAPPY_SERVICE})"
+        status=1
+      fi
+    else
+      warn "${HAPPY_SERVICE} is not installed; Happy only starts from an interactive dev shell"
       status=1
     fi
 
-    if systemctl is-failed \
-      --quiet \
-      "$HAPPY_SERVICE" \
-      2>/dev/null; then
+    # shellcheck disable=SC2016 # single-quoted on purpose: expands inside the nested `bash -lc` shell, not here
+    if run_as_dev \
+      bash \
+      -lc \
+      '
+        [[ ! -e "$HOME/.happy" ]] ||
+        [[ "$(stat -c "%a" "$HOME/.happy")" == "700" ]]
+      '; then
 
-      warn "${HAPPY_SERVICE} is in a failed state (systemctl status ${HAPPY_SERVICE})"
+      ok "Happy data directory permissions"
+      security_happy_dir_permissions=true
+    else
+      # shellcheck disable=SC2088 # literal display text, not a path expansion
+      warn "~/.happy should have mode 0700"
       status=1
     fi
-  else
-    warn "${HAPPY_SERVICE} is not installed; Happy only starts from an interactive dev shell"
-    status=1
-  fi
 
-  # shellcheck disable=SC2016 # single-quoted on purpose: expands inside the nested `bash -lc` shell, not here
-  if run_as_dev \
-    bash \
-    -lc \
-    '
-      [[ ! -e "$HOME/.happy" ]] ||
-      [[ "$(stat -c "%a" "$HOME/.happy")" == "700" ]]
-    '; then
+    # shellcheck disable=SC2016 # single-quoted on purpose: expands inside the nested `bash -lc` shell, not here
+    if run_as_dev \
+      bash \
+      -lc \
+      '
+        [[ ! -e "$HOME/.happy/access.key" ]] ||
+        [[ "$(stat -c "%a" "$HOME/.happy/access.key")" == "600" ]]
+      '; then
 
-    ok "Happy data directory permissions"
-    security_happy_dir_permissions=true
-  else
-    # shellcheck disable=SC2088 # literal display text, not a path expansion
-    warn "~/.happy should have mode 0700"
-    status=1
-  fi
-
-  # shellcheck disable=SC2016 # single-quoted on purpose: expands inside the nested `bash -lc` shell, not here
-  if run_as_dev \
-    bash \
-    -lc \
-    '
-      [[ ! -e "$HOME/.happy/access.key" ]] ||
-      [[ "$(stat -c "%a" "$HOME/.happy/access.key")" == "600" ]]
-    '; then
-
-    ok "Happy access key permissions"
-    security_secret_permissions=true
-  else
-    # shellcheck disable=SC2088 # literal display text, not a path expansion
-    warn "~/.happy/access.key should have mode 0600"
-    status=1
+      ok "Happy access key permissions"
+      security_secret_permissions=true
+    else
+      # shellcheck disable=SC2088 # literal display text, not a path expansion
+      warn "~/.happy/access.key should have mode 0600"
+      status=1
+    fi
   fi
 
   # shellcheck disable=SC2016 # single-quoted on purpose: expands inside the nested `bash -lc` shell, not here
@@ -1832,6 +1864,7 @@ doctor() {
       -n \
       --argjson healthy "$([[ "$status" -eq 0 ]] && echo true || echo false)" \
       --arg devbox_version "$DEVBOX_VERSION" \
+      --arg remote_provider "$remote_provider" \
       --arg os_id "$os_id" \
       --arg os_version "$os_version" \
       --arg node "$runtime_node" \
@@ -1850,6 +1883,7 @@ doctor() {
       '{
         healthy: $healthy,
         devbox_version: $devbox_version,
+        remote_provider: $remote_provider,
         os: { id: $os_id, version: $os_version },
         runtime: {
           node: (if $node == "" then null else $node end),
@@ -2153,8 +2187,16 @@ update_devbox() {
 
   info "Re-running installer"
 
+  # #43: respects this box's existing remote-provider selection instead of
+  # letting install.sh silently fall back to its own "happy" default. A box
+  # from before this feature has no REMOTE_PROVIDER_FILE yet - defaulting
+  # to "happy" here is exactly the required migration behavior for those.
+  local remote_provider="happy"
+  [[ -r "$REMOTE_PROVIDER_FILE" ]] && remote_provider="$(<"$REMOTE_PROVIDER_FILE")"
+
   DEVBOX_REPO_URL="$repo_url" \
     DEVBOX_REF="$ref" \
+    DEVBOX_REMOTE="$remote_provider" \
     bash "$installer"
 
   rm \

@@ -307,7 +307,7 @@ rm -f "$devbox_module_tmp"
 
 msg_ok "Loaded DevBox modules"
 
-# Feature selection: base/agents/happy/node/tooling are the DevBox core (an
+# Feature selection: base/agents/node/tooling are the DevBox core (an
 # agent runtime environment without them isn't a DevBox) and always run.
 # elixir and postgres are the heavy, project-specific runtimes a box may not
 # need; redis (#10 P3) is a fully optional extra never on by default in
@@ -344,6 +344,24 @@ done
 feature_enabled() {
   [[ " $devbox_selected_features " == *" $1 "* ]]
 }
+
+# #43: the remote-access layer is a swappable provider, not a DevBox-core
+# requirement. Happy remains the default and the only implemented provider
+# today; "none" installs no remote layer at all (host console/SSH only).
+# DEVBOX_REMOTE is unset (not "happy") on a re-install/update unless the
+# caller passes it explicitly - update_devbox() in bin/devbox.sh always
+# passes the box's persisted provider through, so a plain re-run of this
+# script (no DEVBOX_REMOTE set) only happens on a genuinely fresh install,
+# where "happy" is the correct default.
+DEVBOX_REMOTE="${DEVBOX_REMOTE:-happy}"
+
+case "$DEVBOX_REMOTE" in
+  happy | none) ;;
+  *)
+    msg_error "Invalid DEVBOX_REMOTE: ${DEVBOX_REMOTE} (expected happy or none)"
+    exit 1
+    ;;
+esac
 
 msg_ok "DevBox profile: ${DEVBOX_PROFILE} (optional features: ${devbox_selected_features:-none})"
 
@@ -417,8 +435,11 @@ create_developer_user
 
 install_codex_cli
 install_claude_cli
-install_happy
-install_happy_daemon_service
+
+if [[ "$DEVBOX_REMOTE" == "happy" ]]; then
+  install_happy
+  install_happy_daemon_service
+fi
 
 install_mise
 
@@ -637,11 +658,12 @@ fi
 EOF
 fi
 
-if ! grep \
-  -Fq \
-  '# DevBox Happy' \
-  "${DEV_HOME}/.bashrc" \
-  2>/dev/null; then
+if [[ "$DEVBOX_REMOTE" == "happy" ]] &&
+  ! grep \
+    -Fq \
+    '# DevBox Happy' \
+    "${DEV_HOME}/.bashrc" \
+    2>/dev/null; then
 
   cat <<'EOF' >>"${DEV_HOME}/.bashrc"
 
@@ -762,6 +784,13 @@ fi
 printf '%s\n' "$DEVBOX_VERSION" >"${ROOT_STATE_DIR}/version"
 printf '%s\n' "$devbox_selected_features" >"${ROOT_STATE_DIR}/installed-features"
 
+# #43: persists which remote provider this box was configured with, so
+# devbox status/doctor can report it and so a later `devbox update`
+# (which threads the persisted value back in as DEVBOX_REMOTE) doesn't
+# silently fall back to the "happy" default and reconfigure a box that
+# was deliberately installed with DEVBOX_REMOTE=none.
+printf '%s\n' "$DEVBOX_REMOTE" >"${ROOT_STATE_DIR}/remote-provider"
+
 # P1.1: seeds active-ref for a fresh install, so the first `devbox update`
 # has something real to record as "previous" before overwriting it.
 # devbox update itself always overwrites this afterwards with the exact
@@ -796,6 +825,7 @@ cat <<EOF >"${ROOT_STATE_DIR}/install-state.json"
   "commit": "${devbox_resolved_commit}",
   "profile": "${DEVBOX_PROFILE}",
   "features": "${devbox_selected_features}",
+  "remote": "${DEVBOX_REMOTE}",
   "os": "${install_os_version}",
   "arch": "${install_arch}",
   "installed_at": "${install_timestamp}"
@@ -807,7 +837,8 @@ chmod \
   "${ROOT_STATE_DIR}/version" \
   "${ROOT_STATE_DIR}/installed-features" \
   "${ROOT_STATE_DIR}/install-state.json" \
-  "${ROOT_STATE_DIR}/active-ref"
+  "${ROOT_STATE_DIR}/active-ref" \
+  "${ROOT_STATE_DIR}/remote-provider"
 
 if [[ -f "${ROOT_STATE_DIR}/commit" ]]; then
   chmod 0644 "${ROOT_STATE_DIR}/commit"
@@ -1008,16 +1039,18 @@ run_as_dev codex \
 run_as_dev claude \
   --version
 
-# Do not execute Happy during unattended validation.
-run_as_dev npm list \
-  --global \
-  --depth=0 \
-  happy
+if [[ "$DEVBOX_REMOTE" == "happy" ]]; then
+  # Do not execute Happy during unattended validation.
+  run_as_dev npm list \
+    --global \
+    --depth=0 \
+    happy
 
-# Remote access must survive a reboot without an interactive dev login.
-systemctl is-enabled \
-  --quiet \
-  devbox-happy-daemon.service
+  # Remote access must survive a reboot without an interactive dev login.
+  systemctl is-enabled \
+    --quiet \
+    devbox-happy-daemon.service
+fi
 
 if feature_enabled elixir; then
   run_as_dev erl \
@@ -1101,7 +1134,15 @@ echo "The first interactive dev shell starts:"
 echo
 echo "  devbox onboard"
 echo
-echo -e "${YW}After onboarding, use Happy as the primary agent entry point:${CL}"
-echo
-echo "  happy"
-echo "  happy codex"
+if [[ "$DEVBOX_REMOTE" == "happy" ]]; then
+  echo -e "${YW}After onboarding, use Happy as the primary agent entry point:${CL}"
+  echo
+  echo "  happy"
+  echo "  happy codex"
+else
+  echo -e "${YW}No remote provider configured (DEVBOX_REMOTE=none). Use Codex/Claude${CL}"
+  echo -e "${YW}directly, or reach this box over SSH:${CL}"
+  echo
+  echo "  codex"
+  echo "  claude"
+fi
