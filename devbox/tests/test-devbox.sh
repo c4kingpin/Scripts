@@ -801,9 +801,8 @@ no_hardcoded_default_credentials() {
 
 managed_secrets_have_restricted_permissions() {
   grep -Fq 'chmod 0600' "$NORM_INSTALL" &&
-    grep -Fq 'chmod 0600' "$NORM_FEATURE_POSTGRES" &&
-    grep -Fq '"${DEV_HOME}/.pgpass"' "$FEATURE_POSTGRES" &&
-    grep -Fq '"$PG_ENV_FILE"' "$FEATURE_POSTGRES" &&
+    grep -Fq 'write_root_owned_file "${DEV_HOME}/.pgpass" 0600' "$NORM_FEATURE_POSTGRES" &&
+    grep -Fq 'write_root_owned_file "$PG_ENV_FILE" 0600' "$NORM_FEATURE_POSTGRES" &&
     grep -Fq '"${DEV_HOME}/.codex/config.toml"' "$INSTALL_SCRIPT" &&
     grep -Fq '"${DEV_HOME}/.claude/settings.json"' "$INSTALL_SCRIPT" &&
     grep -Fq 'chmod 0600 "$OPENROUTER_ENV"' "$NORM_MANAGER"
@@ -1401,6 +1400,136 @@ EOF
     grep -Fq "previous-ref after rollback: release:v2.0.0" "$output_file"
 }
 
+# P0.2: migrate_legacy_previous_update_state() reads a dev-writable file
+# as root (via update_devbox()/rollback_devbox()). It must never `source`
+# or `eval` that file's contents - extract the function and run it against
+# a file containing a shell-injection payload disguised as a third env
+# line, confirming nothing executes, while legitimate KEY=VALUE lines
+# still migrate correctly (regression coverage for the existing behavior).
+migrate_legacy_previous_update_state_never_executes_file_contents() {
+  local migrate_fn
+  migrate_fn="$(sed -n '/^migrate_legacy_previous_update_state() {/,/^}/p' "$MANAGER")"
+
+  [[ -n "$migrate_fn" ]] || return 1
+
+  local legacy_file="${TEST_TMP}/legacy-previous-update.env"
+  local previous_ref_file="${TEST_TMP}/legacy-previous-ref"
+  local previous_version_file="${TEST_TMP}/legacy-previous-version"
+  local canary="${TEST_TMP}/legacy-payload-canary"
+  local output
+
+  rm -f "$canary" "$previous_ref_file" "$previous_version_file"
+
+  cat <<'EOF' >"$legacy_file"
+PREVIOUS_MODE=release
+PREVIOUS_TARGET=v1.2.3
+PREVIOUS_VERSION=1.2.3
+touch TEST_TMP_PLACEHOLDER/legacy-payload-canary
+PREVIOUS_TARGET=$(touch TEST_TMP_PLACEHOLDER/legacy-payload-canary)
+EOF
+
+  sed -i "s#TEST_TMP_PLACEHOLDER#${TEST_TMP}#g" "$legacy_file"
+
+  output="$(
+    bash -c '
+      LEGACY_PREVIOUS_UPDATE_FILE="'"$legacy_file"'"
+      PREVIOUS_REF_FILE="'"$previous_ref_file"'"
+      PREVIOUS_VERSION_FILE="'"$previous_version_file"'"
+      '"$migrate_fn"'
+      migrate_legacy_previous_update_state
+    ' 2>&1
+  )"
+
+  [[ ! -e "$canary" ]] &&
+    [[ "$(<"$previous_ref_file")" == "release:v1.2.3" ]] &&
+    [[ "$(<"$previous_version_file")" == "1.2.3" ]] &&
+    [[ ! -f "$legacy_file" ]] &&
+    ! grep -Fq 'source' <<<"$(sed -n '/^migrate_legacy_previous_update_state() {/,/^}/p' "$MANAGER")" &&
+    [[ -z "$output" ]]
+}
+
+# P0.1: a root-executed write into a dev-controlled path must not follow a
+# symlink dev planted there in advance. write_root_owned_file() is shared
+# by ssh_setup()/ssh_disable() (bin/devbox.sh) and the install.sh feature
+# scripts (lib/common.sh's copy); exercise the manager's copy directly by
+# extracting it, since both implementations are identical in behavior.
+write_root_owned_file_refuses_to_follow_a_symlink() {
+  local write_fn reject_fn
+  write_fn="$(sed -n '/^write_root_owned_file() {/,/^}/p' "$MANAGER")"
+  reject_fn="$(sed -n '/^reject_symlink() {/,/^}/p' "$MANAGER")"
+
+  [[ -n "$write_fn" && -n "$reject_fn" ]] || return 1
+
+  local outside_secret="${TEST_TMP}/write-root-owned-outside-secret"
+  local planted_target="${TEST_TMP}/write-root-owned-planted-target"
+  local normal_target="${TEST_TMP}/write-root-owned-normal-target"
+  local symlink_output normal_output symlink_status=0
+
+  printf 'ORIGINAL' >"$outside_secret"
+  ln -s "$outside_secret" "$planted_target"
+
+  symlink_output="$(
+    bash -c '
+      die() { printf "error - %s\n" "$*" >&2; exit 1; }
+      DEV_USER="'"$(id -un)"'"
+      '"$reject_fn"'
+      '"$write_fn"'
+      write_root_owned_file "'"$planted_target"'" 0600 "PWNED"
+    ' 2>&1
+  )" || symlink_status=$?
+
+  normal_output="$(
+    bash -c '
+      die() { printf "error - %s\n" "$*" >&2; exit 1; }
+      DEV_USER="'"$(id -un)"'"
+      '"$reject_fn"'
+      '"$write_fn"'
+      write_root_owned_file "'"$normal_target"'" 0600 "hello"
+    ' 2>&1
+  )"
+
+  [[ "$symlink_status" -ne 0 ]] &&
+    grep -Fq 'it is a symlink' <<<"$symlink_output" &&
+    [[ "$(<"$outside_secret")" == "ORIGINAL" ]] &&
+    [[ -z "$normal_output" ]] &&
+    [[ "$(<"$normal_target")" == "hello" ]] &&
+    [[ "$(stat -c '%a' "$normal_target")" == "600" ]]
+}
+
+# lib/user.sh's developer-directory scaffolding runs on every install.sh
+# invocation (including devbox update on an already-provisioned box), so a
+# symlink dev planted at any of these paths must be rejected before the
+# install -d calls that would otherwise chown/chmod through it.
+developer_scaffold_dirs_are_symlink_guarded() {
+  local dirs_block
+  dirs_block="$(sed -n '/for developer_scaffold_dir in /,/^done$/p' "$NORM_LIB_USER")"
+
+  [[ -n "$dirs_block" ]] &&
+    grep -Fq 'reject_symlink "$developer_scaffold_dir"' <<<"$dirs_block" &&
+    grep -Fq '"${DEV_HOME}/.ssh"' <<<"$dirs_block" &&
+    grep -Fq '"${DEV_HOME}/.config/devbox"' <<<"$dirs_block" &&
+    grep -Fq '"${DEV_HOME}/workspace"' <<<"$dirs_block"
+}
+
+# Static checks that the symlink-unsafe direct-redirect writes identified
+# in #18 (P0.1) were actually replaced, not just supplemented.
+ssh_commands_use_symlink_safe_writes() {
+  grep -Fq 'reject_symlink "${DEV_HOME}/.ssh"' "$MANAGER" &&
+    grep -Fq 'write_root_owned_file "$SSH_KEY_FILE" 0600' "$NORM_MANAGER" &&
+    grep -Fq 'reject_symlink "$STATE_DIR"' "$MANAGER" &&
+    grep -Fq 'write_root_owned_file "$SSH_DISABLED_MARKER" 0600' "$NORM_MANAGER" &&
+    ! grep -Fq '>"$SSH_KEY_FILE"' "$NORM_MANAGER" &&
+    ! grep -Fq ': >"$SSH_DISABLED_MARKER"' "$NORM_MANAGER"
+}
+
+postgres_and_elixir_writes_use_symlink_safe_helper() {
+  grep -Fq 'write_root_owned_file "${DEV_HOME}/.erlang.cookie" 0400' "$NORM_FEATURE_ELIXIR" &&
+    grep -Fq 'reject_symlink "${DEV_HOME}/.erlang.cookie"' "$FEATURE_ELIXIR" &&
+    ! grep -Fq '>"${DEV_HOME}/.erlang.cookie"' "$NORM_FEATURE_ELIXIR" &&
+    ! grep -Fq 'cat <<EOF >"${DEV_HOME}/.pgpass"' "$FEATURE_POSTGRES" &&
+    ! grep -Fq 'cat <<EOF >"$PG_ENV_FILE"' "$FEATURE_POSTGRES"
+}
+
 doctor_checks_root_state_version() {
   local check_block
   check_block="$(sed -n '/if \[\[ -r "\$ROOT_VERSION_FILE" \]\]; then/,/^  fi$/p' "$MANAGER")"
@@ -1649,6 +1778,11 @@ run_test "doctor is feature-aware" doctor_is_feature_aware
 run_test "devbox status composes existing status commands" devbox_status_composes_existing_status_commands
 run_test "workspace list/doctor report project health read-only" workspace_list_and_doctor_report_project_health_read_only
 run_test "doctor --json reports a valid summary matching the exit code" doctor_json_reports_a_valid_summary_matching_the_exit_code
+run_test "write_root_owned_file refuses to follow a symlink" write_root_owned_file_refuses_to_follow_a_symlink
+run_test "developer scaffold directories are symlink-guarded" developer_scaffold_dirs_are_symlink_guarded
+run_test "ssh commands use symlink-safe writes" ssh_commands_use_symlink_safe_writes
+run_test "postgres/elixir writes use the symlink-safe helper" postgres_and_elixir_writes_use_symlink_safe_helper
+run_test "legacy previous-update state never executes file contents" migrate_legacy_previous_update_state_never_executes_file_contents
 run_test "update and rollback round trip restores the active ref" update_and_rollback_round_trip_restores_the_active_ref
 run_test "doctor checks root state version" doctor_checks_root_state_version
 run_test "Happy daemon starts at boot" happy_daemon_starts_at_boot

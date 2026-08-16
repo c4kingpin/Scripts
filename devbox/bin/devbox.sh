@@ -215,6 +215,44 @@ run_as_dev() {
   fi
 }
 
+# P0.1: dev owns everything under $DEV_HOME, so a root-executed command
+# that blindly creates/writes into a dev-controlled path can be redirected
+# by a symlink dev planted there in advance. Reject that outright instead
+# of following it.
+reject_symlink() {
+  local path="$1"
+
+  [[ ! -L "$path" ]] ||
+    die "Refusing to operate on ${path}: it is a symlink"
+}
+
+# Writes $content to $target atomically and symlink-safely: rejects an
+# existing symlink or other non-regular-file target, then writes via a
+# same-directory tempfile and renames it into place (rename() replaces a
+# symlink at the destination rather than following it, so even a target
+# re-created between the check above and this write can't redirect the
+# write outside $target's directory).
+write_root_owned_file() {
+  local target="$1"
+  local mode="$2"
+  local content="$3"
+  local tmp
+
+  reject_symlink "$target"
+
+  [[ ! -e "$target" || -f "$target" ]] ||
+    die "Refusing to write ${target}: exists but is not a regular file"
+
+  tmp="$(mktemp "${target}.XXXXXX")"
+
+  printf '%s' "$content" >"$tmp"
+
+  chown "${DEV_USER}:${DEV_USER}" "$tmp"
+  chmod "$mode" "$tmp"
+
+  mv -f "$tmp" "$target"
+}
+
 prompt_yes_no() {
   local prompt="$1"
   local default="${2:-yes}"
@@ -449,6 +487,8 @@ EOF
   validate_public_key "$public_key" ||
     die "The public key is invalid."
 
+  reject_symlink "${DEV_HOME}/.ssh"
+
   install \
     -d \
     -m 0700 \
@@ -456,17 +496,10 @@ EOF
     -g "$DEV_USER" \
     "${DEV_HOME}/.ssh"
 
-  printf '%s\n' \
-    "$public_key" \
-    >"$SSH_KEY_FILE"
-
-  chown \
-    "$DEV_USER:$DEV_USER" \
-    "$SSH_KEY_FILE"
-
-  chmod \
+  write_root_owned_file \
+    "$SSH_KEY_FILE" \
     0600 \
-    "$SSH_KEY_FILE"
+    "${public_key}"$'\n'
 
   rm \
     -f \
@@ -486,6 +519,8 @@ EOF
 ssh_disable() {
   require_root
 
+  reject_symlink "$STATE_DIR"
+
   install \
     -d \
     -m 0700 \
@@ -493,15 +528,10 @@ ssh_disable() {
     -g "$DEV_USER" \
     "$STATE_DIR"
 
-  : >"$SSH_DISABLED_MARKER"
-
-  chown \
-    "$DEV_USER:$DEV_USER" \
-    "$SSH_DISABLED_MARKER"
-
-  chmod \
+  write_root_owned_file \
+    "$SSH_DISABLED_MARKER" \
     0600 \
-    "$SSH_DISABLED_MARKER"
+    ""
 
   write_dev_ssh_policy disabled
   apply_sshd_config no
@@ -1850,23 +1880,46 @@ version_is_newer() {
 
 # Migrates the P1.3-era single env-file (user-state) into the P1.4
 # root-state files, once, the first time this runs after an upgrade.
+#
+# P0.2: this file lives under the dev-writable user-state directory but is
+# read here as root (via update_devbox()/rollback_devbox()). It must never
+# be `source`d or `eval`d - a KEY=VALUE line is data, parsed by hand, and
+# only the three known keys are recognized; anything else (including a
+# line crafted to look like shell code) is silently ignored.
 migrate_legacy_previous_update_state() {
   [[ -f "$LEGACY_PREVIOUS_UPDATE_FILE" ]] || return 0
   [[ -f "$PREVIOUS_REF_FILE" ]] && return 0
 
-  local PREVIOUS_MODE=""
-  local PREVIOUS_TARGET=""
-  local PREVIOUS_VERSION=""
+  local previous_mode=""
+  local previous_target=""
+  local previous_version=""
+  local key value
 
-  # shellcheck source=/dev/null
-  source "$LEGACY_PREVIOUS_UPDATE_FILE"
+  while IFS='=' read -r key value; do
+    case "$key" in
+      PREVIOUS_MODE)
+        [[ "$value" =~ ^(release|branch)$ ]] &&
+          previous_mode="$value"
+        ;;
 
-  if [[ -n "$PREVIOUS_MODE" && -n "$PREVIOUS_TARGET" ]]; then
-    printf '%s:%s\n' "$PREVIOUS_MODE" "$PREVIOUS_TARGET" >"$PREVIOUS_REF_FILE"
+      PREVIOUS_TARGET)
+        [[ "$value" =~ ^[A-Za-z0-9._/-]+$ ]] &&
+          previous_target="$value"
+        ;;
+
+      PREVIOUS_VERSION)
+        [[ "$value" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] &&
+          previous_version="$value"
+        ;;
+    esac
+  done <"$LEGACY_PREVIOUS_UPDATE_FILE"
+
+  if [[ -n "$previous_mode" && -n "$previous_target" ]]; then
+    printf '%s:%s\n' "$previous_mode" "$previous_target" >"$PREVIOUS_REF_FILE"
   fi
 
-  if [[ -n "$PREVIOUS_VERSION" ]]; then
-    printf '%s\n' "$PREVIOUS_VERSION" >"$PREVIOUS_VERSION_FILE"
+  if [[ -n "$previous_version" ]]; then
+    printf '%s\n' "$previous_version" >"$PREVIOUS_VERSION_FILE"
   fi
 
   rm -f "$LEGACY_PREVIOUS_UPDATE_FILE"
