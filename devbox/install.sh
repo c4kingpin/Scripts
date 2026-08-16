@@ -704,6 +704,20 @@ fi
 printf '%s\n' "$DEVBOX_VERSION" >"${ROOT_STATE_DIR}/version"
 printf '%s\n' "$devbox_selected_features" >"${ROOT_STATE_DIR}/installed-features"
 
+# P1.1: seeds active-ref for a fresh install, so the first `devbox update`
+# has something real to record as "previous" before overwriting it.
+# devbox update itself always overwrites this afterwards with the exact
+# mode it already knows (--to/--branch), which is more accurate than this
+# guess - DEVBOX_REF alone doesn't say whether it's a release tag or a
+# branch name.
+if [[ "$DEVBOX_REF" =~ ^v?[0-9]+\.[0-9]+\.[0-9]+ ]]; then
+  devbox_active_mode="release"
+else
+  devbox_active_mode="branch"
+fi
+
+printf '%s:%s\n' "$devbox_active_mode" "$DEVBOX_REF" >"${ROOT_STATE_DIR}/active-ref"
+
 install_os_version="$(
   . /etc/os-release
   printf '%s' "${VERSION_ID}"
@@ -726,7 +740,8 @@ chmod \
   0644 \
   "${ROOT_STATE_DIR}/version" \
   "${ROOT_STATE_DIR}/installed-features" \
-  "${ROOT_STATE_DIR}/install-state.json"
+  "${ROOT_STATE_DIR}/install-state.json" \
+  "${ROOT_STATE_DIR}/active-ref"
 
 msg_ok "Recorded DevBox state"
 
