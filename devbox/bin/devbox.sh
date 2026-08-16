@@ -28,6 +28,11 @@ readonly HAPPY_ACCESS_KEY="${HAPPY_HOME}/access.key"
 readonly HAPPY_SETTINGS="${HAPPY_HOME}/settings.json"
 readonly HAPPY_DAEMON_STATE="${HAPPY_HOME}/daemon.state.json"
 
+# Boot-time Happy daemon start (issue #19), installed by
+# devbox/features/happy.sh.
+readonly HAPPY_SERVICE="devbox-happy-daemon.service"
+readonly HAPPY_SERVICE_UNIT="/etc/systemd/system/${HAPPY_SERVICE}"
+
 readonly OPENROUTER_ENV="${STATE_DIR}/openrouter.env"
 readonly OPENROUTER_PROFILE="${DEV_HOME}/.codex/openrouter.config.toml"
 readonly OPENROUTER_WRAPPER="${DEV_HOME}/.local/bin/codex-openrouter"
@@ -565,6 +570,17 @@ happy_is_authenticated() {
     >/dev/null 2>&1
 }
 
+happy_daemon_service_is_installed() {
+  [[ -f "$HAPPY_SERVICE_UNIT" ]]
+}
+
+happy_daemon_service_is_enabled() {
+  systemctl is-enabled \
+    --quiet \
+    "$HAPPY_SERVICE" \
+    2>/dev/null
+}
+
 happy_daemon_is_running() {
   local pid=""
 
@@ -647,6 +663,14 @@ agents_auth_status() {
     else
       warn "Happy daemon is not running"
     fi
+  fi
+
+  if happy_daemon_service_is_installed &&
+    happy_daemon_service_is_enabled; then
+
+    ok "Happy daemon starts automatically at boot (${HAPPY_SERVICE})"
+  else
+    warn "Happy daemon does not start at boot; run 'devbox update' as root"
   fi
 
   return "$status"
@@ -1197,6 +1221,15 @@ Authentication:
 Happy asking you to connect/pair during `devbox auth login` is expected.
 
 
+Boot behaviour:
+
+  devbox-happy-daemon.service
+
+Once this DevBox is paired, the Happy daemon is started at boot by that
+systemd service, as user "dev". No interactive login is required after a
+reboot. An unpaired DevBox leaves the service idle instead of failing.
+
+
 SSH:
 
   devbox ssh status
@@ -1407,6 +1440,30 @@ doctor() {
     ok "Happy daemon"
   else
     warn "Happy daemon is not running"
+  fi
+
+  # Remote access has to survive a reboot on its own (issue #19): without
+  # the boot service, Happy only comes back once somebody opens an
+  # interactive dev shell.
+  if happy_daemon_service_is_installed; then
+    if happy_daemon_service_is_enabled; then
+      ok "Happy daemon service (${HAPPY_SERVICE})"
+    else
+      warn "${HAPPY_SERVICE} is installed but not enabled"
+      status=1
+    fi
+
+    if systemctl is-failed \
+      --quiet \
+      "$HAPPY_SERVICE" \
+      2>/dev/null; then
+
+      warn "${HAPPY_SERVICE} is in a failed state (systemctl status ${HAPPY_SERVICE})"
+      status=1
+    fi
+  else
+    warn "${HAPPY_SERVICE} is not installed; Happy only starts from an interactive dev shell"
+    status=1
   fi
 
   # shellcheck disable=SC2016 # single-quoted on purpose: expands inside the nested `bash -lc` shell, not here

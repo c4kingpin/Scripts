@@ -343,6 +343,34 @@ Jede CLI verwaltet ihre Anmeldedaten selbst: Codex unter `~/.codex`, Claude in
 veröffentlicht oder eingecheckt werden; die `deny`-Regeln der
 Autonomie-Konfiguration halten die Agenten zusätzlich davon ab, sie zu lesen.
 
+## Happy-Daemon nach dem Booten
+
+Happy ist die Remote-Ebene der DevBox und muss deshalb ohne interaktiven
+Login verfügbar sein. Der Installer richtet dafür den systemd-Dienst
+`devbox-happy-daemon.service` ein:
+
+```bash
+systemctl status devbox-happy-daemon.service
+```
+
+Der Dienst läuft als Benutzer `dev` mit `HOME=/home/dev`, startet erst nach
+`network-online.target` und ruft ein Guard-Skript unter
+`/usr/local/lib/devbox/happy-daemon-start.sh` auf. Das Skript startet den
+Daemon nur, wenn Happy installiert, bereits gekoppelt (`access.key`,
+`settings.json` mit `machineId`) und noch nicht aktiv ist. Alle anderen Fälle
+enden bewusst mit Exit-Code 0 (`Restart=no`), damit eine noch nicht
+eingerichtete DevBox keinen fehlgeschlagenen oder dauerhaft neu startenden
+Dienst hinterlässt. Bestehende Happy-Credentials und die Maschinen-
+Registrierung werden dabei nicht verändert.
+
+Nach einem Reboot ist damit kein `sudo -iu dev` mehr nötig, damit die DevBox
+in der Happy-App erscheint. Die ältere Startlogik in der `.bashrc` von `dev`
+bleibt als Fallback bestehen, falls der Dienst auf einer Box fehlt oder
+deaktiviert wurde.
+
+`devbox auth status` und `devbox doctor` melden zusätzlich, ob der Dienst
+installiert und aktiviert ist.
+
 ## OpenRouter für Codex
 
 Zusätzlich zur Codex-CLI-Anmeldung kann ein OpenRouter-API-Key als manueller

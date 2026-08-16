@@ -365,6 +365,7 @@ create_developer_user
 install_codex_cli
 install_claude_cli
 install_happy
+install_happy_daemon_service
 
 install_mise
 
@@ -590,7 +591,9 @@ if ! grep \
 alias hclaude='happy claude'
 alias hcodex='happy codex'
 
-# Start Happy daemon only after Happy has already been paired.
+# Fallback for devbox-happy-daemon.service (which starts the daemon at
+# boot): starts it from an interactive shell if the service is unavailable
+# or did not bring it up. Only ever runs after Happy has been paired.
 if [[ $- == *i* ]] &&
   [[ -z "${HAPPY_DAEMON_CHECKED:-}" ]] &&
   command -v happy >/dev/null 2>&1; then
@@ -925,6 +928,11 @@ run_as_dev npm list \
   --global \
   --depth=0 \
   happy
+
+# Remote access must survive a reboot without an interactive dev login.
+systemctl is-enabled \
+  --quiet \
+  devbox-happy-daemon.service
 
 if feature_enabled elixir; then
   run_as_dev erl \
