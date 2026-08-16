@@ -42,6 +42,7 @@ Netzwerk, Template und Ressourcen des Containers müssen vor dem Aufruf bereits
 | Benutzer | `dev` |
 | Workspace | `/home/dev/workspace` |
 | Agenten-Autonomie | ausgewogen |
+| Remote-Provider | `happy` |
 
 Rein lesende Hilfsbefehle für den Workspace (kein Branch-Wechsel, keine
 Commits, kein Löschen, kein automatisches Anlegen von `.env`):
@@ -60,7 +61,7 @@ Phoenix und PostgreSQL.
 
 ### Feature-Auswahl
 
-`base` (OS-Pakete, Git/GitHub-CLI), `agents` (Codex/Claude), `happy`, Node.js
+`base` (OS-Pakete, Git/GitHub-CLI), `agents` (Codex/Claude), Node.js
 und `mise` bilden den Kern jeder DevBox — ohne sie wäre es keine
 Agenten-Laufzeitumgebung mehr und sie sind daher immer Teil der Installation.
 Die beiden schweren, projektspezifischen Laufzeiten lassen sich abwählen,
@@ -368,10 +369,47 @@ Jede CLI verwaltet ihre Anmeldedaten selbst: Codex unter `~/.codex`, Claude in
 veröffentlicht oder eingecheckt werden; die `deny`-Regeln der
 Autonomie-Konfiguration halten die Agenten zusätzlich davon ab, sie zu lesen.
 
+## Remote-Provider
+
+Codex und Claude bilden zusammen mit der lokalen Entwicklungsumgebung den
+Kern der DevBox. Remote-Zugriff ist optional und wird über einen
+konfigurierbaren Remote-Provider bereitgestellt. Standardmäßig wird Happy
+verwendet:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/c4kingpin/Scripts/master/devbox/install.sh |
+  env DEVBOX_REMOTE=happy bash
+```
+
+Ohne Remote-Provider installiert der Installer kein Happy und richtet auch
+keinen Happy-Dienst ein; erreichbar bleibt die Box dann über die
+Host-Konsole (`pct enter`, `lxc exec`, `incus exec`) und optional SSH:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/c4kingpin/Scripts/master/devbox/install.sh |
+  env DEVBOX_REMOTE=none bash
+```
+
+Die getroffene Auswahl landet in `/var/lib/devbox/remote-provider`,
+erscheint in `devbox status` und `devbox doctor --json`
+(`remote_provider`), und `devbox update` übernimmt sie automatisch —
+ein Update ändert den konfigurierten Provider nicht. Bestehende
+Installationen ohne gespeicherte Auswahl (vor diesem Feature) werden beim
+nächsten Update automatisch als `happy` interpretiert; Happy-Pairing,
+-Credentials und -Dienst bleiben dabei unverändert erhalten.
+
+SSH ist davon unabhängig: es ist immer ein separater, optionaler
+Zugangsweg und insbesondere als Recovery-/Fallback-Zugang nutzbar, falls
+der konfigurierte Remote-Provider nicht verfügbar ist.
+
+Weitere Provider (z. B. Kisuke) sind für später vorgesehen, aber noch nicht
+implementiert.
+
 ## Happy-Daemon nach dem Booten
 
-Happy ist die Remote-Ebene der DevBox und muss deshalb ohne interaktiven
-Login verfügbar sein. Der Installer richtet dafür den systemd-Dienst
+Nur relevant, wenn Happy als Remote-Provider aktiv ist (Standard). Happy
+muss dafür ohne interaktiven Login verfügbar sein. Der Installer richtet
+dafür den systemd-Dienst
 `devbox-happy-daemon.service` ein:
 
 ```bash
@@ -594,7 +632,7 @@ DevBox trennt persistenten Zustand nach Zuständigkeit:
 
 | Bereich | Ort | Inhalt |
 | --- | --- | --- |
-| Root-State | `/var/lib/devbox/` | aktive Version (`version`), Version/Ref vor dem letzten Update (`previous-version`, `previous-ref`), gewählte optionale Features (`installed-features`), Installationsmetadaten (`install-state.json`) |
+| Root-State | `/var/lib/devbox/` | aktive Version (`version`), aktiver/vorheriger Ref (`active-ref`, `previous-ref`), installierter Commit (`commit`), gewählte optionale Features (`installed-features`), konfigurierter Remote-Provider (`remote-provider`), Installationsmetadaten (`install-state.json`) |
 | User-State | `~/.config/devbox/` | Onboarding-Marker, OpenRouter-Konfiguration, benutzerbezogene Einstellungen |
 | Fremdverwaltete Credentials | `~/.codex`, `~/.claude`, `~/.happy`, `~/.config/gh`, `~/.ssh` | jeweils ausschließlich vom zugehörigen Tool verwaltet |
 

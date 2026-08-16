@@ -1835,6 +1835,112 @@ redis_validation_and_doctor_are_feature_aware() {
     grep -Fq 'redis: (if $redis == "" then null else $redis end)' "$NORM_MANAGER"
 }
 
+# #43: the remote-access layer is a swappable, optional provider - Happy
+# stays the default, but DEVBOX_REMOTE=none must produce a fully usable
+# DevBox that never installs or configures Happy at all.
+devbox_remote_defaults_to_happy_and_validates_input() {
+  grep -Fq 'DEVBOX_REMOTE="${DEVBOX_REMOTE:-happy}"' "$INSTALL_SCRIPT" &&
+    grep -Fq 'happy | none) ;;' "$NORM_INSTALL" &&
+    grep -Fq 'Invalid DEVBOX_REMOTE' "$INSTALL_SCRIPT"
+}
+
+install_gates_happy_installation_on_remote_provider() {
+  grep -Fq 'if [[ "$DEVBOX_REMOTE" == "happy" ]]; then' "$NORM_INSTALL" &&
+    grep -Fq 'install_happy' "$NORM_INSTALL" &&
+    grep -Fq 'install_happy_daemon_service' "$NORM_INSTALL" &&
+    grep -Fq 'printf '\''%s\n'\'' "$DEVBOX_REMOTE" >"${ROOT_STATE_DIR}/remote-provider"' "$INSTALL_SCRIPT" &&
+    grep -Fq '"remote": "${DEVBOX_REMOTE}"' "$INSTALL_SCRIPT" &&
+    grep -Fq '"${ROOT_STATE_DIR}/remote-provider"' "$NORM_INSTALL"
+}
+
+# No REMOTE_PROVIDER_FILE means the box predates #43, when Happy was
+# unconditionally installed - migrating it as "happy" (not "unknown" or
+# erroring) is the whole backward-compatibility point.
+remote_provider_is_persisted_and_migrated_as_happy() {
+  local configured_fn
+  configured_fn="$(sed -n '/^configured_remote_provider() {/,/^}/p' "$MANAGER")"
+
+  [[ -n "$configured_fn" ]] || return 1
+
+  local provider_file="${TEST_TMP}/remote-provider-migration-test"
+  local happy_result none_result missing_result
+
+  printf 'happy\n' >"$provider_file"
+  happy_result="$(bash -c 'REMOTE_PROVIDER_FILE="'"$provider_file"'"; '"$configured_fn"'; configured_remote_provider')"
+
+  printf 'none\n' >"$provider_file"
+  none_result="$(bash -c 'REMOTE_PROVIDER_FILE="'"$provider_file"'"; '"$configured_fn"'; configured_remote_provider')"
+
+  missing_result="$(bash -c 'REMOTE_PROVIDER_FILE="'"${TEST_TMP}/does-not-exist"'"; '"$configured_fn"'; configured_remote_provider')"
+
+  [[ "$happy_result" == "happy" ]] &&
+    [[ "$none_result" == "none" ]] &&
+    [[ "$missing_result" == "happy" ]]
+}
+
+# devbox status/doctor must reflect and respect the configured provider:
+# status shows it, doctor --json reports it, and doctor's Happy-specific
+# checks (pairing, daemon, boot service, credential permissions) are
+# skipped entirely - not just reported as failing - when it's "none".
+status_and_doctor_are_remote_provider_aware() {
+  grep -Fq 'configured_remote_provider' "$MANAGER" &&
+    grep -Fq 'Remote provider:' "$NORM_MANAGER" &&
+    grep -Fq 'remote_provider: $remote_provider' "$NORM_MANAGER" &&
+    grep -Fq 'if [[ "$remote_provider" == "happy" ]]; then' "$NORM_MANAGER" &&
+    grep -Fq 'Happy is paired' "$MANAGER"
+}
+
+# update_devbox() must thread the box's existing provider selection back
+# into the re-run installer, not let it silently fall back to "happy".
+update_devbox_passes_through_the_persisted_remote_provider() {
+  local fake_repo="${TEST_TMP}/remote-provider-update-fake-repo"
+  local output_file="${TEST_TMP}/remote-provider-update-output.log"
+  local bin_dir="${TEST_TMP}/remote-provider-update-bin"
+  local manager_functions="${TEST_TMP}/remote-provider-update-manager-functions.sh"
+  local provider_file="${TEST_TMP}/remote-provider-update-state"
+
+  mkdir -p "$fake_repo" "$bin_dir"
+  printf 'none\n' >"$provider_file"
+
+  cat <<'EOF' >"${fake_repo}/install.sh"
+#!/usr/bin/env bash
+echo "DEVBOX_REMOTE=${DEVBOX_REMOTE:-<unset>}"
+EOF
+  chmod 0755 "${fake_repo}/install.sh"
+
+  cat <<EOF >"${bin_dir}/curl"
+#!/usr/bin/env bash
+out=""
+prev=""
+for arg in "\$@"; do
+  if [[ "\$prev" == "-o" ]]; then
+    out="\$arg"
+  fi
+  prev="\$arg"
+done
+cp "${fake_repo}/install.sh" "\$out"
+EOF
+  chmod 0755 "${bin_dir}/curl"
+
+  sed 's/^readonly //' "$MANAGER" | head -n -1 >"$manager_functions"
+
+  (
+    set -Eeuo pipefail
+    PATH="${bin_dir}:/usr/bin:/bin"
+    # shellcheck source=/dev/null
+    source "$manager_functions"
+    # shellcheck disable=SC2034 # read by update_devbox below (sourced at runtime)
+    REMOTE_PROVIDER_FILE="$provider_file"
+    # shellcheck disable=SC2317,SC2329
+    require_root() { :; }
+    # shellcheck disable=SC2317,SC2329
+    doctor() { :; }
+    update_devbox --branch feature-branch
+  ) >"$output_file" 2>&1 || true
+
+  grep -Fq "DEVBOX_REMOTE=none" "$output_file"
+}
+
 doctor_checks_root_state_version() {
   local check_block
   check_block="$(sed -n '/if \[\[ -r "\$ROOT_VERSION_FILE" \]\]; then/,/^  fi$/p' "$MANAGER")"
@@ -1889,7 +1995,7 @@ doctor_checks_root_state_version() {
 # user's .bashrc, i.e. after somebody had already logged in interactively.
 happy_daemon_starts_at_boot() {
   grep -Fq 'install_happy_daemon_service() {' "$FEATURE_HAPPY" &&
-    grep -Fxq 'install_happy_daemon_service' "$INSTALL_SCRIPT" &&
+    grep -Fq 'install_happy_daemon_service' "$NORM_INSTALL" &&
     grep -Fq 'HAPPY_SERVICE="devbox-happy-daemon.service"' "$FEATURE_HAPPY" &&
     grep -Fq 'HAPPY_SERVICE_UNIT="/etc/systemd/system/${HAPPY_SERVICE}"' "$FEATURE_HAPPY" &&
     # Runs as dev with a dev-shaped HOME, only once the network is up.
@@ -2102,6 +2208,11 @@ run_test "README pipe examples pass env vars to bash, not curl" readme_pipe_exam
 run_test "shellcheck exceptions are not globally disabled" shellcheck_exceptions_are_not_globally_disabled
 run_test "redis is a separate optional feature, disabled by default" redis_is_a_separate_optional_feature_disabled_by_default
 run_test "redis validation and doctor are feature-aware" redis_validation_and_doctor_are_feature_aware
+run_test "DEVBOX_REMOTE defaults to happy and validates input" devbox_remote_defaults_to_happy_and_validates_input
+run_test "install gates Happy installation on remote provider" install_gates_happy_installation_on_remote_provider
+run_test "remote provider is persisted and migrated as happy" remote_provider_is_persisted_and_migrated_as_happy
+run_test "status/doctor are remote-provider aware" status_and_doctor_are_remote_provider_aware
+run_test "update passes through the persisted remote provider" update_devbox_passes_through_the_persisted_remote_provider
 run_test "doctor checks root state version" doctor_checks_root_state_version
 run_test "Happy daemon starts at boot" happy_daemon_starts_at_boot
 run_test "Happy .bashrc start remains a fallback" happy_bashrc_start_remains_as_fallback
