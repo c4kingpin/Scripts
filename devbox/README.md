@@ -516,6 +516,21 @@ DEVBOX_GITHUB_REPO="<fork>/Scripts" \
 Automatische Sicherheitsupdates sind zusätzlich aktiviert, sodass
 Betriebssystem-Patches auch ohne manuelles `devbox update` einlaufen.
 
+## State-Modell
+
+DevBox trennt persistenten Zustand nach Zuständigkeit:
+
+| Bereich | Ort | Inhalt |
+| --- | --- | --- |
+| Root-State | `/var/lib/devbox/` | aktive Version (`version`), Version/Ref vor dem letzten Update (`previous-version`, `previous-ref`), gewählte optionale Features (`installed-features`), Installationsmetadaten (`install-state.json`) |
+| User-State | `~/.config/devbox/` | Onboarding-Marker, OpenRouter-Konfiguration, benutzerbezogene Einstellungen |
+| Fremdverwaltete Credentials | `~/.codex`, `~/.claude`, `~/.happy`, `~/.config/gh`, `~/.ssh` | jeweils ausschließlich vom zugehörigen Tool verwaltet |
+
+Root-State wird ausschließlich von `install.sh`/`devbox update`/
+`devbox rollback` (alle als `root`) geschrieben, ist aber für `dev` lesbar —
+`devbox doctor` läuft ohne `sudo` und prüft beim Start, ob der aktive
+Root-State zur laufenden Manager-Version passt.
+
 ## Versionsmanifest und Prüfsummen
 
 Alle aktiv verwalteten Tool-Versionen sind zentral in

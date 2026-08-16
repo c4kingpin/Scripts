@@ -8,7 +8,15 @@ readonly DEV_HOME="/home/${DEV_USER}"
 
 readonly STATE_DIR="${DEV_HOME}/.config/devbox"
 readonly ONBOARDING_MARKER="${STATE_DIR}/onboarding-complete"
-readonly FEATURES_FILE="${STATE_DIR}/features"
+
+# Root-owned DevBox state (P1.4): active/previous version, installed
+# features, install metadata. Readable by dev (doctor runs without root),
+# written only by root (update/rollback/install.sh all require_root).
+readonly ROOT_STATE_DIR="/var/lib/devbox"
+readonly FEATURES_FILE="${ROOT_STATE_DIR}/installed-features"
+readonly ROOT_VERSION_FILE="${ROOT_STATE_DIR}/version"
+readonly PREVIOUS_VERSION_FILE="${ROOT_STATE_DIR}/previous-version"
+readonly PREVIOUS_REF_FILE="${ROOT_STATE_DIR}/previous-ref"
 
 readonly SSH_CONFIG="/etc/ssh/sshd_config.d/00-devbox.conf"
 readonly SSH_KEY_FILE="${DEV_HOME}/.ssh/authorized_keys.devbox"
@@ -40,7 +48,10 @@ readonly PACKAGE_NAME_PATTERN='^[a-z0-9][a-z0-9+.-]*$'
 
 readonly DEFAULT_REPO_URL="https://raw.githubusercontent.com/c4kingpin/Scripts"
 readonly DEFAULT_GITHUB_REPO="c4kingpin/Scripts"
-readonly PREVIOUS_UPDATE_FILE="${STATE_DIR}/previous-update.env"
+
+# P1.3 briefly recorded this under the user-state directory, before
+# ROOT_STATE_DIR existed; record_previous_update_state() migrates it once.
+readonly LEGACY_PREVIOUS_UPDATE_FILE="${STATE_DIR}/previous-update.env"
 
 info() {
   printf '==> %s\n' "$*"
@@ -1211,6 +1222,17 @@ doctor() {
   local status=0
   local happy_version=""
 
+  if [[ -r "$ROOT_VERSION_FILE" ]]; then
+    if [[ "$(<"$ROOT_VERSION_FILE")" == "$DEVBOX_VERSION" ]]; then
+      ok "DevBox root state (${DEVBOX_VERSION})"
+    else
+      warn "Root state version ($(<"$ROOT_VERSION_FILE")) does not match the running manager (${DEVBOX_VERSION})"
+      status=1
+    fi
+  else
+    warn "No DevBox root state found at ${ROOT_STATE_DIR} (install predates P1.4, or state was removed)"
+  fi
+
   local commands=(
     claude
     codex
@@ -1490,20 +1512,48 @@ version_is_newer() {
     )" == "$candidate" ]]
 }
 
+# Migrates the P1.3-era single env-file (user-state) into the P1.4
+# root-state files, once, the first time this runs after an upgrade.
+migrate_legacy_previous_update_state() {
+  [[ -f "$LEGACY_PREVIOUS_UPDATE_FILE" ]] || return 0
+  [[ -f "$PREVIOUS_REF_FILE" ]] && return 0
+
+  local PREVIOUS_MODE=""
+  local PREVIOUS_TARGET=""
+  local PREVIOUS_VERSION=""
+
+  # shellcheck source=/dev/null
+  source "$LEGACY_PREVIOUS_UPDATE_FILE"
+
+  if [[ -n "$PREVIOUS_MODE" && -n "$PREVIOUS_TARGET" ]]; then
+    printf '%s:%s\n' "$PREVIOUS_MODE" "$PREVIOUS_TARGET" >"$PREVIOUS_REF_FILE"
+  fi
+
+  if [[ -n "$PREVIOUS_VERSION" ]]; then
+    printf '%s\n' "$PREVIOUS_VERSION" >"$PREVIOUS_VERSION_FILE"
+  fi
+
+  rm -f "$LEGACY_PREVIOUS_UPDATE_FILE"
+}
+
 record_previous_update_state() {
   local mode="$1"
   local ref="$2"
 
   install \
     -d \
-    -m 0700 \
-    "$STATE_DIR"
+    -m 0755 \
+    "$ROOT_STATE_DIR"
 
-  cat <<EOF >"$PREVIOUS_UPDATE_FILE"
-PREVIOUS_MODE=${mode}
-PREVIOUS_TARGET=${ref}
-PREVIOUS_VERSION=${DEVBOX_VERSION}
-EOF
+  migrate_legacy_previous_update_state
+
+  printf '%s:%s\n' "$mode" "$ref" >"$PREVIOUS_REF_FILE"
+  printf '%s\n' "$DEVBOX_VERSION" >"$PREVIOUS_VERSION_FILE"
+
+  chmod \
+    0644 \
+    "$PREVIOUS_REF_FILE" \
+    "$PREVIOUS_VERSION_FILE"
 }
 
 update_devbox() {
@@ -1636,25 +1686,31 @@ update_devbox() {
 rollback_devbox() {
   require_root
 
-  [[ -r "$PREVIOUS_UPDATE_FILE" ]] ||
+  migrate_legacy_previous_update_state
+
+  [[ -r "$PREVIOUS_REF_FILE" ]] ||
     die "No previous update recorded; nothing to roll back to."
 
-  local PREVIOUS_MODE=""
-  local PREVIOUS_TARGET=""
-  local PREVIOUS_VERSION=""
+  local previous_ref
+  local previous_mode
+  local previous_target
+  local previous_version=""
 
-  # shellcheck source=/dev/null
-  source "$PREVIOUS_UPDATE_FILE"
+  previous_ref="$(<"$PREVIOUS_REF_FILE")"
+  previous_mode="${previous_ref%%:*}"
+  previous_target="${previous_ref#*:}"
 
-  [[ -n "$PREVIOUS_TARGET" ]] ||
+  [[ -n "$previous_mode" && -n "$previous_target" && "$previous_mode" != "$previous_target" ]] ||
     die "Previous update state is incomplete; cannot roll back."
 
-  info "Rolling back to ${PREVIOUS_MODE} '${PREVIOUS_TARGET}' (${PREVIOUS_VERSION:-unknown version}, currently on ${DEVBOX_VERSION})"
+  [[ -r "$PREVIOUS_VERSION_FILE" ]] && previous_version="$(<"$PREVIOUS_VERSION_FILE")"
 
-  if [[ "$PREVIOUS_MODE" == "branch" ]]; then
-    update_devbox --branch "$PREVIOUS_TARGET"
+  info "Rolling back to ${previous_mode} '${previous_target}' (${previous_version:-unknown version}, currently on ${DEVBOX_VERSION})"
+
+  if [[ "$previous_mode" == "branch" ]]; then
+    update_devbox --branch "$previous_target"
   else
-    update_devbox --to "$PREVIOUS_TARGET"
+    update_devbox --to "$previous_target"
   fi
 }
 

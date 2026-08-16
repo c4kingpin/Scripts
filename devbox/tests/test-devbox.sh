@@ -549,20 +549,20 @@ EOF
 rollback_reruns_previous_ref() {
   local output_file="${TEST_TMP}/rollback-output.log"
   local rollback_fn="${TEST_TMP}/rollback-fn.sh"
-  local previous_update_file="${TEST_TMP}/previous-update.env"
+  local previous_ref_file="${TEST_TMP}/previous-ref"
+  local previous_version_file="${TEST_TMP}/previous-version"
 
   sed -n '/^rollback_devbox() {/,/^}/p' "$MANAGER" >"$rollback_fn"
 
-  cat <<EOF >"$previous_update_file"
-PREVIOUS_MODE=release
-PREVIOUS_TARGET=v0.9.0
-PREVIOUS_VERSION=1.0.0
-EOF
+  printf 'release:v0.9.0\n' >"$previous_ref_file"
+  printf '1.0.0\n' >"$previous_version_file"
 
   (
     set -Eeuo pipefail
     # shellcheck disable=SC2034 # read by rollback_devbox below (sourced at runtime)
-    PREVIOUS_UPDATE_FILE="$previous_update_file"
+    PREVIOUS_REF_FILE="$previous_ref_file"
+    # shellcheck disable=SC2034 # read by rollback_devbox below (sourced at runtime)
+    PREVIOUS_VERSION_FILE="$previous_version_file"
     # shellcheck disable=SC2034 # read by rollback_devbox below (sourced at runtime)
     DEVBOX_VERSION="1.0.0"
     # shellcheck disable=SC2317,SC2329 # invoked by rollback_devbox below
@@ -574,6 +574,10 @@ EOF
     }
     # shellcheck disable=SC2317,SC2329 # invoked by rollback_devbox below
     info() { echo "INFO: $*"; }
+    # migration is exercised by its own test; this one is only about
+    # rollback_devbox() reading the (already-migrated) root-state files.
+    # shellcheck disable=SC2317,SC2329 # invoked by rollback_devbox below
+    migrate_legacy_previous_update_state() { :; }
     # shellcheck disable=SC2317,SC2329 # invoked by rollback_devbox below
     update_devbox() { echo "CALLED update_devbox: $*"; }
     # shellcheck source=/dev/null
@@ -1014,23 +1018,91 @@ validation_skips_checks_for_disabled_features() {
     grep -Fxq 'node --version' "$INSTALL_SCRIPT"
 }
 
-# P1.2: install.sh must persist which optional features it actually
+# P1.2/P1.4: install.sh must persist which optional features it actually
 # installed, so bin/devbox.sh's doctor() (a separately-downloaded,
-# self-contained file, see P1.1) can tell which checks apply.
-install_script_records_feature_selection() {
-  grep -Fq '"${DEV_HOME}/.config/devbox/features"' "$NORM_INSTALL" &&
-    grep -Fq 'printf '\''%s\n'\'' "$devbox_selected_features"' "$INSTALL_SCRIPT"
+# self-contained file, see P1.1) can tell which checks apply. P1.4 moved
+# this from user-state to root-state (ROOT_STATE_DIR), alongside the
+# active version and install metadata.
+install_script_records_devbox_state() {
+  grep -Fq 'readonly ROOT_STATE_DIR="/var/lib/devbox"' "$INSTALL_SCRIPT" &&
+    grep -Fq 'install -d -m 0755 "$ROOT_STATE_DIR"' "$NORM_INSTALL" &&
+    grep -Fq 'printf '\''%s\n'\'' "$DEVBOX_VERSION" >"${ROOT_STATE_DIR}/version"' "$INSTALL_SCRIPT" &&
+    grep -Fq 'printf '\''%s\n'\'' "$devbox_selected_features" >"${ROOT_STATE_DIR}/installed-features"' "$INSTALL_SCRIPT" &&
+    grep -Fq '"${ROOT_STATE_DIR}/install-state.json"' "$INSTALL_SCRIPT"
+}
+
+# The P1.2/P1.3 user-state files are migrated into root-state once, so an
+# in-place `devbox update` on a box that already recorded a feature
+# selection or a prior update under the old location doesn't lose it.
+install_script_migrates_legacy_user_state_features() {
+  grep -Fq 'if [[ -f "${DEV_HOME}/.config/devbox/features" &&' "$NORM_INSTALL" &&
+    grep -Fq '! -f "${ROOT_STATE_DIR}/installed-features" ]]; then' "$NORM_INSTALL" &&
+    grep -Fq 'mv "${DEV_HOME}/.config/devbox/features" "${ROOT_STATE_DIR}/installed-features"' "$NORM_INSTALL"
 }
 
 # P1.2: doctor() must read that state file and skip elixir/postgres checks
 # when they weren't installed, but keep checking everything when the file
 # is absent (installs from before this feature, or before P1.2 entirely).
 doctor_is_feature_aware() {
-  grep -Fq 'readonly FEATURES_FILE="${STATE_DIR}/features"' "$MANAGER" &&
+  grep -Fq 'readonly FEATURES_FILE="${ROOT_STATE_DIR}/installed-features"' "$MANAGER" &&
     grep -Fq 'feature_was_installed() {' "$MANAGER" &&
     grep -Fq '[[ -r "$FEATURES_FILE" ]] || return 0' "$MANAGER" &&
     grep -Fq 'feature_was_installed elixir' "$MANAGER" &&
     grep -Fq 'feature_was_installed postgres' "$MANAGER"
+}
+
+# P1.4: doctor() checks that the root-state version file agrees with the
+# manager's own embedded DEVBOX_VERSION, without hard-failing when the
+# file is simply missing (installs from before P1.4). Extract just the
+# check (not the whole doctor(), which needs a real dev user/toolchain)
+# and exercise its three branches directly.
+doctor_checks_root_state_version() {
+  local check_block
+  check_block="$(sed -n '/if \[\[ -r "\$ROOT_VERSION_FILE" \]\]; then/,/^  fi$/p' "$MANAGER")"
+
+  [[ -n "$check_block" ]] || return 1
+
+  local root_version_file="${TEST_TMP}/root-version"
+  local output_missing output_mismatch output_match
+
+  output_missing="$(
+    bash -c '
+      ok() { echo "OK: $*"; }
+      warn() { echo "WARN: $*"; }
+      ROOT_VERSION_FILE="'"${TEST_TMP}"'/does-not-exist"
+      ROOT_STATE_DIR="/var/lib/devbox"
+      DEVBOX_VERSION="1.0.0"
+      '"$check_block"'
+    '
+  )"
+
+  printf '0.9.0\n' >"$root_version_file"
+  output_mismatch="$(
+    bash -c '
+      ok() { echo "OK: $*"; }
+      warn() { echo "WARN: $*"; }
+      ROOT_VERSION_FILE="'"$root_version_file"'"
+      ROOT_STATE_DIR="/var/lib/devbox"
+      DEVBOX_VERSION="1.0.0"
+      '"$check_block"'
+    '
+  )"
+
+  printf '1.0.0\n' >"$root_version_file"
+  output_match="$(
+    bash -c '
+      ok() { echo "OK: $*"; }
+      warn() { echo "WARN: $*"; }
+      ROOT_VERSION_FILE="'"$root_version_file"'"
+      ROOT_STATE_DIR="/var/lib/devbox"
+      DEVBOX_VERSION="1.0.0"
+      '"$check_block"'
+    '
+  )"
+
+  grep -Fq "No DevBox root state found" <<<"$output_missing" &&
+    grep -Fq "does not match the running manager" <<<"$output_mismatch" &&
+    grep -Fq "OK: DevBox root state (1.0.0)" <<<"$output_match"
 }
 
 extract_manager
@@ -1093,8 +1165,10 @@ run_test "checksums.env matches embedded checksums" checksums_env_matches_embedd
 run_test "complete stack validation" installer_validates_complete_stack
 run_test "postgres package is a separate optional feature" postgres_package_is_a_separate_optional_feature
 run_test "validation skips checks for disabled features" validation_skips_checks_for_disabled_features
-run_test "install.sh records feature selection" install_script_records_feature_selection
+run_test "install.sh records DevBox state" install_script_records_devbox_state
+run_test "install.sh migrates legacy user-state features" install_script_migrates_legacy_user_state_features
 run_test "doctor is feature-aware" doctor_is_feature_aware
+run_test "doctor checks root state version" doctor_checks_root_state_version
 
 printf '\n%d passed, %d failed\n' "$PASSED" "$FAILED"
 ((FAILED == 0))
