@@ -935,6 +935,22 @@ devbox_version_command_reports_the_manifest() {
     grep -Fq 'show_version' "$NORM_MANAGER"
 }
 
+# P2.1: devbox version --json exposes the same manifest as a JSON object,
+# for agents/tooling that would otherwise have to parse the text output.
+devbox_version_json_reports_the_manifest() {
+  local text_output json_output expected_devbox_version
+
+  text_output="$("$MANAGER" version)"
+  json_output="$("$MANAGER" version --json)"
+  expected_devbox_version="$(awk -F': +' '/^DevBox:/ { print $2 }' <<<"$text_output")"
+
+  jq -e '.devbox and .node and .erlang and .elixir and .phoenix and .codex_cli and .claude_code and .happy' \
+    <<<"$json_output" >/dev/null &&
+    [[ "$(jq -r '.devbox' <<<"$json_output")" == "$expected_devbox_version" ]] &&
+    grep -Fq 'version:--json)' "$MANAGER" &&
+    grep -Fq 'show_version_json' "$NORM_MANAGER"
+}
+
 # P0.3: versioned binary artifacts are verified against a known checksum
 # before being unpacked; a missing or wrong checksum aborts the install.
 downloaded_toolchain_artifacts_are_checksum_verified() {
@@ -1124,6 +1140,164 @@ workspace_list_and_doctor_report_project_health_read_only() {
       | grep -Eq 'git (commit|checkout|branch -[dD]|push|reset)|rm -rf' &&
     grep -Fq 'workspace:list)' "$MANAGER" &&
     grep -Fq 'workspace:doctor)' "$MANAGER"
+}
+
+# P2.3: devbox doctor --json runs the exact same checks as devbox doctor
+# (no duplicated logic) and reports the result as the JSON schema from
+# #18's audit issue. Builds a fully stubbed environment (PATH shadow +
+# readonly-stripped constants) so the result is deterministic regardless
+# of this machine's real Codex/Claude/GitHub/Postgres/Happy state.
+doctor_json_reports_a_valid_summary_matching_the_exit_code() {
+  local bin_dir="${TEST_TMP}/doctor-json-bin"
+  local root_state="${TEST_TMP}/doctor-json-root-state"
+  local home_dir="${TEST_TMP}/doctor-json-home"
+  local ssh_config="${TEST_TMP}/doctor-json-sshd.conf"
+  local happy_unit="${TEST_TMP}/doctor-json-happy.service"
+  local manager_functions="${TEST_TMP}/manager-functions-doctor-json.sh"
+  local devbox_version
+  local tool
+
+  devbox_version="$(grep -oP 'readonly DEVBOX_VERSION="\K[^"]+' "$MANAGER")"
+
+  mkdir -p "$bin_dir" "$root_state" "${home_dir}/.happy"
+
+  printf '%s\n' "$devbox_version" >"${root_state}/version"
+  printf 'elixir postgres\n' >"${root_state}/installed-features"
+
+  printf 'test-access-key\n' >"${home_dir}/.happy/access.key"
+  chmod 0600 "${home_dir}/.happy/access.key"
+  chmod 0700 "${home_dir}/.happy"
+  printf '{"machineId":"test-machine"}\n' >"${home_dir}/.happy/settings.json"
+  printf '{"pid": %d}\n' "$$" >"${home_dir}/.happy/daemon.state.json"
+  : >"$happy_unit"
+
+  for tool in claude codex happy fd gh git python3 rg elixir mix psql erl; do
+    printf '#!/usr/bin/env bash\nexit 0\n' >"${bin_dir}/${tool}"
+    chmod 0755 "${bin_dir}/${tool}"
+  done
+
+  # is-active/is-enabled succeed (service healthy); is-failed must fail
+  # (service is NOT in a failed state) - a stub that always exits 0 would
+  # make is-failed report a false failure.
+  printf '#!/usr/bin/env bash\ncase "$1" in\n  is-failed) exit 1 ;;\n  *) exit 0 ;;\nesac\n' >"${bin_dir}/systemctl"
+  chmod 0755 "${bin_dir}/systemctl"
+
+  printf '#!/usr/bin/env bash\n[[ "$1" == "--version" ]] && echo "v24.0.0"\nexit 0\n' >"${bin_dir}/node"
+  chmod 0755 "${bin_dir}/node"
+
+  printf '#!/usr/bin/env bash\necho "|-- happy@1.2.0"\nexit 0\n' >"${bin_dir}/npm"
+  chmod 0755 "${bin_dir}/npm"
+
+  # Drop the trailing "main \"\$@\"" call and the readonly keyword so the
+  # sourced copy's Root-State/Happy/SSH path constants can be redirected at
+  # temp fixtures below, instead of the real /var/lib/devbox and /home/dev.
+  sed 's/^readonly //' "$MANAGER" | head -n -1 >"$manager_functions"
+
+  local healthy_output healthy_status=0
+  healthy_output="$(
+    PATH="${bin_dir}:/usr/bin:/bin" \
+    HOME="$home_dir" \
+    bash -c '
+      # shellcheck source=/dev/null
+      source "'"$manager_functions"'"
+      ROOT_STATE_DIR="'"$root_state"'"
+      ROOT_VERSION_FILE="'"${root_state}/version"'"
+      FEATURES_FILE="'"${root_state}/installed-features"'"
+      INSTALL_STATE_FILE="'"${root_state}/install-state.json"'"
+      HAPPY_HOME="'"${home_dir}/.happy"'"
+      HAPPY_ACCESS_KEY="'"${home_dir}/.happy/access.key"'"
+      HAPPY_SETTINGS="'"${home_dir}/.happy/settings.json"'"
+      HAPPY_DAEMON_STATE="'"${home_dir}/.happy/daemon.state.json"'"
+      SSH_CONFIG="'"$ssh_config"'"
+      HAPPY_SERVICE_UNIT="'"$happy_unit"'"
+      doctor json
+    '
+  )" || healthy_status=$?
+
+  # Now flip the root-state version so it no longer matches the running
+  # manager, to exercise the unhealthy path deterministically (a missing
+  # PATH stub would silently fall back to a real binary on a real DevBox).
+  printf '9.9.9\n' >"${root_state}/version"
+
+  local unhealthy_output unhealthy_status=0
+  unhealthy_output="$(
+    PATH="${bin_dir}:/usr/bin:/bin" \
+    HOME="$home_dir" \
+    bash -c '
+      # shellcheck source=/dev/null
+      source "'"$manager_functions"'"
+      ROOT_STATE_DIR="'"$root_state"'"
+      ROOT_VERSION_FILE="'"${root_state}/version"'"
+      FEATURES_FILE="'"${root_state}/installed-features"'"
+      INSTALL_STATE_FILE="'"${root_state}/install-state.json"'"
+      HAPPY_HOME="'"${home_dir}/.happy"'"
+      HAPPY_ACCESS_KEY="'"${home_dir}/.happy/access.key"'"
+      HAPPY_SETTINGS="'"${home_dir}/.happy/settings.json"'"
+      HAPPY_DAEMON_STATE="'"${home_dir}/.happy/daemon.state.json"'"
+      SSH_CONFIG="'"$ssh_config"'"
+      HAPPY_SERVICE_UNIT="'"$happy_unit"'"
+      doctor json
+    '
+  )" || unhealthy_status=$?
+
+  jq -e '.healthy == true' <<<"$healthy_output" >/dev/null &&
+    [[ "$healthy_status" -eq 0 ]] &&
+    [[ "$(jq -r '.devbox_version' <<<"$healthy_output")" == "$devbox_version" ]] &&
+    [[ "$(jq -r '.runtime.node' <<<"$healthy_output")" == "24.0.0" ]] &&
+    [[ "$(jq -r '.runtime.erlang' <<<"$healthy_output")" != "null" ]] &&
+    [[ "$(jq -r '.services.postgres' <<<"$healthy_output")" == "running" ]] &&
+    [[ "$(jq -r '.authentication.codex' <<<"$healthy_output")" == "true" ]] &&
+    [[ "$(jq -r '.authentication.github' <<<"$healthy_output")" == "true" ]] &&
+    [[ "$(jq -r '.security.happy_dir_permissions' <<<"$healthy_output")" == "true" ]] &&
+    jq -e '.healthy == false' <<<"$unhealthy_output" >/dev/null &&
+    [[ "$unhealthy_status" -eq 1 ]] &&
+    grep -Fq 'doctor:--json)' "$MANAGER" &&
+    grep -Fq 'doctor json' "$NORM_MANAGER"
+}
+
+# P2.2: devbox status is a composite view built from Root-State files and
+# the existing per-domain status commands (ssh_status, auth/github/
+# openrouter status), not a reimplementation of their checks. Extract the
+# function body and re-run it standalone with faked state/collaborators,
+# same technique as doctor_checks_root_state_version below.
+devbox_status_composes_existing_status_commands() {
+  local status_fn
+  status_fn="$(sed -n '/^status() {/,/^}/p' "$MANAGER")"
+
+  [[ -n "$status_fn" ]] || return 1
+
+  local root_version_file="${TEST_TMP}/status-root-version"
+  local install_state_file="${TEST_TMP}/status-install-state.json"
+  local features_file="${TEST_TMP}/status-installed-features"
+  local output
+
+  printf '1.2.3\n' >"$root_version_file"
+  printf '{"profile":"default"}\n' >"$install_state_file"
+  printf 'elixir\n' >"$features_file"
+
+  output="$(
+    bash -c '
+      ROOT_VERSION_FILE="'"$root_version_file"'"
+      INSTALL_STATE_FILE="'"$install_state_file"'"
+      FEATURES_FILE="'"$features_file"'"
+      feature_was_installed() { grep -Fqw "$1" "$FEATURES_FILE"; }
+      ssh_status() { echo "STUB:ssh_status"; }
+      run_as_dev() { echo "STUB:run_as_dev:$*"; }
+      '"$status_fn"'
+      status
+    '
+  )"
+
+  grep -Fq 'DevBox version:      1.2.3' <<<"$output" &&
+    grep -Fq 'Profile:             default' <<<"$output" &&
+    grep -Fq 'elixir             enabled' <<<"$output" &&
+    grep -Fq 'postgres           disabled' <<<"$output" &&
+    grep -Fq 'STUB:ssh_status' <<<"$output" &&
+    grep -Eq '^STUB:run_as_dev:.* auth status$' <<<"$output" &&
+    grep -Eq '^STUB:run_as_dev:.* github status$' <<<"$output" &&
+    grep -Eq '^STUB:run_as_dev:.* openrouter status$' <<<"$output" &&
+    grep -Fq 'status:)' "$MANAGER" &&
+    grep -Fq 'status' "$NORM_MANAGER"
 }
 
 doctor_checks_root_state_version() {
@@ -1361,6 +1535,7 @@ run_test "updates preserve user state" update_preserves_user_state
 run_test "managed agent CLIs are pinned, not @latest" managed_agent_clis_are_pinned_not_latest
 run_test "versions.env matches embedded defaults" versions_env_matches_embedded_defaults
 run_test "devbox version reports the manifest" devbox_version_command_reports_the_manifest
+run_test "devbox version --json reports the manifest" devbox_version_json_reports_the_manifest
 run_test "toolchain artifacts are checksum-verified" downloaded_toolchain_artifacts_are_checksum_verified
 run_test "checksums.env matches embedded checksums" checksums_env_matches_embedded_checksums
 run_test "complete stack validation" installer_validates_complete_stack
@@ -1369,7 +1544,9 @@ run_test "validation skips checks for disabled features" validation_skips_checks
 run_test "install.sh records DevBox state" install_script_records_devbox_state
 run_test "install.sh migrates legacy user-state features" install_script_migrates_legacy_user_state_features
 run_test "doctor is feature-aware" doctor_is_feature_aware
+run_test "devbox status composes existing status commands" devbox_status_composes_existing_status_commands
 run_test "workspace list/doctor report project health read-only" workspace_list_and_doctor_report_project_health_read_only
+run_test "doctor --json reports a valid summary matching the exit code" doctor_json_reports_a_valid_summary_matching_the_exit_code
 run_test "doctor checks root state version" doctor_checks_root_state_version
 run_test "Happy daemon starts at boot" happy_daemon_starts_at_boot
 run_test "Happy .bashrc start remains a fallback" happy_bashrc_start_remains_as_fallback

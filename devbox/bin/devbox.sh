@@ -18,6 +18,7 @@ readonly FEATURES_FILE="${ROOT_STATE_DIR}/installed-features"
 readonly ROOT_VERSION_FILE="${ROOT_STATE_DIR}/version"
 readonly PREVIOUS_VERSION_FILE="${ROOT_STATE_DIR}/previous-version"
 readonly PREVIOUS_REF_FILE="${ROOT_STATE_DIR}/previous-ref"
+readonly INSTALL_STATE_FILE="${ROOT_STATE_DIR}/install-state.json"
 
 readonly SSH_CONFIG="/etc/ssh/sshd_config.d/00-devbox.conf"
 readonly SSH_KEY_FILE="${DEV_HOME}/.ssh/authorized_keys.devbox"
@@ -104,6 +105,9 @@ Commands:
   version
       Show centrally managed DevBox tool versions.
 
+  version --json
+      Same as version, as a JSON object.
+
   auth status
       Show Happy, Codex and Claude authentication status.
 
@@ -140,6 +144,10 @@ Commands:
   remote-info
       Explain Happy remote access.
 
+  status
+      Show how this box is configured: version, profile, features,
+      SSH, agent auth, GitHub and OpenRouter.
+
   workspace list
       List project directories under the dev workspace.
 
@@ -148,6 +156,10 @@ Commands:
 
   doctor
       Validate the development environment.
+
+  doctor --json
+      Same checks as doctor, as a machine-readable JSON summary.
+      Exit code 0 means healthy, 1 means unhealthy.
 
   update [--check] [--to TAG] [--branch NAME]
       Update DevBox. Default: the latest published release.
@@ -547,6 +559,29 @@ Codex CLI:     ${CODEX_VERSION}
 Claude Code:   ${CLAUDE_VERSION}
 Happy:         ${HAPPY_VERSION}
 EOF
+}
+
+show_version_json() {
+  jq \
+    -n \
+    --arg devbox "$DEVBOX_VERSION" \
+    --arg node "$NODE_MAJOR" \
+    --arg erlang "$ERLANG_VERSION" \
+    --arg elixir "$ELIXIR_VERSION" \
+    --arg phoenix "$PHOENIX_VERSION" \
+    --arg codex_cli "$CODEX_VERSION" \
+    --arg claude_code "$CLAUDE_VERSION" \
+    --arg happy "$HAPPY_VERSION" \
+    '{
+      devbox: $devbox,
+      node: $node,
+      erlang: $erlang,
+      elixir: $elixir,
+      phoenix: $phoenix,
+      codex_cli: $codex_cli,
+      claude_code: $claude_code,
+      happy: $happy
+    }'
 }
 
 codex_is_authenticated() {
@@ -1327,10 +1362,84 @@ feature_was_installed() {
   grep -Fqw "$1" "$FEATURES_FILE"
 }
 
+# P2.2: "How is this specific box configured?" A composite view built from
+# the Root-State files and the existing per-domain status commands
+# (ssh_status, auth/github/openrouter status) rather than reimplementing
+# their checks here.
+status() {
+  local devbox_version="unknown"
+  local profile="unknown"
+  local feature
+
+  if [[ -r "$ROOT_VERSION_FILE" ]]; then
+    devbox_version="$(<"$ROOT_VERSION_FILE")"
+  fi
+
+  if [[ -r "$INSTALL_STATE_FILE" ]] && command -v jq >/dev/null 2>&1; then
+    profile="$(jq -r '.profile // "unknown"' "$INSTALL_STATE_FILE" 2>/dev/null)"
+    [[ -n "$profile" ]] || profile="unknown"
+  fi
+
+  printf 'DevBox version:      %s\n' "$devbox_version"
+  printf 'Profile:             %s\n\n' "$profile"
+
+  printf 'Features:\n'
+
+  for feature in elixir postgres; do
+    if feature_was_installed "$feature"; then
+      printf '  %-18s enabled\n' "$feature"
+    else
+      printf '  %-18s disabled\n' "$feature"
+    fi
+  done
+
+  printf '\n'
+  ssh_status
+  printf '\n'
+
+  # auth/github/openrouter status all require_dev; re-invoke this same
+  # manager as dev instead of duplicating their checks in this function.
+  run_as_dev "$0" auth status || true
+  printf '\n'
+  run_as_dev "$0" github status || true
+  printf '\n'
+  run_as_dev "$0" openrouter status || true
+}
+
 doctor() {
+  local json_mode=0
+  [[ "${1:-}" == "json" ]] && json_mode=1
+
   local command
   local status=0
   local happy_version=""
+
+  # Captured alongside the checks below (unchanged) so --json can report a
+  # structured summary without re-running or duplicating any of them.
+  local os_id="unknown"
+  local os_version="unknown"
+  local runtime_node=""
+  local runtime_erlang=""
+  local runtime_elixir=""
+  local service_postgres=""
+  local service_happy_daemon="unknown"
+  local auth_codex=false
+  local auth_claude=false
+  local auth_happy=false
+  local auth_github=false
+  local security_ssh_policy="unmanaged"
+  local security_happy_dir_permissions=false
+  local security_secret_permissions=false
+
+  local checks_target=/dev/stdout
+  [[ "$json_mode" == 1 ]] && checks_target=/dev/null
+
+  {
+
+  if [[ -r /etc/os-release ]]; then
+    os_id="$(. /etc/os-release 2>/dev/null && printf '%s' "${ID:-unknown}")"
+    os_version="$(. /etc/os-release 2>/dev/null && printf '%s' "${VERSION_ID:-unknown}")"
+  fi
 
   if [[ -r "$ROOT_VERSION_FILE" ]]; then
     if [[ "$(<"$ROOT_VERSION_FILE")" == "$DEVBOX_VERSION" ]]; then
@@ -1359,6 +1468,8 @@ doctor() {
 
   if feature_was_installed elixir; then
     commands+=(elixir erl mix)
+    runtime_erlang="$ERLANG_VERSION"
+    runtime_elixir="$ELIXIR_VERSION"
   fi
 
   if feature_was_installed postgres; then
@@ -1378,6 +1489,8 @@ doctor() {
     fi
   done
 
+  runtime_node="$(node --version 2>/dev/null | sed 's/^v//')"
+
   if [[ "$(node --version)" == "v${NODE_MAJOR}."* ]]; then
     ok "Node.js ${NODE_MAJOR}"
   else
@@ -1391,9 +1504,11 @@ doctor() {
       postgresql.service; then
 
       ok "PostgreSQL service"
+      service_postgres="running"
     else
       warn "PostgreSQL service is not active"
       status=1
+      service_postgres="not running"
     fi
   fi
 
@@ -1460,6 +1575,7 @@ doctor() {
     'codex login status >/dev/null 2>&1'; then
 
     ok "Codex CLI is authenticated"
+    auth_codex=true
   else
     warn "Codex CLI is not authenticated (run: devbox auth login)"
   fi
@@ -1470,8 +1586,20 @@ doctor() {
     'claude auth status >/dev/null 2>&1'; then
 
     ok "Claude CLI is authenticated"
+    auth_claude=true
   else
     warn "Claude CLI is not authenticated (run: devbox auth login)"
+  fi
+
+  if run_as_dev \
+    bash \
+    -lc \
+    'gh auth status >/dev/null 2>&1'; then
+
+    ok "GitHub CLI is authenticated"
+    auth_github=true
+  else
+    warn "GitHub CLI is not authenticated (run: devbox github setup)"
   fi
 
   # shellcheck disable=SC2016 # single-quoted on purpose: expands inside the nested `bash -lc` shell, not here
@@ -1489,6 +1617,7 @@ doctor() {
     '; then
 
     ok "Happy is paired"
+    auth_happy=true
   else
     warn "Happy is not paired (run: devbox auth login)"
   fi
@@ -1515,8 +1644,10 @@ doctor() {
     '; then
 
     ok "Happy daemon"
+    service_happy_daemon="running"
   else
     warn "Happy daemon is not running"
+    service_happy_daemon="not running"
   fi
 
   # Remote access has to survive a reboot on its own (issue #19): without
@@ -1553,6 +1684,7 @@ doctor() {
     '; then
 
     ok "Happy data directory permissions"
+    security_happy_dir_permissions=true
   else
     # shellcheck disable=SC2088 # literal display text, not a path expansion
     warn "~/.happy should have mode 0700"
@@ -1569,6 +1701,7 @@ doctor() {
     '; then
 
     ok "Happy access key permissions"
+    security_secret_permissions=true
   else
     # shellcheck disable=SC2088 # literal display text, not a path expansion
     warn "~/.happy/access.key should have mode 0600"
@@ -1604,6 +1737,74 @@ doctor() {
   fi
 
   ssh_status
+
+  # ssh_status() above prints its own classification but has no return
+  # value to reuse; this mirrors its policy detection (the only duplication
+  # in this function) purely to expose it as a machine-readable field.
+  if [[ -f "$SSH_CONFIG" ]]; then
+    if grep \
+      -Eq \
+      '^DenyUsers[[:space:]]+dev([[:space:]]|$)' \
+      "$SSH_CONFIG"; then
+
+      security_ssh_policy="disabled"
+
+    elif grep \
+      -Eq \
+      '^Match[[:space:]]+User[[:space:]]+dev([[:space:]]|$)' \
+      "$SSH_CONFIG"; then
+
+      security_ssh_policy="public-key-only"
+    fi
+  fi
+
+  } >"$checks_target"
+
+  if [[ "$json_mode" == 1 ]]; then
+    jq \
+      -n \
+      --argjson healthy "$([[ "$status" -eq 0 ]] && echo true || echo false)" \
+      --arg devbox_version "$DEVBOX_VERSION" \
+      --arg os_id "$os_id" \
+      --arg os_version "$os_version" \
+      --arg node "$runtime_node" \
+      --arg erlang "$runtime_erlang" \
+      --arg elixir "$runtime_elixir" \
+      --arg postgres "$service_postgres" \
+      --arg happy_daemon "$service_happy_daemon" \
+      --argjson auth_codex "$auth_codex" \
+      --argjson auth_claude "$auth_claude" \
+      --argjson auth_happy "$auth_happy" \
+      --argjson auth_github "$auth_github" \
+      --arg ssh_policy "$security_ssh_policy" \
+      --argjson happy_dir_permissions "$security_happy_dir_permissions" \
+      --argjson secret_permissions "$security_secret_permissions" \
+      '{
+        healthy: $healthy,
+        devbox_version: $devbox_version,
+        os: { id: $os_id, version: $os_version },
+        runtime: {
+          node: (if $node == "" then null else $node end),
+          erlang: (if $erlang == "" then null else $erlang end),
+          elixir: (if $elixir == "" then null else $elixir end)
+        },
+        services: {
+          postgres: (if $postgres == "" then null else $postgres end),
+          happy_daemon: $happy_daemon
+        },
+        authentication: {
+          codex: $auth_codex,
+          claude: $auth_claude,
+          happy: $auth_happy,
+          github: $auth_github
+        },
+        security: {
+          ssh_dev_policy: $ssh_policy,
+          happy_dir_permissions: $happy_dir_permissions,
+          secret_permissions: $secret_permissions
+        }
+      }'
+  fi
 
   return "$status"
 }
@@ -1980,6 +2181,10 @@ main() {
       show_version
       ;;
 
+    version:--json)
+      show_version_json
+      ;;
+
     auth:status)
       agents_auth_status
       ;;
@@ -2028,6 +2233,10 @@ main() {
       remote_info
       ;;
 
+    status:)
+      status
+      ;;
+
     workspace:list)
       workspace_list
       ;;
@@ -2038,6 +2247,10 @@ main() {
 
     doctor:)
       doctor
+      ;;
+
+    doctor:--json)
+      doctor json
       ;;
 
     update:*)

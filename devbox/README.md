@@ -483,10 +483,28 @@ solange `postgres.env` bereits existiert.
 
 ## Betrieb und Updates
 
+Überblick, wie diese konkrete Box konfiguriert ist (Version, Profil,
+Features, SSH, Agenten-Auth, GitHub, OpenRouter):
+
+```bash
+devbox status
+```
+
+`status` setzt sich aus den bereits bestehenden Einzelkommandos zusammen
+(`ssh status`, `auth status`, `github status`, `openrouter status`) und
+dupliziert deren Prüflogik nicht.
+
 Diagnose:
 
 ```bash
 devbox doctor
+```
+
+Dieselben Prüfungen maschinenlesbar für Agenten/Monitoring, mit Exit-Code
+`0` (gesund) bzw. `1` (ungesund):
+
+```bash
+devbox doctor --json
 ```
 
 `update`/`rollback` müssen als `root` laufen, nicht über `sudo` als `dev` –
@@ -584,6 +602,12 @@ Stellen nicht auseinanderlaufen. Keine der verwalteten npm-Komponenten nutzt
 
 ```bash
 devbox version
+```
+
+Maschinenlesbar für Agenten/Tooling:
+
+```bash
+devbox version --json
 ```
 
 Die heruntergeladenen Erlang/OTP- und Elixir-Artefakte werden vor der
