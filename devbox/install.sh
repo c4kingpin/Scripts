@@ -292,6 +292,7 @@ for devbox_module in \
   features/base.sh \
   features/node.sh \
   features/postgres.sh \
+  features/redis.sh \
   features/agents.sh \
   features/happy.sh \
   features/tooling.sh \
@@ -309,8 +310,9 @@ msg_ok "Loaded DevBox modules"
 # Feature selection: base/agents/happy/node/tooling are the DevBox core (an
 # agent runtime environment without them isn't a DevBox) and always run.
 # elixir and postgres are the heavy, project-specific runtimes a box may not
-# need, so they're the only toggleable features.
-DEVBOX_ALL_OPTIONAL_FEATURES="elixir postgres"
+# need; redis (#10 P3) is a fully optional extra never on by default in
+# either built-in profile - opt in explicitly via DEVBOX_FEATURES.
+DEVBOX_ALL_OPTIONAL_FEATURES="elixir postgres redis"
 
 DEVBOX_PROFILE="${DEVBOX_PROFILE:-default}"
 
@@ -434,6 +436,11 @@ if feature_enabled postgres; then
   install_postgres_package
   enable_postgresql_service
   configure_postgres_dev_access
+fi
+
+if feature_enabled redis; then
+  install_redis_package
+  enable_redis_service
 fi
 
 msg_info "Configuring Development Environment"
@@ -1035,6 +1042,15 @@ if feature_enabled postgres; then
     --dbname "$PG_DB_NAME" \
     --no-password \
     --command "SELECT 1;" \
+    >/dev/null
+fi
+
+if feature_enabled redis; then
+  systemctl is-active \
+    --quiet \
+    redis-server.service
+
+  redis-cli ping \
     >/dev/null
 fi
 

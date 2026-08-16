@@ -63,15 +63,18 @@ Phoenix und PostgreSQL.
 `base` (OS-Pakete, Git/GitHub-CLI), `agents` (Codex/Claude), `happy`, Node.js
 und `mise` bilden den Kern jeder DevBox — ohne sie wäre es keine
 Agenten-Laufzeitumgebung mehr und sie sind daher immer Teil der Installation.
-Nur die beiden schweren, projektspezifischen Laufzeiten lassen sich abwählen:
+Die beiden schweren, projektspezifischen Laufzeiten lassen sich abwählen,
+`redis` ist rein optional und in keinem Profil standardmäßig aktiv:
 
-| Feature | Inhalt |
-| --- | --- |
-| `elixir` | Erlang/OTP, Elixir, Phoenix |
-| `postgres` | PostgreSQL-Paket, -Dienst, Dev-Rolle/-Datenbank |
+| Feature | Inhalt | Standardmäßig aktiv |
+| --- | --- | --- |
+| `elixir` | Erlang/OTP, Elixir, Phoenix | im `default`-Profil |
+| `postgres` | PostgreSQL-Paket, -Dienst, Dev-Rolle/-Datenbank | im `default`-Profil |
+| `redis` | Redis-Server, systemd-Dienst | nie — nur per `DEVBOX_FEATURES` |
 
-Standardmäßig (`DEVBOX_PROFILE=default`, oder gar nicht gesetzt) sind beide
-aktiv. Ein schlankeres Profil ohne beide:
+Standardmäßig (`DEVBOX_PROFILE=default`, oder gar nicht gesetzt) sind `elixir`
+und `postgres` aktiv, `redis` nicht. Ein schlankeres Profil ohne `elixir` und
+`postgres`:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/c4kingpin/Scripts/master/devbox/install.sh |
@@ -84,6 +87,13 @@ vollständig):
 ```bash
 curl -fsSL https://raw.githubusercontent.com/c4kingpin/Scripts/master/devbox/install.sh |
   env DEVBOX_FEATURES=postgres bash
+```
+
+Oder `redis` zusätzlich zum Standardprofil aktivieren:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/c4kingpin/Scripts/master/devbox/install.sh |
+  env DEVBOX_FEATURES=elixir,postgres,redis bash
 ```
 
 Die getroffene Auswahl landet in

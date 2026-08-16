@@ -12,6 +12,7 @@ readonly LIB_USER="${PROJECT_ROOT}/lib/user.sh"
 readonly FEATURE_BASE="${PROJECT_ROOT}/features/base.sh"
 readonly FEATURE_NODE="${PROJECT_ROOT}/features/node.sh"
 readonly FEATURE_POSTGRES="${PROJECT_ROOT}/features/postgres.sh"
+readonly FEATURE_REDIS="${PROJECT_ROOT}/features/redis.sh"
 readonly FEATURE_AGENTS="${PROJECT_ROOT}/features/agents.sh"
 readonly FEATURE_HAPPY="${PROJECT_ROOT}/features/happy.sh"
 readonly FEATURE_TOOLING="${PROJECT_ROOT}/features/tooling.sh"
@@ -1806,6 +1807,34 @@ shellcheck_exceptions_are_not_globally_disabled() {
     grep -Fq 'exclude=SC1090,SC1091' "${repo_root}/.github/workflows/ci.yml"
 }
 
+# P3 (#10/#27): redis is a fully optional feature module, following the
+# same shape as postgres/elixir - its own features/*.sh file, gated by
+# feature_enabled/feature_was_installed, never on by default in either
+# built-in profile (opt in explicitly via DEVBOX_FEATURES).
+redis_is_a_separate_optional_feature_disabled_by_default() {
+  grep -Fq 'DEVBOX_ALL_OPTIONAL_FEATURES="elixir postgres redis"' "$INSTALL_SCRIPT" &&
+    grep -Fq 'default) devbox_profile_features="elixir postgres" ;;' "$INSTALL_SCRIPT" &&
+    grep -Fq 'minimal) devbox_profile_features="" ;;' "$INSTALL_SCRIPT" &&
+    grep -Fq 'features/redis.sh' "$INSTALL_SCRIPT" &&
+    grep -Fq 'if feature_enabled redis; then' "$INSTALL_SCRIPT" &&
+    grep -Fq 'install_redis_package' "$INSTALL_SCRIPT" &&
+    grep -Fq 'enable_redis_service' "$INSTALL_SCRIPT" &&
+    grep -Fq 'install_redis_package() {' "$FEATURE_REDIS" &&
+    grep -Fq 'enable_redis_service() {' "$FEATURE_REDIS" &&
+    grep -Fq 'redis-server' "$FEATURE_REDIS"
+}
+
+redis_validation_and_doctor_are_feature_aware() {
+  local validation_block
+  validation_block="$(sed -n '/^msg_info "Validating Installation"/,/^msg_ok "Validated Installation"/p' "$INSTALL_SCRIPT")"
+
+  grep -Fq 'if feature_enabled redis; then' <<<"$validation_block" &&
+    grep -Fq 'redis-server.service' <<<"$validation_block" &&
+    grep -Fq 'feature_was_installed redis' "$MANAGER" &&
+    grep -Fq 'redis-cli' "$MANAGER" &&
+    grep -Fq 'redis: (if $redis == "" then null else $redis end)' "$NORM_MANAGER"
+}
+
 doctor_checks_root_state_version() {
   local check_block
   check_block="$(sed -n '/if \[\[ -r "\$ROOT_VERSION_FILE" \]\]; then/,/^  fi$/p' "$MANAGER")"
@@ -2071,6 +2100,8 @@ run_test "devbox version reports the installed commit" devbox_version_reports_th
 run_test "update --check compares branch commits" update_check_compares_branch_commits
 run_test "README pipe examples pass env vars to bash, not curl" readme_pipe_examples_pass_env_vars_to_bash_not_curl
 run_test "shellcheck exceptions are not globally disabled" shellcheck_exceptions_are_not_globally_disabled
+run_test "redis is a separate optional feature, disabled by default" redis_is_a_separate_optional_feature_disabled_by_default
+run_test "redis validation and doctor are feature-aware" redis_validation_and_doctor_are_feature_aware
 run_test "doctor checks root state version" doctor_checks_root_state_version
 run_test "Happy daemon starts at boot" happy_daemon_starts_at_boot
 run_test "Happy .bashrc start remains a fallback" happy_bashrc_start_remains_as_fallback
