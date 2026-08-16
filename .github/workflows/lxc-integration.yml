@@ -1,0 +1,41 @@
+name: DevBox LXC Integration
+
+# P1.5: a real end-to-end install against an actual LXD container, on top
+# of the fast static checks in ci.yml (bash -n/ShellCheck/regression
+# tests, which run on every push/PR and never install anything). This is
+# slow (real apt/npm/Erlang installs) and not something every push should
+# wait on, so it's manual + nightly only, not tied to push/pull_request.
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 3 * * *" # nightly, off-peak UTC
+
+permissions:
+  contents: read
+
+concurrency:
+  group: lxc-integration-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  lxc-e2e:
+    name: LXC end-to-end (Ubuntu 24.04, amd64)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Set up LXD
+        uses: canonical/setup-lxd@8c6a87bfb56aa48f3fb9b830baa18562d8bfd4ee # v1
+
+      # Tests the actual ref this workflow is running against (this
+      # branch/commit), not whatever happens to be on master - the same
+      # DEVBOX_REPO_URL/DEVBOX_REF override devbox update/rollback already
+      # use, see devbox/bin/devbox.sh.
+      - name: Run LXC end-to-end test
+        env:
+          DEVBOX_REPO_URL: https://raw.githubusercontent.com/${{ github.repository }}
+          DEVBOX_REF: ${{ github.ref_name }}
+        run: sudo -E bash devbox/tests/lxc-integration-test.sh

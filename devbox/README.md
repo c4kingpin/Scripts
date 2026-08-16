@@ -490,8 +490,9 @@ Anmeldedaten, Git-Konfiguration, eine bereits vorhandene
 `~/.codex/config.toml` und die PostgreSQL-Daten unverändert erhalten bleiben.
 
 Die zuletzt aktive Version/Ref wird vor jedem Update in
-`~/.config/devbox/previous-update.env` vermerkt, sodass sich ein Update bei
-Bedarf zurücknehmen lässt:
+`/var/lib/devbox/previous-version`/`previous-ref` vermerkt (siehe
+[State-Modell](#state-modell)), sodass sich ein Update bei Bedarf
+zurücknehmen lässt:
 
 ```bash
 devbox rollback
@@ -556,7 +557,7 @@ Artefakt bricht die Installation sofort ab, bevor es entpackt wird.
 Lokale Prüfungen, aus diesem Verzeichnis heraus:
 
 ```bash
-bash -n install.sh bin/devbox.sh lib/*.sh features/*.sh tests/test-devbox.sh
+bash -n install.sh bin/devbox.sh lib/*.sh features/*.sh tests/*.sh
 
 bash tests/test-devbox.sh
 
@@ -565,7 +566,7 @@ shellcheck -x --exclude=SC1090,SC1091,SC2086,SC2154 \
   bin/devbox.sh \
   lib/*.sh \
   features/*.sh \
-  tests/test-devbox.sh
+  tests/*.sh
 ```
 
 > **Hinweis:** Die CI verwendet die ShellCheck-Version aus dem
@@ -573,10 +574,33 @@ shellcheck -x --exclude=SC1090,SC1091,SC2086,SC2154 \
 > andere Prüfcodes, weshalb `# shellcheck disable=…`-Kommentare beide
 > Varianten abdecken.
 
-Diese Prüfungen laufen bei Pushes und Pull Requests über GitHub Actions. Ein
-vollständiger End-to-End-Test erfordert weiterhin einen echten LXC-Container,
-weil Paketinstallation, Systemd-Dienste und PostgreSQL lokal nicht realistisch
-simuliert werden können.
+Diese Prüfungen laufen bei Pushes und Pull Requests über GitHub Actions
+(`.github/workflows/ci.yml`) und installieren nichts — sie prüfen Syntax,
+Stil und die im Text der Skripte erwartbaren Muster.
+
+Ein vollständiger End-to-End-Test braucht einen echten LXC-Container, weil
+Paketinstallation, Systemd-Dienste und PostgreSQL sich lokal nicht
+realistisch simulieren lassen:
+
+```bash
+sudo bash tests/lxc-integration-test.sh
+```
+
+Installiert DevBox in einem frischen `ubuntu:24.04`-LXD-Container, prüft
+`devbox doctor`, die Agenten-CLIs, die PostgreSQL-Verbindung und ein echtes
+`mix phx.new`, führt den Installer ein zweites Mal aus und vergleicht
+danach Version, Feature-Auswahl, PostgreSQL-Passwort und eine vorhandene
+`~/.codex/config.toml` — der wichtigste Einzeltest ist Idempotenz: ein
+zweiter Lauf darf nichts verändern, was bereits korrekt eingerichtet ist.
+Braucht ein funktionierendes LXD auf dem ausführenden Host (`lxc launch`
+muss funktionieren) und Root. Läuft nicht bei jedem Push/PR mit (dauert
+durch echte Downloads/Installationen deutlich länger), sondern über
+[`.github/workflows/lxc-integration.yml`](../.github/workflows/lxc-integration.yml)
+nächtlich sowie jederzeit manuell:
+
+```bash
+gh workflow run lxc-integration.yml
+```
 
 ## Upstream-Dokumentation
 
