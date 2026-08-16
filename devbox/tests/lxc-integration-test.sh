@@ -43,23 +43,27 @@ in_container() {
 }
 
 as_dev() {
-  # Mirrors run_as_dev() in devbox/lib/common.sh (runuser with an explicit
-  # dev-shaped environment, not sudo - dev has no generic sudo access, see
-  # P0.1), so this test exercises the same invocation shape DevBox itself
-  # relies on.
-  lxc exec "$CONTAINER" -- \
-    runuser \
-    -u dev \
-    -- \
-    env \
-    HOME=/home/dev \
-    USER=dev \
-    LOGNAME=dev \
-    SHELL=/bin/bash \
-    LANG=C.UTF-8 \
-    LC_ALL=C.UTF-8 \
-    PATH="/home/dev/.local/bin:/usr/local/bin:/usr/bin:/bin" \
-    "$@"
+  # Mirrors run_as_dev() in devbox/lib/common.sh: cd into DEV_HOME *before*
+  # the runuser switch, then an explicit dev-shaped environment (not sudo -
+  # dev has no generic sudo access, see P0.1). The cd matters: lxc exec's
+  # default cwd is /root, which dev can't write to, and BEAM tries to write
+  # erl_crash.dump relative to cwd - running from there makes `erl` fail
+  # with a confusing crash instead of a clear permission error.
+  lxc exec "$CONTAINER" -- bash -c '
+    cd /home/dev &&
+    exec runuser \
+      -u dev \
+      -- \
+      env \
+      HOME=/home/dev \
+      USER=dev \
+      LOGNAME=dev \
+      SHELL=/bin/bash \
+      LANG=C.UTF-8 \
+      LC_ALL=C.UTF-8 \
+      PATH="/home/dev/.local/bin:/usr/local/bin:/usr/bin:/bin" \
+      "$@"
+  ' _ "$@"
 }
 
 install_devbox() {
