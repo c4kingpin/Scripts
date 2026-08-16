@@ -5,6 +5,7 @@ umask 077
 
 readonly DEV_USER="dev"
 readonly DEV_HOME="/home/${DEV_USER}"
+readonly WORKSPACE_DIR="${DEV_HOME}/workspace"
 
 readonly STATE_DIR="${DEV_HOME}/.config/devbox"
 readonly ONBOARDING_MARKER="${STATE_DIR}/onboarding-complete"
@@ -138,6 +139,12 @@ Commands:
 
   remote-info
       Explain Happy remote access.
+
+  workspace list
+      List project directories under the dev workspace.
+
+  workspace doctor <project>
+      Read-only checks for one workspace project (Git repo, .env present).
 
   doctor
       Validate the development environment.
@@ -1241,6 +1248,76 @@ change root/admin SSH policy.
 EOF
 }
 
+# P2.6: read-only helpers over the dev user's project workspace. DevBox
+# owns the platform, not project repositories - no branch changes,
+# commits, deletions or .env creation happen here, on purpose.
+workspace_list() {
+  require_dev
+
+  if [[ ! -d "$WORKSPACE_DIR" ]]; then
+    warn "Workspace directory not found: ${WORKSPACE_DIR}"
+    return 1
+  fi
+
+  local found=0
+  local project
+
+  while IFS= read -r -d '' project; do
+    found=1
+    printf '%s\n' "$(basename "$project")"
+  done < <(
+    find \
+      "$WORKSPACE_DIR" \
+      -mindepth 1 \
+      -maxdepth 1 \
+      -type d \
+      -print0 \
+      | sort -z
+  )
+
+  [[ "$found" -eq 1 ]] ||
+    info "No projects found under ${WORKSPACE_DIR}"
+}
+
+workspace_doctor() {
+  require_dev
+
+  local project="${1:-}"
+  local project_dir
+
+  [[ -n "$project" ]] ||
+    die "Usage: devbox workspace doctor <project>"
+
+  [[ "$project" != *"/"* && "$project" != *".."* ]] ||
+    die "Invalid project name: ${project}"
+
+  project_dir="${WORKSPACE_DIR}/${project}"
+
+  if [[ ! -d "$project_dir" ]]; then
+    warn "No such workspace project: ${project}"
+    return 1
+  fi
+
+  ok "Project directory: ${project_dir}"
+
+  if git \
+    -C "$project_dir" \
+    rev-parse \
+    --is-inside-work-tree \
+    >/dev/null 2>&1; then
+
+    ok "Git repository"
+  else
+    warn "Not a Git repository"
+  fi
+
+  if [[ -f "${project_dir}/.env" ]]; then
+    ok ".env present"
+  else
+    warn ".env not present"
+  fi
+}
+
 # P1.2: install.sh records the optional features (elixir, postgres) a box
 # was actually installed with in FEATURES_FILE. No file means the box
 # predates that (or predates the feature system entirely), so every check
@@ -1949,6 +2026,14 @@ main() {
 
     remote-info:)
       remote_info
+      ;;
+
+    workspace:list)
+      workspace_list
+      ;;
+
+    workspace:doctor)
+      workspace_doctor "${@:3}"
       ;;
 
     doctor:)

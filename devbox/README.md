@@ -43,6 +43,17 @@ Netzwerk, Template und Ressourcen des Containers müssen vor dem Aufruf bereits
 | Workspace | `/home/dev/workspace` |
 | Agenten-Autonomie | ausgewogen |
 
+Rein lesende Hilfsbefehle für den Workspace (kein Branch-Wechsel, keine
+Commits, kein Löschen, kein automatisches Anlegen von `.env`):
+
+```bash
+devbox workspace list
+devbox workspace doctor <project>
+```
+
+`workspace doctor` prüft nur, ob `<project>` unter dem Workspace existiert,
+ein Git-Repository ist und eine `.env`-Datei vorhanden ist.
+
 Installiert werden unter anderem Codex CLI, Claude CLI, Node.js 24, Git, Git
 LFS, GitHub CLI, Python, ShellCheck, ripgrep, `fd`, Erlang/OTP, Elixir,
 Phoenix und PostgreSQL.
