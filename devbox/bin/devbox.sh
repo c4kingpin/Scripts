@@ -17,6 +17,7 @@ readonly FEATURES_FILE="${ROOT_STATE_DIR}/installed-features"
 readonly ROOT_VERSION_FILE="${ROOT_STATE_DIR}/version"
 readonly PREVIOUS_VERSION_FILE="${ROOT_STATE_DIR}/previous-version"
 readonly PREVIOUS_REF_FILE="${ROOT_STATE_DIR}/previous-ref"
+readonly INSTALL_STATE_FILE="${ROOT_STATE_DIR}/install-state.json"
 
 readonly SSH_CONFIG="/etc/ssh/sshd_config.d/00-devbox.conf"
 readonly SSH_KEY_FILE="${DEV_HOME}/.ssh/authorized_keys.devbox"
@@ -103,6 +104,9 @@ Commands:
   version
       Show centrally managed DevBox tool versions.
 
+  version --json
+      Same as version, as a JSON object.
+
   auth status
       Show Happy, Codex and Claude authentication status.
 
@@ -138,6 +142,10 @@ Commands:
 
   remote-info
       Explain Happy remote access.
+
+  status
+      Show how this box is configured: version, profile, features,
+      SSH, agent auth, GitHub and OpenRouter.
 
   doctor
       Validate the development environment.
@@ -544,6 +552,29 @@ Codex CLI:     ${CODEX_VERSION}
 Claude Code:   ${CLAUDE_VERSION}
 Happy:         ${HAPPY_VERSION}
 EOF
+}
+
+show_version_json() {
+  jq \
+    -n \
+    --arg devbox "$DEVBOX_VERSION" \
+    --arg node "$NODE_MAJOR" \
+    --arg erlang "$ERLANG_VERSION" \
+    --arg elixir "$ELIXIR_VERSION" \
+    --arg phoenix "$PHOENIX_VERSION" \
+    --arg codex_cli "$CODEX_VERSION" \
+    --arg claude_code "$CLAUDE_VERSION" \
+    --arg happy "$HAPPY_VERSION" \
+    '{
+      devbox: $devbox,
+      node: $node,
+      erlang: $erlang,
+      elixir: $elixir,
+      phoenix: $phoenix,
+      codex_cli: $codex_cli,
+      claude_code: $claude_code,
+      happy: $happy
+    }'
 }
 
 codex_is_authenticated() {
@@ -1252,6 +1283,50 @@ EOF
 feature_was_installed() {
   [[ -r "$FEATURES_FILE" ]] || return 0
   grep -Fqw "$1" "$FEATURES_FILE"
+}
+
+# P2.2: "How is this specific box configured?" A composite view built from
+# the Root-State files and the existing per-domain status commands
+# (ssh_status, auth/github/openrouter status) rather than reimplementing
+# their checks here.
+status() {
+  local devbox_version="unknown"
+  local profile="unknown"
+  local feature
+
+  if [[ -r "$ROOT_VERSION_FILE" ]]; then
+    devbox_version="$(<"$ROOT_VERSION_FILE")"
+  fi
+
+  if [[ -r "$INSTALL_STATE_FILE" ]] && command -v jq >/dev/null 2>&1; then
+    profile="$(jq -r '.profile // "unknown"' "$INSTALL_STATE_FILE" 2>/dev/null)"
+    [[ -n "$profile" ]] || profile="unknown"
+  fi
+
+  printf 'DevBox version:      %s\n' "$devbox_version"
+  printf 'Profile:             %s\n\n' "$profile"
+
+  printf 'Features:\n'
+
+  for feature in elixir postgres; do
+    if feature_was_installed "$feature"; then
+      printf '  %-18s enabled\n' "$feature"
+    else
+      printf '  %-18s disabled\n' "$feature"
+    fi
+  done
+
+  printf '\n'
+  ssh_status
+  printf '\n'
+
+  # auth/github/openrouter status all require_dev; re-invoke this same
+  # manager as dev instead of duplicating their checks in this function.
+  run_as_dev "$0" auth status || true
+  printf '\n'
+  run_as_dev "$0" github status || true
+  printf '\n'
+  run_as_dev "$0" openrouter status || true
 }
 
 doctor() {
@@ -2029,6 +2104,10 @@ main() {
       show_version
       ;;
 
+    version:--json)
+      show_version_json
+      ;;
+
     auth:status)
       agents_auth_status
       ;;
@@ -2075,6 +2154,10 @@ main() {
 
     remote-info:)
       remote_info
+      ;;
+
+    status:)
+      status
       ;;
 
     doctor:)

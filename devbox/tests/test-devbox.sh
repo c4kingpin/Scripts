@@ -935,6 +935,22 @@ devbox_version_command_reports_the_manifest() {
     grep -Fq 'show_version' "$NORM_MANAGER"
 }
 
+# P2.1: devbox version --json exposes the same manifest as a JSON object,
+# for agents/tooling that would otherwise have to parse the text output.
+devbox_version_json_reports_the_manifest() {
+  local text_output json_output expected_devbox_version
+
+  text_output="$("$MANAGER" version)"
+  json_output="$("$MANAGER" version --json)"
+  expected_devbox_version="$(awk -F': +' '/^DevBox:/ { print $2 }' <<<"$text_output")"
+
+  jq -e '.devbox and .node and .erlang and .elixir and .phoenix and .codex_cli and .claude_code and .happy' \
+    <<<"$json_output" >/dev/null &&
+    [[ "$(jq -r '.devbox' <<<"$json_output")" == "$expected_devbox_version" ]] &&
+    grep -Fq 'version:--json)' "$MANAGER" &&
+    grep -Fq 'show_version_json' "$NORM_MANAGER"
+}
+
 # P0.3: versioned binary artifacts are verified against a known checksum
 # before being unpacked; a missing or wrong checksum aborts the install.
 downloaded_toolchain_artifacts_are_checksum_verified() {
@@ -1169,6 +1185,51 @@ doctor_json_reports_a_valid_summary_matching_the_exit_code() {
     [[ "$unhealthy_status" -eq 1 ]] &&
     grep -Fq 'doctor:--json)' "$MANAGER" &&
     grep -Fq 'doctor json' "$NORM_MANAGER"
+}
+
+# P2.2: devbox status is a composite view built from Root-State files and
+# the existing per-domain status commands (ssh_status, auth/github/
+# openrouter status), not a reimplementation of their checks. Extract the
+# function body and re-run it standalone with faked state/collaborators,
+# same technique as doctor_checks_root_state_version below.
+devbox_status_composes_existing_status_commands() {
+  local status_fn
+  status_fn="$(sed -n '/^status() {/,/^}/p' "$MANAGER")"
+
+  [[ -n "$status_fn" ]] || return 1
+
+  local root_version_file="${TEST_TMP}/status-root-version"
+  local install_state_file="${TEST_TMP}/status-install-state.json"
+  local features_file="${TEST_TMP}/status-installed-features"
+  local output
+
+  printf '1.2.3\n' >"$root_version_file"
+  printf '{"profile":"default"}\n' >"$install_state_file"
+  printf 'elixir\n' >"$features_file"
+
+  output="$(
+    bash -c '
+      ROOT_VERSION_FILE="'"$root_version_file"'"
+      INSTALL_STATE_FILE="'"$install_state_file"'"
+      FEATURES_FILE="'"$features_file"'"
+      feature_was_installed() { grep -Fqw "$1" "$FEATURES_FILE"; }
+      ssh_status() { echo "STUB:ssh_status"; }
+      run_as_dev() { echo "STUB:run_as_dev:$*"; }
+      '"$status_fn"'
+      status
+    '
+  )"
+
+  grep -Fq 'DevBox version:      1.2.3' <<<"$output" &&
+    grep -Fq 'Profile:             default' <<<"$output" &&
+    grep -Fq 'elixir             enabled' <<<"$output" &&
+    grep -Fq 'postgres           disabled' <<<"$output" &&
+    grep -Fq 'STUB:ssh_status' <<<"$output" &&
+    grep -Eq '^STUB:run_as_dev:.* auth status$' <<<"$output" &&
+    grep -Eq '^STUB:run_as_dev:.* github status$' <<<"$output" &&
+    grep -Eq '^STUB:run_as_dev:.* openrouter status$' <<<"$output" &&
+    grep -Fq 'status:)' "$MANAGER" &&
+    grep -Fq 'status' "$NORM_MANAGER"
 }
 
 doctor_checks_root_state_version() {
@@ -1406,6 +1467,7 @@ run_test "updates preserve user state" update_preserves_user_state
 run_test "managed agent CLIs are pinned, not @latest" managed_agent_clis_are_pinned_not_latest
 run_test "versions.env matches embedded defaults" versions_env_matches_embedded_defaults
 run_test "devbox version reports the manifest" devbox_version_command_reports_the_manifest
+run_test "devbox version --json reports the manifest" devbox_version_json_reports_the_manifest
 run_test "toolchain artifacts are checksum-verified" downloaded_toolchain_artifacts_are_checksum_verified
 run_test "checksums.env matches embedded checksums" checksums_env_matches_embedded_checksums
 run_test "complete stack validation" installer_validates_complete_stack
@@ -1414,6 +1476,7 @@ run_test "validation skips checks for disabled features" validation_skips_checks
 run_test "install.sh records DevBox state" install_script_records_devbox_state
 run_test "install.sh migrates legacy user-state features" install_script_migrates_legacy_user_state_features
 run_test "doctor is feature-aware" doctor_is_feature_aware
+run_test "devbox status composes existing status commands" devbox_status_composes_existing_status_commands
 run_test "doctor --json reports a valid summary matching the exit code" doctor_json_reports_a_valid_summary_matching_the_exit_code
 run_test "doctor checks root state version" doctor_checks_root_state_version
 run_test "Happy daemon starts at boot" happy_daemon_starts_at_boot
