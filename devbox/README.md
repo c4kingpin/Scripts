@@ -15,6 +15,16 @@ versionsgleich. Am dokumentierten Curl-Einzeiler ändert das nichts: `install.sh
 lädt ohnehin schon während der Installation weitere Artefakte (Pakete, Node.js,
 Erlang/Elixir, Codex/Claude/Happy) nach.
 
+Betriebslogik, die `install.sh` erst nach seiner Bootstrap-Phase (Root-/OS-/
+Netzwerk-Check) braucht, wandert schrittweise in eigene, ebenfalls
+nachgeladene Module unter [`lib/`](lib) (aktuell: [`lib/common.sh`](lib/common.sh)
+mit der Checksum-Verifikation und dem `run_as_dev`-Helfer). Die Bootstrap-Kette
+selbst bleibt bewusst in `install.sh`, da sie gebraucht wird, um diese Module
+überhaupt herunterzuladen. `bin/devbox.sh` bleibt davon unabhängig eine
+einzelne, in sich geschlossene Datei ohne Laufzeit-Abhängigkeit auf `lib/`,
+damit `devbox`-Befehle nach der Installation ohne Netzwerkzugriff
+funktionieren.
+
 Das Skript erstellt oder konfiguriert den Container selbst nicht. Storage,
 Netzwerk, Template und Ressourcen des Containers müssen vor dem Aufruf bereits
 über das jeweilige Hypervisor-Tooling (`pct create`, `lxc launch`,
@@ -463,13 +473,14 @@ Artefakt bricht die Installation sofort ab, bevor es entpackt wird.
 Lokale Prüfungen, aus diesem Verzeichnis heraus:
 
 ```bash
-bash -n install.sh bin/devbox.sh tests/test-devbox.sh
+bash -n install.sh bin/devbox.sh lib/common.sh tests/test-devbox.sh
 
 bash tests/test-devbox.sh
 
 shellcheck -x --exclude=SC1090,SC1091,SC2086,SC2154 \
   install.sh \
   bin/devbox.sh \
+  lib/common.sh \
   tests/test-devbox.sh
 ```
 

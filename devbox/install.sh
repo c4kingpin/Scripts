@@ -224,45 +224,15 @@ declare -A DEVBOX_CHECKSUMS=(
 )
 readonly DEVBOX_CHECKSUMS
 
-verify_checksum() {
-  local file="$1"
-  local expected="$2"
-  local label="$3"
-  local actual
+msg_info "Loading DevBox modules"
 
-  actual="$(sha256sum "$file" | awk '{print $1}')"
+devbox_lib_common="$(mktemp)"
+fetch_devbox_module "lib/common.sh" "$devbox_lib_common"
+# shellcheck source=lib/common.sh
+source "$devbox_lib_common"
+rm -f "$devbox_lib_common"
 
-  if [[ -z "$expected" ]]; then
-    rm -f "$file"
-    msg_error "No known checksum for ${label}; refusing to install it."
-    exit 1
-  fi
-
-  if [[ "$actual" != "$expected" ]]; then
-    rm -f "$file"
-    msg_error "Checksum mismatch for ${label} (expected ${expected}, got ${actual})."
-    exit 1
-  fi
-
-  msg_ok "Verified checksum for ${label}"
-}
-
-run_as_dev() (
-  cd "$DEV_HOME"
-
-  exec runuser \
-    -u "$DEV_USER" \
-    -- \
-    env \
-      HOME="$DEV_HOME" \
-      USER="$DEV_USER" \
-      LOGNAME="$DEV_USER" \
-      SHELL="/bin/bash" \
-      LANG="C.UTF-8" \
-      LC_ALL="C.UTF-8" \
-      PATH="${DEV_HOME}/.local/bin:/usr/local/bin:/usr/bin:/bin" \
-      "$@"
-)
+msg_ok "Loaded DevBox modules"
 
 select_autonomy() {
   local requested="${DEVBOX_AUTONOMY:-}"

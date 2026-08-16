@@ -7,6 +7,7 @@ PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 readonly PROJECT_ROOT
 readonly INSTALL_SCRIPT="${PROJECT_ROOT}/install.sh"
 readonly MANAGER_SOURCE="${PROJECT_ROOT}/bin/devbox.sh"
+readonly LIB_COMMON="${PROJECT_ROOT}/lib/common.sh"
 TEST_TMP="$(mktemp -d /tmp/devbox-tests.XXXXXX)"
 readonly TEST_TMP
 readonly MANAGER="${TEST_TMP}/devbox"
@@ -64,7 +65,7 @@ readonly NORM_INSTALL="${TEST_TMP}/install.normalized"
 readonly NORM_MANAGER="${TEST_TMP}/devbox.normalized"
 
 scripts_have_valid_syntax() {
-  bash -n "$INSTALL_SCRIPT" "$MANAGER"
+  bash -n "$INSTALL_SCRIPT" "$MANAGER" "$LIB_COMMON"
 }
 
 standalone_no_proxmox_framework() {
@@ -95,6 +96,21 @@ install_script_fetches_matching_manager_version() {
     grep -Fq 'fetch_devbox_module() {' "$INSTALL_SCRIPT" &&
     grep -Fq '"${DEVBOX_REPO_URL%/}/${DEVBOX_REF}/devbox/${module_path}"' "$NORM_INSTALL" &&
     grep -Fq 'fetch_devbox_module "bin/devbox.sh" "/usr/local/bin/devbox"' "$INSTALL_SCRIPT"
+}
+
+# lib/common.sh holds operational helpers (verify_checksum, run_as_dev) that
+# are only needed after the bootstrap preflight has already run; it must not
+# be defined inline in install.sh anymore, only downloaded and sourced, and
+# the bootstrap chain itself (root/OS/network checks, curl_with_retry,
+# fetch_devbox_module) must stay inline since it's needed to fetch this file
+# in the first place.
+install_script_loads_common_lib_after_bootstrap() {
+  grep -Fq 'fetch_devbox_module "lib/common.sh" "$devbox_lib_common"' "$INSTALL_SCRIPT" &&
+    grep -Fq 'source "$devbox_lib_common"' "$INSTALL_SCRIPT" &&
+    ! grep -Fq 'verify_checksum() {' "$INSTALL_SCRIPT" &&
+    ! grep -Fq 'run_as_dev() (' "$INSTALL_SCRIPT" &&
+    grep -Fq 'verify_checksum() {' "$LIB_COMMON" &&
+    grep -Fq 'run_as_dev() (' "$LIB_COMMON"
 }
 
 install_script_runs_standalone_preflight() {
@@ -164,7 +180,7 @@ erlang_comes_from_the_precompiled_ubuntu_build() {
 erlang_cookie_is_provisioned() {
   grep -Fq '"${DEV_HOME}/.erlang.cookie"' "$INSTALL_SCRIPT" &&
     grep -Fq 'chmod 0400 "${DEV_HOME}/.erlang.cookie"' "$NORM_INSTALL" &&
-    grep -Fq 'HOME="$DEV_HOME"' "$INSTALL_SCRIPT"
+    grep -Fq 'HOME="$DEV_HOME"' "$LIB_COMMON"
 }
 
 installer_requires_ubuntu() {
@@ -620,10 +636,10 @@ devbox_version_command_reports_the_manifest() {
 downloaded_toolchain_artifacts_are_checksum_verified() {
   local otp_verify_line otp_extract_line
 
-  grep -Fq 'verify_checksum() {' "$INSTALL_SCRIPT" &&
-    grep -Fq 'Checksum mismatch for' "$INSTALL_SCRIPT" &&
-    grep -Fq 'No known checksum for' "$INSTALL_SCRIPT" &&
-    grep -Fq 'rm -f "$file"' "$NORM_INSTALL" &&
+  grep -Fq 'verify_checksum() {' "$LIB_COMMON" &&
+    grep -Fq 'Checksum mismatch for' "$LIB_COMMON" &&
+    grep -Fq 'No known checksum for' "$LIB_COMMON" &&
+    grep -Fq 'rm -f "$file"' "$LIB_COMMON" &&
     grep -Fq 'DEVBOX_CHECKSUMS["otp:${ERLANG_VERSION}:${otp_os}:${otp_arch}"]' \
       "$INSTALL_SCRIPT" &&
     grep -Fq 'DEVBOX_CHECKSUMS["elixir:${ELIXIR_VERSION}:${ERLANG_OTP_MAJOR}"]' \
@@ -685,6 +701,7 @@ run_test "standalone preflight checks" install_script_runs_standalone_preflight
 run_test "curl-pipeable from master" installer_curl_pipeable_from_master
 run_test "project is self-contained under devbox/" project_is_self_contained
 run_test "install.sh fetches a version-matched manager" install_script_fetches_matching_manager_version
+run_test "install.sh loads lib/common.sh after bootstrap" install_script_loads_common_lib_after_bootstrap
 run_test "bare-metal install" install_script_is_bare_metal
 run_test "BEAM toolchain outside the version manager" toolchain_is_installed_outside_the_version_manager
 run_test "mise available as a developer tool" mise_is_available_as_a_developer_tool
