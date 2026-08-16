@@ -489,6 +489,13 @@ Diagnose:
 devbox doctor
 ```
 
+Dieselben Prüfungen maschinenlesbar für Agenten/Monitoring, mit Exit-Code
+`0` (gesund) bzw. `1` (ungesund):
+
+```bash
+devbox doctor --json
+```
+
 `update`/`rollback` müssen als `root` laufen, nicht über `sudo` als `dev` –
 der Benutzer `dev` besitzt bewusst kein allgemeines passwortloses `sudo`,
 sondern nur für `ssh setup`/`ssh disable` und `packages install` (siehe
