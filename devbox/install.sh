@@ -201,7 +201,7 @@ readonly DEV_HOME="/home/${DEV_USER}"
 readonly ROOT_STATE_DIR="/var/lib/devbox"
 
 # Central version manifest (mirrors devbox/versions.env; see header comment).
-readonly DEVBOX_VERSION="${DEVBOX_VERSION:-1.0.0}"
+readonly DEVBOX_VERSION="${DEVBOX_VERSION:-1.1.1}"
 NODE_VERSION="${NODE_VERSION:-24}"
 readonly NODE_VERSION
 ERLANG_VERSION="${ERLANG_VERSION:-29.0.5}"
@@ -961,9 +961,13 @@ if feature_enabled postgres; then
 fi
 
 # Validate both the installer and generated manager before success.
-bash \
-  -n \
-  "$0"
+# $0 is not a path to this script when run via `curl | bash` (it's
+# typically just "bash"), so only self-check when $0 is a real file.
+if [[ -f "$0" ]]; then
+  bash \
+    -n \
+    "$0"
+fi
 
 bash \
   -n \

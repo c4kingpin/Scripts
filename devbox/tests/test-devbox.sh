@@ -515,7 +515,7 @@ EOF
     update_devbox --check
   ) >"$output_file" 2>&1
 
-  grep -Fq "Update available: 1.0.0 -> v99.0.0" "$output_file" &&
+  grep -Fq "Update available: 1.1.1 -> v99.0.0" "$output_file" &&
     ! grep -Fq "Downloading installer" "$output_file"
 }
 
