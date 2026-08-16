@@ -1,0 +1,72 @@
+name: Release
+
+on:
+  push:
+    branches:
+      - master
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Tag and publish a release when DEVBOX_VERSION changes
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Tag and release the current DEVBOX_VERSION
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version="$(
+            grep -E '^DEVBOX_VERSION=' devbox/versions.env |
+              cut -d'"' -f2
+          )"
+          tag="v${version}"
+
+          if git rev-parse --verify --quiet "refs/tags/${tag}" >/dev/null; then
+            echo "Tag ${tag} already exists, nothing to release."
+            exit 0
+          fi
+
+          previous_tag="$(
+            git tag --list 'v*' --sort=-v:refname |
+              head -n1
+          )"
+
+          git config user.name "devbox-release-bot"
+          git config user.email "devbox-release-bot@users.noreply.github.com"
+          git tag -a "$tag" -m "DevBox ${tag}"
+          git push origin "$tag"
+
+          notes_file="$(mktemp)"
+          {
+            echo "DevBox ${tag}"
+            echo
+            if [[ -n "$previous_tag" ]]; then
+              echo "Changes since ${previous_tag}:"
+              git log "${previous_tag}..HEAD" --no-merges --pretty=format:'- %s'
+              echo
+              echo
+            else
+              echo "Initial release."
+              echo
+            fi
+            echo "🤖 Generated with [Claude Code](https://claude.ai/code)"
+            echo "via [Happy](https://happy.engineering)"
+          } >"$notes_file"
+
+          gh release create "$tag" \
+            --title "DevBox ${tag}" \
+            --notes-file "$notes_file"
