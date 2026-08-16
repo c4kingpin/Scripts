@@ -47,6 +47,17 @@ configure_postgres_dev_access() {
         's/^PGPASSWORD=//p' \
         "$PG_ENV_FILE"
     )"
+
+    # P1.5: PG_ENV_FILE lives under the dev-writable user-state directory,
+    # and PG_DB_PASS is interpolated directly into SQL below. Only accept
+    # it back if it still matches the format we generate (openssl rand
+    # -hex 24 below); anything else - a tampered value with SQL/shell
+    # metacharacters included - is discarded in favor of a fresh password
+    # rather than ever reaching the ALTER/CREATE ROLE statements.
+    if [[ ! "$PG_DB_PASS" =~ ^[0-9a-f]{48}$ ]]; then
+      msg_error "Persisted PostgreSQL password has an unexpected format; generating a new one"
+      PG_DB_PASS="$(openssl rand -hex 24)"
+    fi
   else
     PG_DB_PASS="$(openssl rand -hex 24)"
   fi
