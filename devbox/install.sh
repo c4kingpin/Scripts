@@ -194,6 +194,12 @@ update_os
 readonly DEV_USER="dev"
 readonly DEV_HOME="/home/${DEV_USER}"
 
+# Root-owned DevBox state (active/previous version, installed features,
+# install metadata) - readable by dev (devbox doctor runs without root),
+# writable only by root. User-specific state stays under
+# ${DEV_HOME}/.config/devbox (onboarding marker, OpenRouter config, etc.).
+readonly ROOT_STATE_DIR="/var/lib/devbox"
+
 # Central version manifest (mirrors devbox/versions.env; see header comment).
 readonly DEVBOX_VERSION="${DEVBOX_VERSION:-1.0.0}"
 NODE_VERSION="${NODE_VERSION:-24}"
@@ -674,26 +680,52 @@ run_as_dev git config \
 
 msg_ok "Configured Development Environment"
 
-msg_info "Recording feature selection"
+msg_info "Recording DevBox state"
 
 install \
   -d \
   -m 0755 \
-  -o "$DEV_USER" \
-  -g "$DEV_USER" \
-  "${DEV_HOME}/.config/devbox"
+  "$ROOT_STATE_DIR"
 
-printf '%s\n' "$devbox_selected_features" >"${DEV_HOME}/.config/devbox/features"
+# P1.2/P1.3 briefly recorded this under the user-state directory, before
+# ROOT_STATE_DIR existed. Migrate it once so an in-place update doesn't
+# strand the selection a prior run already made.
+if [[ -f "${DEV_HOME}/.config/devbox/features" &&
+      ! -f "${ROOT_STATE_DIR}/installed-features" ]]; then
 
-chown \
-  "$DEV_USER:$DEV_USER" \
-  "${DEV_HOME}/.config/devbox/features"
+  mv \
+    "${DEV_HOME}/.config/devbox/features" \
+    "${ROOT_STATE_DIR}/installed-features"
+fi
+
+printf '%s\n' "$DEVBOX_VERSION" >"${ROOT_STATE_DIR}/version"
+printf '%s\n' "$devbox_selected_features" >"${ROOT_STATE_DIR}/installed-features"
+
+install_os_version="$(
+  . /etc/os-release
+  printf '%s' "${VERSION_ID}"
+)"
+install_arch="$(dpkg --print-architecture)"
+install_timestamp="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+cat <<EOF >"${ROOT_STATE_DIR}/install-state.json"
+{
+  "version": "${DEVBOX_VERSION}",
+  "profile": "${DEVBOX_PROFILE}",
+  "features": "${devbox_selected_features}",
+  "os": "${install_os_version}",
+  "arch": "${install_arch}",
+  "installed_at": "${install_timestamp}"
+}
+EOF
 
 chmod \
   0644 \
-  "${DEV_HOME}/.config/devbox/features"
+  "${ROOT_STATE_DIR}/version" \
+  "${ROOT_STATE_DIR}/installed-features" \
+  "${ROOT_STATE_DIR}/install-state.json"
 
-msg_ok "Recorded feature selection"
+msg_ok "Recorded DevBox state"
 
 msg_info "Installing DevBox Manager"
 
