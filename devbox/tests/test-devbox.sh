@@ -1300,6 +1300,63 @@ devbox_status_composes_existing_status_commands() {
     grep -Fq 'status' "$NORM_MANAGER"
 }
 
+# P1.5: a persisted PGPASSWORD read back from the dev-writable PG_ENV_FILE
+# is interpolated directly into ALTER/CREATE ROLE SQL. Extract the
+# reuse-or-generate block and confirm a tampered value (SQL/shell
+# metacharacters included) is discarded for a fresh password, while a
+# value in the actually-generated format (openssl rand -hex 24) passes
+# through unchanged - re-installing must not silently rotate a good
+# password.
+postgres_password_reuse_validates_the_persisted_format() {
+  local reuse_block
+  reuse_block="$(sed -n '/^  if \[\[ -r "\$PG_ENV_FILE" \]\] &&$/,/^  fi$/p' "$FEATURE_POSTGRES")"
+
+  [[ -n "$reuse_block" ]] || return 1
+
+  local pg_env_file="${TEST_TMP}/postgres-password-env"
+  local valid_password="0123456789abcdef0123456789abcdef0123456789abcdef"
+  local tampered_output valid_output
+
+  printf "PGPASSWORD=' OR '1'='1\n" >"$pg_env_file"
+  tampered_output="$(
+    bash -c '
+      msg_error() { echo "ERROR: $*" >&2; }
+      PG_ENV_FILE="'"$pg_env_file"'"
+      '"$reuse_block"'
+      echo "PG_DB_PASS=$PG_DB_PASS"
+    ' 2>&1
+  )"
+
+  printf 'PGPASSWORD=%s\n' "$valid_password" >"$pg_env_file"
+  valid_output="$(
+    bash -c '
+      msg_error() { echo "ERROR: $*" >&2; }
+      PG_ENV_FILE="'"$pg_env_file"'"
+      '"$reuse_block"'
+      echo "PG_DB_PASS=$PG_DB_PASS"
+    '
+  )"
+
+  local tampered_password
+  tampered_password="$(grep -oP '^PG_DB_PASS=\K.*' <<<"$tampered_output")"
+
+  [[ "$tampered_password" != "' OR '1'='1" ]] &&
+    [[ "$tampered_password" =~ ^[0-9a-f]{48}$ ]] &&
+    grep -Fq 'ERROR: Persisted PostgreSQL password has an unexpected format' <<<"$tampered_output" &&
+    [[ "$valid_output" == "PG_DB_PASS=${valid_password}" ]]
+}
+
+# Reuse validation must run before the value ever reaches the SQL commands.
+postgres_password_is_validated_before_sql_interpolation() {
+  local validate_line sql_line
+
+  validate_line="$(grep -n '\^\[0-9a-f\]{48}\$' "$FEATURE_POSTGRES" | head -n1 | cut -d: -f1)"
+  sql_line="$(grep -n 'ALTER ROLE' "$FEATURE_POSTGRES" | head -n1 | cut -d: -f1)"
+
+  [[ -n "$validate_line" && -n "$sql_line" ]] &&
+    ((validate_line < sql_line))
+}
+
 doctor_checks_root_state_version() {
   local check_block
   check_block="$(sed -n '/if \[\[ -r "\$ROOT_VERSION_FILE" \]\]; then/,/^  fi$/p' "$MANAGER")"
@@ -1547,6 +1604,8 @@ run_test "doctor is feature-aware" doctor_is_feature_aware
 run_test "devbox status composes existing status commands" devbox_status_composes_existing_status_commands
 run_test "workspace list/doctor report project health read-only" workspace_list_and_doctor_report_project_health_read_only
 run_test "doctor --json reports a valid summary matching the exit code" doctor_json_reports_a_valid_summary_matching_the_exit_code
+run_test "postgres password reuse validates the persisted format" postgres_password_reuse_validates_the_persisted_format
+run_test "postgres password is validated before SQL interpolation" postgres_password_is_validated_before_sql_interpolation
 run_test "doctor checks root state version" doctor_checks_root_state_version
 run_test "Happy daemon starts at boot" happy_daemon_starts_at_boot
 run_test "Happy .bashrc start remains a fallback" happy_bashrc_start_remains_as_fallback
