@@ -17,6 +17,7 @@ readonly FEATURES_FILE="${ROOT_STATE_DIR}/installed-features"
 readonly ROOT_VERSION_FILE="${ROOT_STATE_DIR}/version"
 readonly PREVIOUS_VERSION_FILE="${ROOT_STATE_DIR}/previous-version"
 readonly PREVIOUS_REF_FILE="${ROOT_STATE_DIR}/previous-ref"
+readonly INSTALL_STATE_FILE="${ROOT_STATE_DIR}/install-state.json"
 
 readonly SSH_CONFIG="/etc/ssh/sshd_config.d/00-devbox.conf"
 readonly SSH_KEY_FILE="${DEV_HOME}/.ssh/authorized_keys.devbox"
@@ -138,6 +139,10 @@ Commands:
 
   remote-info
       Explain Happy remote access.
+
+  status
+      Show how this box is configured: version, profile, features,
+      SSH, agent auth, GitHub and OpenRouter.
 
   doctor
       Validate the development environment.
@@ -1250,6 +1255,50 @@ feature_was_installed() {
   grep -Fqw "$1" "$FEATURES_FILE"
 }
 
+# P2.2: "How is this specific box configured?" A composite view built from
+# the Root-State files and the existing per-domain status commands
+# (ssh_status, auth/github/openrouter status) rather than reimplementing
+# their checks here.
+status() {
+  local devbox_version="unknown"
+  local profile="unknown"
+  local feature
+
+  if [[ -r "$ROOT_VERSION_FILE" ]]; then
+    devbox_version="$(<"$ROOT_VERSION_FILE")"
+  fi
+
+  if [[ -r "$INSTALL_STATE_FILE" ]] && command -v jq >/dev/null 2>&1; then
+    profile="$(jq -r '.profile // "unknown"' "$INSTALL_STATE_FILE" 2>/dev/null)"
+    [[ -n "$profile" ]] || profile="unknown"
+  fi
+
+  printf 'DevBox version:      %s\n' "$devbox_version"
+  printf 'Profile:             %s\n\n' "$profile"
+
+  printf 'Features:\n'
+
+  for feature in elixir postgres; do
+    if feature_was_installed "$feature"; then
+      printf '  %-18s enabled\n' "$feature"
+    else
+      printf '  %-18s disabled\n' "$feature"
+    fi
+  done
+
+  printf '\n'
+  ssh_status
+  printf '\n'
+
+  # auth/github/openrouter status all require_dev; re-invoke this same
+  # manager as dev instead of duplicating their checks in this function.
+  run_as_dev "$0" auth status || true
+  printf '\n'
+  run_as_dev "$0" github status || true
+  printf '\n'
+  run_as_dev "$0" openrouter status || true
+}
+
 doctor() {
   local command
   local status=0
@@ -1949,6 +1998,10 @@ main() {
 
     remote-info:)
       remote_info
+      ;;
+
+    status:)
+      status
       ;;
 
     doctor:)
