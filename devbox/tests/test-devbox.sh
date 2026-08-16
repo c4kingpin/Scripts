@@ -1300,6 +1300,83 @@ devbox_status_composes_existing_status_commands() {
     grep -Fq 'status' "$NORM_MANAGER"
 }
 
+# P1.3: install.sh resolves DEVBOX_REF to a commit SHA once, up front, so
+# every module fetch in this run (lib/*.sh, features/*.sh, bin/devbox.sh -
+# ~10 separate downloads) uses the exact same commit even if the branch
+# moves mid-install. Extract the resolution block and exercise both the
+# success and the fallback path with a stubbed curl (no real GitHub API
+# dependency in this test).
+install_pins_module_fetches_to_a_resolved_commit() {
+  local resolve_block
+  resolve_block="$(sed -n '/^resolve_devbox_ref_to_commit() {/,/^fi$/p' "$INSTALL_SCRIPT")"
+
+  [[ -n "$resolve_block" ]] || return 1
+
+  local bin_dir="${TEST_TMP}/commit-pin-bin"
+  mkdir -p "$bin_dir"
+
+  cat <<'EOF' >"${bin_dir}/curl"
+#!/usr/bin/env bash
+printf '{"sha":"deadbeefdeadbeefdeadbeefdeadbeefdeadbeef","other":"noise"}'
+EOF
+  chmod 0755 "${bin_dir}/curl"
+
+  local output
+  output="$(
+    PATH="${bin_dir}:/usr/bin:/bin" \
+    bash -c '
+      msg_ok() { echo "OK: $*"; }
+      msg_info() { echo "INFO: $*"; }
+      DEVBOX_GITHUB_REPO="c4kingpin/Scripts"
+      DEVBOX_REF="master"
+      '"$resolve_block"'
+      echo "DEVBOX_REF=$DEVBOX_REF"
+      echo "devbox_resolved_commit=$devbox_resolved_commit"
+    '
+  )"
+
+  grep -Fq "OK: Pinned installer modules to commit deadbeefdeadbeefdeadbeefdeadbeefdeadbeef" <<<"$output" &&
+    grep -Fq "DEVBOX_REF=deadbeefdeadbeefdeadbeefdeadbeefdeadbeef" <<<"$output" &&
+    grep -Fq "devbox_resolved_commit=deadbeefdeadbeefdeadbeefdeadbeefdeadbeef" <<<"$output"
+}
+
+# A failed/empty API response (rate limit, network blip, nonexistent ref)
+# must not block the install - fall back to fetching modules by the ref
+# string directly, exactly like every install did before this feature.
+install_falls_back_to_the_ref_when_resolution_fails() {
+  local resolve_block
+  resolve_block="$(sed -n '/^resolve_devbox_ref_to_commit() {/,/^fi$/p' "$INSTALL_SCRIPT")"
+
+  [[ -n "$resolve_block" ]] || return 1
+
+  local bin_dir="${TEST_TMP}/commit-pin-fallback-bin"
+  mkdir -p "$bin_dir"
+
+  cat <<'EOF' >"${bin_dir}/curl"
+#!/usr/bin/env bash
+exit 22
+EOF
+  chmod 0755 "${bin_dir}/curl"
+
+  local output
+  output="$(
+    PATH="${bin_dir}:/usr/bin:/bin" \
+    bash -c '
+      msg_ok() { echo "OK: $*"; }
+      msg_info() { echo "INFO: $*"; }
+      DEVBOX_GITHUB_REPO="c4kingpin/Scripts"
+      DEVBOX_REF="master"
+      '"$resolve_block"'
+      echo "DEVBOX_REF=$DEVBOX_REF"
+      echo "devbox_resolved_commit=[$devbox_resolved_commit]"
+    '
+  )"
+
+  grep -Fq "INFO: Could not resolve 'master' to a commit" <<<"$output" &&
+    grep -Fq "DEVBOX_REF=master" <<<"$output" &&
+    grep -Fq "devbox_resolved_commit=[]" <<<"$output"
+}
+
 doctor_checks_root_state_version() {
   local check_block
   check_block="$(sed -n '/if \[\[ -r "\$ROOT_VERSION_FILE" \]\]; then/,/^  fi$/p' "$MANAGER")"
@@ -1547,6 +1624,8 @@ run_test "doctor is feature-aware" doctor_is_feature_aware
 run_test "devbox status composes existing status commands" devbox_status_composes_existing_status_commands
 run_test "workspace list/doctor report project health read-only" workspace_list_and_doctor_report_project_health_read_only
 run_test "doctor --json reports a valid summary matching the exit code" doctor_json_reports_a_valid_summary_matching_the_exit_code
+run_test "install pins module fetches to a resolved commit" install_pins_module_fetches_to_a_resolved_commit
+run_test "install falls back to the ref when resolution fails" install_falls_back_to_the_ref_when_resolution_fails
 run_test "doctor checks root state version" doctor_checks_root_state_version
 run_test "Happy daemon starts at boot" happy_daemon_starts_at_boot
 run_test "Happy .bashrc start remains a fallback" happy_bashrc_start_remains_as_fallback
