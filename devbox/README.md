@@ -610,6 +610,14 @@ Maschinenlesbar für Agenten/Tooling:
 devbox version --json
 ```
 
+Da `master` nach einem Release neue Commits enthalten kann, ohne dass sich
+`DEVBOX_VERSION` ändert, zeigen `devbox version` und `devbox status`
+zusätzlich den tatsächlich installierten Commit (persistiert von
+`install.sh`, sofern der Installationslauf ihn auflösen konnte —
+andernfalls `unknown`). `devbox update --check` auf einem Branch vergleicht
+diesen Commit gegen den aktuellen Stand des Branches, statt nur zu melden,
+dass Branch-Updates "nicht versionsverglichen" sind.
+
 Die heruntergeladenen Erlang/OTP- und Elixir-Artefakte werden vor der
 Installation gegen bekannte SHA256-Prüfsummen aus
 [`checksums.env`](checksums.env) verifiziert; ein manipuliertes oder falsches

@@ -19,6 +19,7 @@ readonly ROOT_VERSION_FILE="${ROOT_STATE_DIR}/version"
 readonly PREVIOUS_VERSION_FILE="${ROOT_STATE_DIR}/previous-version"
 readonly PREVIOUS_REF_FILE="${ROOT_STATE_DIR}/previous-ref"
 readonly ACTIVE_REF_FILE="${ROOT_STATE_DIR}/active-ref"
+readonly ROOT_COMMIT_FILE="${ROOT_STATE_DIR}/commit"
 readonly INSTALL_STATE_FILE="${ROOT_STATE_DIR}/install-state.json"
 
 readonly SSH_CONFIG="/etc/ssh/sshd_config.d/00-devbox.conf"
@@ -579,9 +580,22 @@ packages_install() {
   ok "Installed packages: ${packages[*]}"
 }
 
+# P2.1: DEVBOX_VERSION alone doesn't uniquely identify installed code -
+# master can move between releases while the version string stays the
+# same. The installed commit (persisted by install.sh, P1.3) disambiguates
+# that; "unknown" for installs from before P1.3 rather than a guess.
+installed_commit() {
+  if [[ -r "$ROOT_COMMIT_FILE" ]]; then
+    printf '%s' "$(<"$ROOT_COMMIT_FILE")"
+  else
+    printf 'unknown'
+  fi
+}
+
 show_version() {
   cat <<EOF
 DevBox:        ${DEVBOX_VERSION}
+Commit:        $(installed_commit)
 Node:          ${NODE_MAJOR}
 Erlang:        ${ERLANG_VERSION}
 Elixir:        ${ELIXIR_VERSION}
@@ -596,6 +610,7 @@ show_version_json() {
   jq \
     -n \
     --arg devbox "$DEVBOX_VERSION" \
+    --arg commit "$(installed_commit)" \
     --arg node "$NODE_MAJOR" \
     --arg erlang "$ERLANG_VERSION" \
     --arg elixir "$ELIXIR_VERSION" \
@@ -605,6 +620,7 @@ show_version_json() {
     --arg happy "$HAPPY_VERSION" \
     '{
       devbox: $devbox,
+      commit: $commit,
       node: $node,
       erlang: $erlang,
       elixir: $elixir,
@@ -1412,6 +1428,7 @@ status() {
   fi
 
   printf 'DevBox version:      %s\n' "$devbox_version"
+  printf 'Commit:              %s\n' "$(installed_commit)"
   printf 'Profile:             %s\n\n' "$profile"
 
   printf 'Features:\n'
@@ -1864,6 +1881,35 @@ latest_release_tag() {
     || true
 }
 
+# P2.1: resolves a branch/tag to the commit it currently names, so
+# `update --check` on a branch can report whether the installed commit is
+# actually stale instead of the old blanket "not version-compared"
+# disclaimer. Mirrors install.sh's resolve_devbox_ref_to_commit(), but
+# uses jq here since - unlike install.sh's early bootstrap - it's always
+# available by the time the manager runs. Prints nothing on any failure
+# (network, rate limit, unknown ref); callers treat that as "unknown".
+resolve_ref_to_commit() {
+  local github_repo="$1"
+  local ref="$2"
+  local response
+
+  response="$(
+    curl \
+      -fsSL \
+      --connect-timeout 15 \
+      --header "Accept: application/vnd.github+json" \
+      "https://api.github.com/repos/${github_repo}/commits/${ref}" \
+      2>/dev/null \
+      || true
+  )"
+
+  [[ -n "$response" ]] || return 0
+
+  printf '%s' "$response" \
+    | jq -r '.sha // empty' 2>/dev/null \
+    || true
+}
+
 # Tolerates a leading "v" on either side (release tags are "v1.2.3", the
 # embedded DEVBOX_VERSION is "1.2.3").
 version_is_newer() {
@@ -2010,7 +2056,16 @@ update_devbox() {
         ok "Already up to date (${DEVBOX_VERSION})"
       fi
     else
-      ok "Would update from branch '${target}' (branch updates are not version-compared)"
+      local remote_commit
+      remote_commit="$(resolve_ref_to_commit "$github_repo" "$target")"
+
+      if [[ -z "$remote_commit" ]]; then
+        ok "Would update from branch '${target}' (could not resolve its current commit to compare)"
+      elif [[ "$remote_commit" == "$(installed_commit)" ]]; then
+        ok "Already up to date (branch '${target}' at ${remote_commit})"
+      else
+        ok "Update available on branch '${target}': $(installed_commit) -> ${remote_commit}"
+      fi
     fi
 
     return 0
