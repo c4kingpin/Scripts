@@ -750,6 +750,23 @@ fi
 printf '%s\n' "$DEVBOX_VERSION" >"${ROOT_STATE_DIR}/version"
 printf '%s\n' "$devbox_selected_features" >"${ROOT_STATE_DIR}/installed-features"
 
+# P1.1: seeds active-ref for a fresh install, so the first `devbox update`
+# has something real to record as "previous" before overwriting it.
+# devbox update itself always overwrites this afterwards with the exact
+# mode it already knows (--to/--branch), which is more accurate than this
+# guess - DEVBOX_REF alone doesn't say whether it's a release tag or a
+# branch name. Note DEVBOX_REF may already be a resolved commit SHA at
+# this point (P1.3), which the branch heuristic below correctly falls
+# into "branch" (a SHA is not a SemVer tag) - the more precise of the two
+# anyway, since it pins the exact commit rather than a moving branch tip.
+if [[ "$DEVBOX_REF" =~ ^v?[0-9]+\.[0-9]+\.[0-9]+ ]]; then
+  devbox_active_mode="release"
+else
+  devbox_active_mode="branch"
+fi
+
+printf '%s:%s\n' "$devbox_active_mode" "$DEVBOX_REF" >"${ROOT_STATE_DIR}/active-ref"
+
 if [[ -n "$devbox_resolved_commit" ]]; then
   printf '%s\n' "$devbox_resolved_commit" >"${ROOT_STATE_DIR}/commit"
 fi
@@ -777,7 +794,8 @@ chmod \
   0644 \
   "${ROOT_STATE_DIR}/version" \
   "${ROOT_STATE_DIR}/installed-features" \
-  "${ROOT_STATE_DIR}/install-state.json"
+  "${ROOT_STATE_DIR}/install-state.json" \
+  "${ROOT_STATE_DIR}/active-ref"
 
 if [[ -f "${ROOT_STATE_DIR}/commit" ]]; then
   chmod 0644 "${ROOT_STATE_DIR}/commit"
