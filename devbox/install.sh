@@ -212,12 +212,58 @@ CLAUDE_VERSION="${CLAUDE_VERSION:-2.1.233}"
 HAPPY_VERSION="${HAPPY_VERSION:-1.2.0}"
 
 DEVBOX_REPO_URL="${DEVBOX_REPO_URL:-https://raw.githubusercontent.com/c4kingpin/Scripts}"
+DEVBOX_GITHUB_REPO="${DEVBOX_GITHUB_REPO:-c4kingpin/Scripts}"
 
 # Branch/ref that sibling files (e.g. bin/devbox.sh) are fetched from during
 # this install, so install.sh and the installed manager always come from the
-# same commit. Real commit/tag pinning arrives with release-based updates
-# (P1.3); until then this defaults to the same branch `devbox update` uses.
+# same commit. Defaults to the same branch `devbox update` uses.
 DEVBOX_REF="${DEVBOX_REF:-master}"
+
+# P1.3: DEVBOX_REF is a branch/tag name, resolved by GitHub's CDN
+# independently on every raw.githubusercontent.com fetch below - if the
+# branch moves mid-install, different modules could come from different
+# commits. Resolve it once to the commit it names right now, then fetch
+# every module from that fixed commit instead. No jq dependency: base.sh
+# (which installs it) hasn't been fetched yet at this point.
+resolve_devbox_ref_to_commit() {
+  local ref="$1"
+  local response sha
+
+  response="$(
+    curl \
+      --proto '=https' \
+      --tlsv1.2 \
+      --connect-timeout 15 \
+      --max-time 15 \
+      --fail \
+      --silent \
+      --show-error \
+      --header "Accept: application/vnd.github+json" \
+      "https://api.github.com/repos/${DEVBOX_GITHUB_REPO}/commits/${ref}" \
+      2>/dev/null
+  )" || return 1
+
+  sha="$(
+    printf '%s' "$response" \
+      | grep -o '"sha"[[:space:]]*:[[:space:]]*"[0-9a-f]\{40\}"' \
+      | head -n1 \
+      | grep -o '[0-9a-f]\{40\}'
+  )"
+
+  [[ -n "$sha" ]] || return 1
+
+  printf '%s' "$sha"
+}
+
+devbox_resolved_commit=""
+
+if devbox_resolved_commit="$(resolve_devbox_ref_to_commit "$DEVBOX_REF")"; then
+  msg_ok "Pinned installer modules to commit ${devbox_resolved_commit}"
+  DEVBOX_REF="$devbox_resolved_commit"
+else
+  devbox_resolved_commit=""
+  msg_info "Could not resolve '${DEVBOX_REF}' to a commit; module downloads use the ref directly"
+fi
 
 # Known-good SHA256 checksums for versioned binary artifacts (mirrors
 # devbox/checksums.env). Keyed as "<artifact>:<version-or-otp-major>[:<os>:<arch>]".
@@ -704,6 +750,27 @@ fi
 printf '%s\n' "$DEVBOX_VERSION" >"${ROOT_STATE_DIR}/version"
 printf '%s\n' "$devbox_selected_features" >"${ROOT_STATE_DIR}/installed-features"
 
+# P1.1: seeds active-ref for a fresh install, so the first `devbox update`
+# has something real to record as "previous" before overwriting it.
+# devbox update itself always overwrites this afterwards with the exact
+# mode it already knows (--to/--branch), which is more accurate than this
+# guess - DEVBOX_REF alone doesn't say whether it's a release tag or a
+# branch name. Note DEVBOX_REF may already be a resolved commit SHA at
+# this point (P1.3), which the branch heuristic below correctly falls
+# into "branch" (a SHA is not a SemVer tag) - the more precise of the two
+# anyway, since it pins the exact commit rather than a moving branch tip.
+if [[ "$DEVBOX_REF" =~ ^v?[0-9]+\.[0-9]+\.[0-9]+ ]]; then
+  devbox_active_mode="release"
+else
+  devbox_active_mode="branch"
+fi
+
+printf '%s:%s\n' "$devbox_active_mode" "$DEVBOX_REF" >"${ROOT_STATE_DIR}/active-ref"
+
+if [[ -n "$devbox_resolved_commit" ]]; then
+  printf '%s\n' "$devbox_resolved_commit" >"${ROOT_STATE_DIR}/commit"
+fi
+
 install_os_version="$(
   . /etc/os-release
   printf '%s' "${VERSION_ID}"
@@ -714,6 +781,7 @@ install_timestamp="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 cat <<EOF >"${ROOT_STATE_DIR}/install-state.json"
 {
   "version": "${DEVBOX_VERSION}",
+  "commit": "${devbox_resolved_commit}",
   "profile": "${DEVBOX_PROFILE}",
   "features": "${devbox_selected_features}",
   "os": "${install_os_version}",
@@ -726,7 +794,12 @@ chmod \
   0644 \
   "${ROOT_STATE_DIR}/version" \
   "${ROOT_STATE_DIR}/installed-features" \
-  "${ROOT_STATE_DIR}/install-state.json"
+  "${ROOT_STATE_DIR}/install-state.json" \
+  "${ROOT_STATE_DIR}/active-ref"
+
+if [[ -f "${ROOT_STATE_DIR}/commit" ]]; then
+  chmod 0644 "${ROOT_STATE_DIR}/commit"
+fi
 
 msg_ok "Recorded DevBox state"
 
