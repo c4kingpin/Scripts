@@ -1058,6 +1058,119 @@ doctor_is_feature_aware() {
 # file is simply missing (installs from before P1.4). Extract just the
 # check (not the whole doctor(), which needs a real dev user/toolchain)
 # and exercise its three branches directly.
+# P2.3: devbox doctor --json runs the exact same checks as devbox doctor
+# (no duplicated logic) and reports the result as the JSON schema from
+# #18's audit issue. Builds a fully stubbed environment (PATH shadow +
+# readonly-stripped constants) so the result is deterministic regardless
+# of this machine's real Codex/Claude/GitHub/Postgres/Happy state.
+doctor_json_reports_a_valid_summary_matching_the_exit_code() {
+  local bin_dir="${TEST_TMP}/doctor-json-bin"
+  local root_state="${TEST_TMP}/doctor-json-root-state"
+  local home_dir="${TEST_TMP}/doctor-json-home"
+  local ssh_config="${TEST_TMP}/doctor-json-sshd.conf"
+  local happy_unit="${TEST_TMP}/doctor-json-happy.service"
+  local manager_functions="${TEST_TMP}/manager-functions-doctor-json.sh"
+  local devbox_version
+  local tool
+
+  devbox_version="$(grep -oP 'readonly DEVBOX_VERSION="\K[^"]+' "$MANAGER")"
+
+  mkdir -p "$bin_dir" "$root_state" "${home_dir}/.happy"
+
+  printf '%s\n' "$devbox_version" >"${root_state}/version"
+  printf 'elixir postgres\n' >"${root_state}/installed-features"
+
+  printf 'test-access-key\n' >"${home_dir}/.happy/access.key"
+  chmod 0600 "${home_dir}/.happy/access.key"
+  chmod 0700 "${home_dir}/.happy"
+  printf '{"machineId":"test-machine"}\n' >"${home_dir}/.happy/settings.json"
+  printf '{"pid": %d}\n' "$$" >"${home_dir}/.happy/daemon.state.json"
+  : >"$happy_unit"
+
+  for tool in claude codex happy fd gh git python3 rg elixir mix psql erl; do
+    printf '#!/usr/bin/env bash\nexit 0\n' >"${bin_dir}/${tool}"
+    chmod 0755 "${bin_dir}/${tool}"
+  done
+
+  # is-active/is-enabled succeed (service healthy); is-failed must fail
+  # (service is NOT in a failed state) - a stub that always exits 0 would
+  # make is-failed report a false failure.
+  printf '#!/usr/bin/env bash\ncase "$1" in\n  is-failed) exit 1 ;;\n  *) exit 0 ;;\nesac\n' >"${bin_dir}/systemctl"
+  chmod 0755 "${bin_dir}/systemctl"
+
+  printf '#!/usr/bin/env bash\n[[ "$1" == "--version" ]] && echo "v24.0.0"\nexit 0\n' >"${bin_dir}/node"
+  chmod 0755 "${bin_dir}/node"
+
+  printf '#!/usr/bin/env bash\necho "|-- happy@1.2.0"\nexit 0\n' >"${bin_dir}/npm"
+  chmod 0755 "${bin_dir}/npm"
+
+  # Drop the trailing "main \"\$@\"" call and the readonly keyword so the
+  # sourced copy's Root-State/Happy/SSH path constants can be redirected at
+  # temp fixtures below, instead of the real /var/lib/devbox and /home/dev.
+  sed 's/^readonly //' "$MANAGER" | head -n -1 >"$manager_functions"
+
+  local healthy_output healthy_status=0
+  healthy_output="$(
+    PATH="${bin_dir}:/usr/bin:/bin" \
+    HOME="$home_dir" \
+    bash -c '
+      # shellcheck source=/dev/null
+      source "'"$manager_functions"'"
+      ROOT_STATE_DIR="'"$root_state"'"
+      ROOT_VERSION_FILE="'"${root_state}/version"'"
+      FEATURES_FILE="'"${root_state}/installed-features"'"
+      INSTALL_STATE_FILE="'"${root_state}/install-state.json"'"
+      HAPPY_HOME="'"${home_dir}/.happy"'"
+      HAPPY_ACCESS_KEY="'"${home_dir}/.happy/access.key"'"
+      HAPPY_SETTINGS="'"${home_dir}/.happy/settings.json"'"
+      HAPPY_DAEMON_STATE="'"${home_dir}/.happy/daemon.state.json"'"
+      SSH_CONFIG="'"$ssh_config"'"
+      HAPPY_SERVICE_UNIT="'"$happy_unit"'"
+      doctor json
+    '
+  )" || healthy_status=$?
+
+  # Now flip the root-state version so it no longer matches the running
+  # manager, to exercise the unhealthy path deterministically (a missing
+  # PATH stub would silently fall back to a real binary on a real DevBox).
+  printf '9.9.9\n' >"${root_state}/version"
+
+  local unhealthy_output unhealthy_status=0
+  unhealthy_output="$(
+    PATH="${bin_dir}:/usr/bin:/bin" \
+    HOME="$home_dir" \
+    bash -c '
+      # shellcheck source=/dev/null
+      source "'"$manager_functions"'"
+      ROOT_STATE_DIR="'"$root_state"'"
+      ROOT_VERSION_FILE="'"${root_state}/version"'"
+      FEATURES_FILE="'"${root_state}/installed-features"'"
+      INSTALL_STATE_FILE="'"${root_state}/install-state.json"'"
+      HAPPY_HOME="'"${home_dir}/.happy"'"
+      HAPPY_ACCESS_KEY="'"${home_dir}/.happy/access.key"'"
+      HAPPY_SETTINGS="'"${home_dir}/.happy/settings.json"'"
+      HAPPY_DAEMON_STATE="'"${home_dir}/.happy/daemon.state.json"'"
+      SSH_CONFIG="'"$ssh_config"'"
+      HAPPY_SERVICE_UNIT="'"$happy_unit"'"
+      doctor json
+    '
+  )" || unhealthy_status=$?
+
+  jq -e '.healthy == true' <<<"$healthy_output" >/dev/null &&
+    [[ "$healthy_status" -eq 0 ]] &&
+    [[ "$(jq -r '.devbox_version' <<<"$healthy_output")" == "$devbox_version" ]] &&
+    [[ "$(jq -r '.runtime.node' <<<"$healthy_output")" == "24.0.0" ]] &&
+    [[ "$(jq -r '.runtime.erlang' <<<"$healthy_output")" != "null" ]] &&
+    [[ "$(jq -r '.services.postgres' <<<"$healthy_output")" == "running" ]] &&
+    [[ "$(jq -r '.authentication.codex' <<<"$healthy_output")" == "true" ]] &&
+    [[ "$(jq -r '.authentication.github' <<<"$healthy_output")" == "true" ]] &&
+    [[ "$(jq -r '.security.happy_dir_permissions' <<<"$healthy_output")" == "true" ]] &&
+    jq -e '.healthy == false' <<<"$unhealthy_output" >/dev/null &&
+    [[ "$unhealthy_status" -eq 1 ]] &&
+    grep -Fq 'doctor:--json)' "$MANAGER" &&
+    grep -Fq 'doctor json' "$NORM_MANAGER"
+}
+
 doctor_checks_root_state_version() {
   local check_block
   check_block="$(sed -n '/if \[\[ -r "\$ROOT_VERSION_FILE" \]\]; then/,/^  fi$/p' "$MANAGER")"
@@ -1301,6 +1414,7 @@ run_test "validation skips checks for disabled features" validation_skips_checks
 run_test "install.sh records DevBox state" install_script_records_devbox_state
 run_test "install.sh migrates legacy user-state features" install_script_migrates_legacy_user_state_features
 run_test "doctor is feature-aware" doctor_is_feature_aware
+run_test "doctor --json reports a valid summary matching the exit code" doctor_json_reports_a_valid_summary_matching_the_exit_code
 run_test "doctor checks root state version" doctor_checks_root_state_version
 run_test "Happy daemon starts at boot" happy_daemon_starts_at_boot
 run_test "Happy .bashrc start remains a fallback" happy_bashrc_start_remains_as_fallback
