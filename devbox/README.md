@@ -74,16 +74,16 @@ Standardmäßig (`DEVBOX_PROFILE=default`, oder gar nicht gesetzt) sind beide
 aktiv. Ein schlankeres Profil ohne beide:
 
 ```bash
-DEVBOX_PROFILE=minimal \
-  curl -fsSL https://raw.githubusercontent.com/c4kingpin/Scripts/master/devbox/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/c4kingpin/Scripts/master/devbox/install.sh |
+  env DEVBOX_PROFILE=minimal bash
 ```
 
 Oder gezielt einzelne Features an-/abwählen (überschreibt das Profil
 vollständig):
 
 ```bash
-DEVBOX_FEATURES=postgres \
-  curl -fsSL https://raw.githubusercontent.com/c4kingpin/Scripts/master/devbox/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/c4kingpin/Scripts/master/devbox/install.sh |
+  env DEVBOX_FEATURES=postgres bash
 ```
 
 Die getroffene Auswahl landet in
@@ -211,8 +211,8 @@ Ohne interaktives Terminal (also auch beim `curl | bash`-Einzeiler) wird
 `balanced` verwendet, sofern nicht explizit ein Profil vorgegeben wird:
 
 ```bash
-DEVBOX_AUTONOMY=autonomous \
-  curl -fsSL https://raw.githubusercontent.com/c4kingpin/Scripts/master/devbox/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/c4kingpin/Scripts/master/devbox/install.sh |
+  env DEVBOX_AUTONOMY=autonomous bash
 ```
 
 Gültige Werte sind `controlled`, `balanced`, `autonomous` und `full-access`.
@@ -266,8 +266,8 @@ SSH bleibt deaktiviert, solange kein Public Key hinterlegt ist. Ein Key kann
 entweder vorab beim Installationsaufruf übergeben werden:
 
 ```bash
-SSH_AUTHORIZED_KEY="ssh-ed25519 AAAA... client" \
-  curl -fsSL https://raw.githubusercontent.com/c4kingpin/Scripts/master/devbox/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/c4kingpin/Scripts/master/devbox/install.sh |
+  env SSH_AUTHORIZED_KEY="ssh-ed25519 AAAA... client" bash
 ```
 
 Andernfalls wird der Zugriff später eingerichtet. Der private Schlüssel wird
