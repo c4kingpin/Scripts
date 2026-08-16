@@ -107,7 +107,7 @@ project_is_self_contained() {
     [[ -f "${PROJECT_ROOT}/bin/devbox.sh" ]] &&
     [[ -f "${PROJECT_ROOT}/README.md" ]] &&
     [[ -f "${PROJECT_ROOT}/tests/test-devbox.sh" ]] &&
-    grep -Fq '${repo_url%/}/${branch}/devbox/install.sh' "$MANAGER" &&
+    grep -Fq '${repo_url%/}/${ref}/devbox/install.sh' "$MANAGER" &&
     ! grep -Eq 'Scripts/(master|\$\{branch\})/install\.sh' "$MANAGER"
 }
 
@@ -342,14 +342,21 @@ assert "codex" in commands, commands
 PY
 }
 
-update_command_supports_branch_argument() {
+# P1.3: update_devbox() takes --check/--to/--branch flags, plus the
+# backward-compatible bare-word shorthand for --branch, and main() passes it
+# the full remaining argument vector (not just a single positional, which
+# can't carry "--to v1.2.3").
+update_command_supports_flags_and_positional_branch() {
   grep -Fq 'update_devbox() {' "$MANAGER" &&
-    grep -Fq 'readonly DEFAULT_UPDATE_BRANCH="master"' "$MANAGER" &&
-    grep -Fq 'local branch="${1:-$DEFAULT_UPDATE_BRANCH}"' "$MANAGER" &&
-    grep -Fq 'local installer_url="${repo_url%/}/${branch}/devbox/install.sh"' "$MANAGER" &&
+    grep -Fq 'readonly DEFAULT_GITHUB_REPO="c4kingpin/Scripts"' "$MANAGER" &&
+    grep -Fq -- '--check)' "$MANAGER" &&
+    grep -Fq -- '--to)' "$MANAGER" &&
+    grep -Fq -- '--branch)' "$MANAGER" &&
     grep -Fq 'update:*)' "$MANAGER" &&
-    grep -Fq 'update_devbox "$subcommand"' "$MANAGER" &&
-    grep -Fq 'update [branch]' "$MANAGER"
+    grep -Fq 'update_devbox "${@:2}"' "$MANAGER" &&
+    grep -Fq 'rollback:)' "$MANAGER" &&
+    grep -Fq 'rollback_devbox' "$MANAGER" &&
+    grep -Fq 'update [--check] [--to TAG] [--branch NAME]' "$MANAGER"
 }
 
 update_downloads_and_reruns_installer() {
@@ -369,6 +376,7 @@ update_branch_argument_is_honored() {
   cat <<'EOF' >"${fake_repo}/install.sh"
 #!/usr/bin/env bash
 echo "ran fake installer"
+echo "DEVBOX_REF=${DEVBOX_REF:-<unset>}"
 EOF
   chmod 0755 "${fake_repo}/install.sh"
 
@@ -410,7 +418,170 @@ EOF
   ) >"$output_file" 2>&1 || true
 
   grep -Fq "ran fake installer" "$output_file" &&
-    grep -Fq "Downloading installer from branch 'feature-branch'" "$output_file"
+    grep -Fq "Downloading installer from branch 'feature-branch'" "$output_file" &&
+    # The re-exec'd installer must fetch its own lib/features modules from
+    # the same ref it was itself downloaded from (P1.1 rule), not silently
+    # fall back to install.sh's own DEVBOX_REF default.
+    grep -Fq "DEVBOX_REF=feature-branch" "$output_file"
+}
+
+update_to_flag_targets_a_release_tag() {
+  local fake_repo="${TEST_TMP}/fake-repo-release"
+  local output_file="${TEST_TMP}/update-release-output.log"
+  local bin_dir="${TEST_TMP}/bin-release"
+  local manager_functions="${TEST_TMP}/manager-functions-release.sh"
+
+  mkdir -p "$fake_repo" "$bin_dir"
+  cat <<'EOF' >"${fake_repo}/install.sh"
+#!/usr/bin/env bash
+echo "ran fake installer"
+echo "DEVBOX_REF=${DEVBOX_REF:-<unset>}"
+EOF
+  chmod 0755 "${fake_repo}/install.sh"
+
+  cat <<EOF >"${bin_dir}/curl"
+#!/usr/bin/env bash
+out=""
+prev=""
+for arg in "\$@"; do
+  if [[ "\$prev" == "-o" ]]; then
+    out="\$arg"
+  fi
+  prev="\$arg"
+done
+url="\${!#}"
+case "\$url" in
+*/v1.2.3/devbox/install.sh)
+  cp "${fake_repo}/install.sh" "\$out"
+  ;;
+*)
+  exit 22
+  ;;
+esac
+EOF
+  chmod 0755 "${bin_dir}/curl"
+
+  head -n -1 "$MANAGER" >"$manager_functions"
+
+  (
+    set -Eeuo pipefail
+    PATH="${bin_dir}:/usr/bin:/bin"
+    # shellcheck source=/dev/null
+    source "$manager_functions"
+    # shellcheck disable=SC2317,SC2329 # invoked indirectly by update_devbox below
+    require_root() { :; }
+    # shellcheck disable=SC2317,SC2329 # invoked indirectly by update_devbox below
+    doctor() { :; }
+    update_devbox --to v1.2.3
+  ) >"$output_file" 2>&1 || true
+
+  grep -Fq "ran fake installer" "$output_file" &&
+    grep -Fq "Downloading installer from release 'v1.2.3'" "$output_file" &&
+    grep -Fq "DEVBOX_REF=v1.2.3" "$output_file"
+}
+
+update_check_reports_without_installing() {
+  local output_file="${TEST_TMP}/update-check-output.log"
+  local bin_dir="${TEST_TMP}/bin-check"
+  local manager_functions="${TEST_TMP}/manager-functions-check.sh"
+
+  mkdir -p "$bin_dir"
+
+  cat <<'EOF' >"${bin_dir}/curl"
+#!/usr/bin/env bash
+url="${!#}"
+case "$url" in
+*/releases/latest)
+  echo '{"tag_name": "v99.0.0"}'
+  ;;
+*)
+  echo "unexpected curl invocation: $url" >&2
+  exit 22
+  ;;
+esac
+EOF
+  chmod 0755 "${bin_dir}/curl"
+
+  head -n -1 "$MANAGER" >"$manager_functions"
+
+  (
+    set -Eeuo pipefail
+    PATH="${bin_dir}:/usr/bin:/bin"
+    # shellcheck source=/dev/null
+    source "$manager_functions"
+    # shellcheck disable=SC2317,SC2329 # invoked indirectly by update_devbox below
+    require_root() { :; }
+    update_devbox --check
+  ) >"$output_file" 2>&1
+
+  grep -Fq "Update available: 1.0.0 -> v99.0.0" "$output_file" &&
+    ! grep -Fq "Downloading installer" "$output_file"
+}
+
+update_check_handles_no_releases_gracefully() {
+  local output_file="${TEST_TMP}/update-check-none-output.log"
+  local bin_dir="${TEST_TMP}/bin-check-none"
+  local manager_functions="${TEST_TMP}/manager-functions-check-none.sh"
+
+  mkdir -p "$bin_dir"
+
+  cat <<'EOF' >"${bin_dir}/curl"
+#!/usr/bin/env bash
+exit 22
+EOF
+  chmod 0755 "${bin_dir}/curl"
+
+  head -n -1 "$MANAGER" >"$manager_functions"
+
+  (
+    set -Eeuo pipefail
+    PATH="${bin_dir}:/usr/bin:/bin"
+    # shellcheck source=/dev/null
+    source "$manager_functions"
+    # shellcheck disable=SC2317,SC2329 # invoked indirectly by update_devbox below
+    require_root() { :; }
+    update_devbox --check
+  ) >"$output_file" 2>&1
+
+  grep -Fq "No published releases yet" "$output_file"
+}
+
+rollback_reruns_previous_ref() {
+  local output_file="${TEST_TMP}/rollback-output.log"
+  local rollback_fn="${TEST_TMP}/rollback-fn.sh"
+  local previous_update_file="${TEST_TMP}/previous-update.env"
+
+  sed -n '/^rollback_devbox() {/,/^}/p' "$MANAGER" >"$rollback_fn"
+
+  cat <<EOF >"$previous_update_file"
+PREVIOUS_MODE=release
+PREVIOUS_TARGET=v0.9.0
+PREVIOUS_VERSION=1.0.0
+EOF
+
+  (
+    set -Eeuo pipefail
+    # shellcheck disable=SC2034 # read by rollback_devbox below (sourced at runtime)
+    PREVIOUS_UPDATE_FILE="$previous_update_file"
+    # shellcheck disable=SC2034 # read by rollback_devbox below (sourced at runtime)
+    DEVBOX_VERSION="1.0.0"
+    # shellcheck disable=SC2317,SC2329 # invoked by rollback_devbox below
+    require_root() { :; }
+    # shellcheck disable=SC2317,SC2329 # invoked by rollback_devbox below
+    die() {
+      echo "DIE: $*" >&2
+      exit 1
+    }
+    # shellcheck disable=SC2317,SC2329 # invoked by rollback_devbox below
+    info() { echo "INFO: $*"; }
+    # shellcheck disable=SC2317,SC2329 # invoked by rollback_devbox below
+    update_devbox() { echo "CALLED update_devbox: $*"; }
+    # shellcheck source=/dev/null
+    source "$rollback_fn"
+    rollback_devbox
+  ) >"$output_file" 2>&1
+
+  grep -Fq "CALLED update_devbox: --to v0.9.0" "$output_file"
 }
 
 # P0.1: dev must control OS package installs through a validated DevBox
@@ -605,7 +776,8 @@ manager_exposes_expected_commands() {
     grep -Fq 'keys generate' <<<"$output" &&
     grep -Fq 'remote-info' <<<"$output" &&
     grep -Fq 'doctor' <<<"$output" &&
-    grep -Fq 'update [branch]' <<<"$output"
+    grep -Fq 'update [--check] [--to TAG] [--branch NAME]' <<<"$output" &&
+    grep -Fq 'rollback' <<<"$output"
 }
 
 manager_rejects_unknown_commands() {
@@ -888,9 +1060,13 @@ run_test "installer requires Ubuntu" installer_requires_ubuntu
 run_test "Elixir pinned to the Erlang OTP major" elixir_is_pinned_to_the_erlang_otp_major
 run_test "Claude CLI installed alongside Codex CLI" claude_cli_is_installed
 run_test "doctor checks Claude CLI" doctor_checks_claude_alongside_codex
-run_test "update command supports branch argument" update_command_supports_branch_argument
+run_test "update command supports flags and positional branch" update_command_supports_flags_and_positional_branch
 run_test "update downloads and reruns installer" update_downloads_and_reruns_installer
 run_test "update honors the requested branch" update_branch_argument_is_honored
+run_test "update --to targets a release tag" update_to_flag_targets_a_release_tag
+run_test "update --check reports without installing" update_check_reports_without_installing
+run_test "update --check handles no releases gracefully" update_check_handles_no_releases_gracefully
+run_test "rollback reruns the previous ref" rollback_reruns_previous_ref
 run_test "no generic passwordless package management" no_generic_passwordless_package_management
 run_test "package name validation accepts/rejects expected input" package_name_validation_accepts_and_rejects_expected_input
 run_test "packages install requires root and a package" packages_install_requires_root_and_at_least_one_package

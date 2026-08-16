@@ -38,8 +38,9 @@ readonly HAPPY_VERSION="1.2.0"
 
 readonly PACKAGE_NAME_PATTERN='^[a-z0-9][a-z0-9+.-]*$'
 
-readonly DEFAULT_UPDATE_BRANCH="master"
 readonly DEFAULT_REPO_URL="https://raw.githubusercontent.com/c4kingpin/Scripts"
+readonly DEFAULT_GITHUB_REPO="c4kingpin/Scripts"
+readonly PREVIOUS_UPDATE_FILE="${STATE_DIR}/previous-update.env"
 
 info() {
   printf '==> %s\n' "$*"
@@ -125,8 +126,17 @@ Commands:
   doctor
       Validate the development environment.
 
-  update [branch]
-      Re-run installer from GitHub. Default branch: master.
+  update [--check] [--to TAG] [--branch NAME]
+      Update DevBox. Default: the latest published release.
+      --check        Report an available update without installing it.
+      --to TAG       Update to a specific release tag (e.g. v1.1.0).
+      --branch NAME  Update from a branch instead of a release (testing).
+      A bare branch name (devbox update NAME) is a shorthand for --branch.
+
+  rollback
+      Re-run the installer for the ref that was active before the last
+      update. Only reinstalls DevBox itself; OS package upgrades,
+      PostgreSQL data and workspace changes are not reverted.
 
   help
       Show this help.
@@ -1442,17 +1452,138 @@ doctor() {
   return "$status"
 }
 
+# Resolves the latest published release's tag via the GitHub Releases API.
+# Prints nothing (not an error) if there are no releases yet, or the API
+# call fails for any other reason - callers treat both the same way: "no
+# release-based update is available right now."
+latest_release_tag() {
+  local github_repo="$1"
+  local response
+
+  response="$(
+    curl \
+      -fsSL \
+      --connect-timeout 15 \
+      "https://api.github.com/repos/${github_repo}/releases/latest" \
+      2>/dev/null \
+      || true
+  )"
+
+  [[ -n "$response" ]] || return 0
+
+  printf '%s' "$response" \
+    | jq -r '.tag_name // empty' 2>/dev/null \
+    || true
+}
+
+# Tolerates a leading "v" on either side (release tags are "v1.2.3", the
+# embedded DEVBOX_VERSION is "1.2.3").
+version_is_newer() {
+  local candidate="${1#v}"
+  local current="${2#v}"
+
+  [[ "$candidate" != "$current" ]] &&
+    [[ "$(
+      printf '%s\n%s\n' "$candidate" "$current" \
+        | sort -V \
+        | tail -n1
+    )" == "$candidate" ]]
+}
+
+record_previous_update_state() {
+  local mode="$1"
+  local ref="$2"
+
+  install \
+    -d \
+    -m 0700 \
+    "$STATE_DIR"
+
+  cat <<EOF >"$PREVIOUS_UPDATE_FILE"
+PREVIOUS_MODE=${mode}
+PREVIOUS_TARGET=${ref}
+PREVIOUS_VERSION=${DEVBOX_VERSION}
+EOF
+}
+
 update_devbox() {
   require_root
 
-  local branch="${1:-$DEFAULT_UPDATE_BRANCH}"
   local repo_url="${DEVBOX_REPO_URL:-$DEFAULT_REPO_URL}"
-  local installer_url="${repo_url%/}/${branch}/devbox/install.sh"
+  local github_repo="${DEVBOX_GITHUB_REPO:-$DEFAULT_GITHUB_REPO}"
+  local mode="release"
+  local target=""
+  local check_only=0
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --check)
+        check_only=1
+        shift
+        ;;
+
+      --to)
+        [[ -n "${2:-}" ]] || die "Usage: devbox update --to <tag>"
+        mode="release"
+        target="$2"
+        shift 2
+        ;;
+
+      --branch)
+        [[ -n "${2:-}" ]] || die "Usage: devbox update --branch <name>"
+        mode="branch"
+        target="$2"
+        shift 2
+        ;;
+
+      -*)
+        die "Unknown update option: $1"
+        ;;
+
+      *)
+        # Backward-compatible shorthand: `devbox update <branch>`.
+        mode="branch"
+        target="$1"
+        shift
+        ;;
+    esac
+  done
+
+  if [[ "$mode" == "release" && -z "$target" ]]; then
+    info "Looking up the latest published release"
+    target="$(latest_release_tag "$github_repo")"
+
+    if [[ -z "$target" ]]; then
+      if [[ "$check_only" -eq 1 ]]; then
+        ok "No published releases yet"
+        return 0
+      fi
+
+      die "No published releases found. Use 'devbox update --branch <name>' to update from a branch instead."
+    fi
+  fi
+
+  if [[ "$check_only" -eq 1 ]]; then
+    if [[ "$mode" == "release" ]]; then
+      if version_is_newer "$target" "$DEVBOX_VERSION"; then
+        ok "Update available: ${DEVBOX_VERSION} -> ${target}"
+      else
+        ok "Already up to date (${DEVBOX_VERSION})"
+      fi
+    else
+      ok "Would update from branch '${target}' (branch updates are not version-compared)"
+    fi
+
+    return 0
+  fi
+
+  local ref="$target"
+  local installer_url="${repo_url%/}/${ref}/devbox/install.sh"
   local installer
 
   installer="$(mktemp)"
 
-  info "Downloading installer from branch '${branch}'"
+  info "Downloading installer from ${mode} '${ref}'"
 
   if ! curl \
     -fsSL \
@@ -1485,18 +1616,46 @@ update_devbox() {
     die "Downloaded installer failed bash syntax validation"
   fi
 
+  record_previous_update_state "$mode" "$ref"
+
   info "Re-running installer"
 
   DEVBOX_REPO_URL="$repo_url" \
+    DEVBOX_REF="$ref" \
     bash "$installer"
 
   rm \
     -f \
     "$installer"
 
-  ok "Updated from branch '${branch}'"
+  ok "Updated from ${mode} '${ref}'"
 
   doctor
+}
+
+rollback_devbox() {
+  require_root
+
+  [[ -r "$PREVIOUS_UPDATE_FILE" ]] ||
+    die "No previous update recorded; nothing to roll back to."
+
+  local PREVIOUS_MODE=""
+  local PREVIOUS_TARGET=""
+  local PREVIOUS_VERSION=""
+
+  # shellcheck source=/dev/null
+  source "$PREVIOUS_UPDATE_FILE"
+
+  [[ -n "$PREVIOUS_TARGET" ]] ||
+    die "Previous update state is incomplete; cannot roll back."
+
+  info "Rolling back to ${PREVIOUS_MODE} '${PREVIOUS_TARGET}' (${PREVIOUS_VERSION:-unknown version}, currently on ${DEVBOX_VERSION})"
+
+  if [[ "$PREVIOUS_MODE" == "branch" ]]; then
+    update_devbox --branch "$PREVIOUS_TARGET"
+  else
+    update_devbox --to "$PREVIOUS_TARGET"
+  fi
 }
 
 onboard() {
@@ -1684,7 +1843,11 @@ main() {
       ;;
 
     update:*)
-      update_devbox "$subcommand"
+      update_devbox "${@:2}"
+      ;;
+
+    rollback:)
+      rollback_devbox
       ;;
 
     help: | -h: | --help:)

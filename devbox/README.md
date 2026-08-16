@@ -450,38 +450,67 @@ Diagnose:
 devbox doctor
 ```
 
-`update` muss als `root` laufen, nicht über `sudo` als `dev` – der Benutzer
-`dev` besitzt bewusst kein allgemeines passwortloses `sudo`, sondern nur für
-`ssh setup`/`ssh disable` und `packages install` (siehe oben). Auf der
-Root-Konsole des Containers (z. B. direkt nach `pct enter <CTID>`, ohne
-vorheriges `sudo -iu dev`) auf den aktuellen Stand des `master`-Branches
-aktualisieren:
+`update`/`rollback` müssen als `root` laufen, nicht über `sudo` als `dev` –
+der Benutzer `dev` besitzt bewusst kein allgemeines passwortloses `sudo`,
+sondern nur für `ssh setup`/`ssh disable` und `packages install` (siehe
+oben). Auf der Root-Konsole des Containers (z. B. direkt nach
+`pct enter <CTID>`, ohne vorheriges `sudo -iu dev`) auf das neueste
+veröffentlichte Release aktualisieren:
 
 ```bash
 devbox update
 ```
 
-Optional lässt sich auch ein anderer Branch installieren, zum Beispiel um
-eine Vorabversion zu testen:
+Ohne Argumente lädt `devbox update` das neueste GitHub-Release herunter.
+Vorab prüfen, ob überhaupt ein Update verfügbar ist, ohne etwas zu
+installieren:
 
 ```bash
-devbox update feature/mein-branch
+devbox update --check
 ```
 
-`devbox update [branch]` lädt `install.sh` vom angegebenen (oder
-standardmäßig dem `master`-) Branch aus dem GitHub-Repository herunter und
-führt es erneut aus. Der Installer ist für wiederholte Ausführungen
-ausgelegt: Betriebssystempakete, Codex CLI, Claude CLI und die verwaltete
-Erlang-/Elixir-/Phoenix-Toolchain werden aktualisiert, während Workspace,
-SSH-Schlüssel, Codex-Anmeldedaten, Git-Konfiguration, eine bereits vorhandene
+Ein bestimmtes Release gezielt installieren:
+
+```bash
+devbox update --to v1.1.0
+```
+
+Für Entwicklung/Tests lässt sich weiterhin direkt von einem Branch
+installieren (kein Versionsvergleich, keine Release-Voraussetzung):
+
+```bash
+devbox update --branch feature/mein-branch
+# Kurzform: devbox update feature/mein-branch
+```
+
+Der Installer ist für wiederholte Ausführungen ausgelegt: Betriebssystem-
+pakete, Codex CLI, Claude CLI und die verwaltete Erlang-/Elixir-/Phoenix-
+Toolchain werden aktualisiert, während Workspace, SSH-Schlüssel, Codex-
+Anmeldedaten, Git-Konfiguration, eine bereits vorhandene
 `~/.codex/config.toml` und die PostgreSQL-Daten unverändert erhalten bleiben.
 
+Die zuletzt aktive Version/Ref wird vor jedem Update in
+`~/.config/devbox/previous-update.env` vermerkt, sodass sich ein Update bei
+Bedarf zurücknehmen lässt:
+
+```bash
+devbox rollback
+```
+
+`devbox rollback` installiert erneut genau den Installer-/Modul-Stand, der
+vor dem letzten Update aktiv war — es nimmt **keine** OS-Paket-Upgrades,
+PostgreSQL-Daten oder Workspace-Änderungen zurück.
+
 Um von einem eigenen Fork oder Spiegel zu aktualisieren, kann die
-Repository-URL überschrieben werden:
+Repository-URL überschrieben werden (die GitHub-Releases-API-Abfrage für
+`--check`/das Standard-Update ohne `--to`/`--branch` bleibt dabei auf das
+Haupt-Repository gerichtet, sofern nicht zusätzlich `DEVBOX_GITHUB_REPO`
+gesetzt wird):
 
 ```bash
 DEVBOX_REPO_URL="https://raw.githubusercontent.com/<fork>/Scripts" \
-  devbox update <branch>
+DEVBOX_GITHUB_REPO="<fork>/Scripts" \
+  devbox update --branch <branch>
 ```
 
 Automatische Sicherheitsupdates sind zusätzlich aktiviert, sodass
