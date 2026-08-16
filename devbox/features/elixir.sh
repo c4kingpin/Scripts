@@ -27,7 +27,7 @@ install_erlang() {
     printf '%s' "${VERSION_ID}"
   )"
 
-  otp_tarball="/tmp/devbox-otp.tar.gz"
+  otp_tarball="$(mktemp)"
 
   curl_with_retry \
     "https://builds.hex.pm/builds/otp/${otp_arch}/${otp_os}/OTP-${ERLANG_VERSION}.tar.gz" \
@@ -107,7 +107,7 @@ install_erlang() {
 install_elixir_and_phoenix() {
   msg_info "Installing Elixir ${ELIXIR_VERSION} and Phoenix ${PHOENIX_VERSION}"
 
-  elixir_zip="/tmp/devbox-elixir.zip"
+  elixir_zip="$(mktemp)"
 
   curl_with_retry \
     "https://github.com/elixir-lang/elixir/releases/download/v${ELIXIR_VERSION}/elixir-otp-${ERLANG_OTP_MAJOR}.zip" \

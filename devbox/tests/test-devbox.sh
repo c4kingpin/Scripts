@@ -1300,6 +1300,20 @@ devbox_status_composes_existing_status_commands() {
     grep -Fq 'status' "$NORM_MANAGER"
 }
 
+# P1.4: downloaded artifacts without a checksum to verify (OTP/Elixir are
+# checksum-verified separately; the mise installer script isn't) used
+# predictable, fixed /tmp paths - unpredictable via mktemp closes that gap
+# for the artifacts this PR can reasonably harden without taking on an
+# external, frequently-changing checksum to maintain for mise.run itself.
+temp_artifact_downloads_use_unpredictable_paths() {
+  grep -Fq 'otp_tarball="$(mktemp)"' "$FEATURE_ELIXIR" &&
+    grep -Fq 'elixir_zip="$(mktemp)"' "$FEATURE_ELIXIR" &&
+    grep -Fq 'mise_installer="$(mktemp)"' "$FEATURE_TOOLING" &&
+    ! grep -Fq '/tmp/devbox-otp.tar.gz' "$FEATURE_ELIXIR" &&
+    ! grep -Fq '/tmp/devbox-elixir.zip' "$FEATURE_ELIXIR" &&
+    ! grep -Fq '/tmp/devbox-mise-install.sh' "$FEATURE_TOOLING"
+}
+
 doctor_checks_root_state_version() {
   local check_block
   check_block="$(sed -n '/if \[\[ -r "\$ROOT_VERSION_FILE" \]\]; then/,/^  fi$/p' "$MANAGER")"
@@ -1547,6 +1561,7 @@ run_test "doctor is feature-aware" doctor_is_feature_aware
 run_test "devbox status composes existing status commands" devbox_status_composes_existing_status_commands
 run_test "workspace list/doctor report project health read-only" workspace_list_and_doctor_report_project_health_read_only
 run_test "doctor --json reports a valid summary matching the exit code" doctor_json_reports_a_valid_summary_matching_the_exit_code
+run_test "temp artifact downloads use unpredictable paths" temp_artifact_downloads_use_unpredictable_paths
 run_test "doctor checks root state version" doctor_checks_root_state_version
 run_test "Happy daemon starts at boot" happy_daemon_starts_at_boot
 run_test "Happy .bashrc start remains a fallback" happy_bashrc_start_remains_as_fallback
