@@ -78,6 +78,24 @@ create_developer_user() {
     msg_ok "Removed previously mise-managed BEAM toolchain"
   fi
 
+  # P0.1: on a re-run (devbox update/reinstall), dev already owns and can
+  # have replaced any of these with a symlink; `install -d` would then
+  # chown/chmod through it. Reject before creating/touching any of them.
+  for developer_scaffold_dir in \
+    "${DEV_HOME}/.ssh" \
+    "${DEV_HOME}/.codex" \
+    "${DEV_HOME}/.claude" \
+    "${DEV_HOME}/.happy" \
+    "${DEV_HOME}/.config" \
+    "${DEV_HOME}/.config/devbox" \
+    "${DEV_HOME}/.cache" \
+    "${DEV_HOME}/.local" \
+    "${DEV_HOME}/.local/bin" \
+    "${DEV_HOME}/workspace"; do
+
+    reject_symlink "$developer_scaffold_dir"
+  done
+
   install \
     -d \
     -m 0700 \

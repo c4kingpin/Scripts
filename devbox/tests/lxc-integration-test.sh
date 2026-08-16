@@ -13,7 +13,10 @@
 # real `mix phx.new` (Elixir/Phoenix toolchain), and - the most important
 # single check per issue #10 - that re-running the installer is idempotent:
 # persistent state (version, features, the PostgreSQL password, an existing
-# ~/.codex/config.toml) must come out unchanged.
+# ~/.codex/config.toml) must come out unchanged. The re-install (#18 P1.2)
+# uses the documented `curl | bash` one-liner rather than a file download,
+# so that invocation form - where $0 is "bash", not a real script path -
+# is actually exercised somewhere in CI instead of only in the README.
 
 set -Eeuo pipefail
 
@@ -67,6 +70,19 @@ as_dev() {
 }
 
 install_devbox() {
+  # "file" (default): the documented file-download path, $0 is a real
+  # script path. "pipe": the documented `curl | bash` one-liner, where $0
+  # is "bash" - install.sh's own `bash -n "$0"` self-check must guard
+  # against that (already fixed in #21) rather than crash the install.
+  local invocation="${1:-file}"
+  local invoke_installer
+
+  if [[ "$invocation" == "pipe" ]]; then
+    invoke_installer="curl -fsSL '${INSTALL_URL}' | bash"
+  else
+    invoke_installer="curl -fsSL '${INSTALL_URL}' -o /tmp/devbox-install.sh && bash /tmp/devbox-install.sh"
+  fi
+
   in_container bash -c "
     set -Eeuo pipefail
     export DEBIAN_FRONTEND=noninteractive
@@ -75,8 +91,7 @@ install_devbox() {
     export DEVBOX_REPO_URL='${DEVBOX_REPO_URL}'
     export DEVBOX_REF='${DEVBOX_REF}'
     export DEVBOX_AUTONOMY=balanced
-    curl -fsSL '${INSTALL_URL}' -o /tmp/devbox-install.sh
-    bash /tmp/devbox-install.sh
+    ${invoke_installer}
   "
 }
 
@@ -178,8 +193,8 @@ as_dev bash -c '
 log "Capturing state before reinstall"
 state_before="$(capture_state)"
 
-log "Re-running installer (idempotency check)"
-install_devbox
+log "Re-running installer via curl | bash (idempotency + pipe-invocation check)"
+install_devbox pipe
 
 log "Capturing state after reinstall"
 state_after="$(capture_state)"
