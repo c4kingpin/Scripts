@@ -16,6 +16,7 @@ readonly FEATURE_AGENTS="${PROJECT_ROOT}/features/agents.sh"
 readonly FEATURE_HAPPY="${PROJECT_ROOT}/features/happy.sh"
 readonly FEATURE_TOOLING="${PROJECT_ROOT}/features/tooling.sh"
 readonly FEATURE_ELIXIR="${PROJECT_ROOT}/features/elixir.sh"
+readonly LXC_INTEGRATION_TEST="${PROJECT_ROOT}/tests/lxc-integration-test.sh"
 TEST_TMP="$(mktemp -d /tmp/devbox-tests.XXXXXX)"
 readonly TEST_TMP
 readonly MANAGER="${TEST_TMP}/devbox"
@@ -1300,6 +1301,18 @@ devbox_status_composes_existing_status_commands() {
     grep -Fq 'status' "$NORM_MANAGER"
 }
 
+# P1.2: the LXC E2E test's idempotency re-run now uses the documented
+# `curl | bash` one-liner (where $0 is "bash", not a file path) instead of
+# downloading to a file first, so that invocation form is actually
+# exercised somewhere in CI rather than only asserted against as a README
+# string (installer_curl_pipeable_from_master, above).
+lxc_integration_test_exercises_the_curl_pipe_path() {
+  grep -Fq '| bash"' "$LXC_INTEGRATION_TEST" &&
+    grep -Fq '"$invocation" == "pipe"' "$LXC_INTEGRATION_TEST" &&
+    grep -Fq 'install_devbox pipe' "$LXC_INTEGRATION_TEST" &&
+    grep -Fq -- '-o /tmp/devbox-install.sh && bash /tmp/devbox-install.sh' "$LXC_INTEGRATION_TEST"
+}
+
 doctor_checks_root_state_version() {
   local check_block
   check_block="$(sed -n '/if \[\[ -r "\$ROOT_VERSION_FILE" \]\]; then/,/^  fi$/p' "$MANAGER")"
@@ -1547,6 +1560,7 @@ run_test "doctor is feature-aware" doctor_is_feature_aware
 run_test "devbox status composes existing status commands" devbox_status_composes_existing_status_commands
 run_test "workspace list/doctor report project health read-only" workspace_list_and_doctor_report_project_health_read_only
 run_test "doctor --json reports a valid summary matching the exit code" doctor_json_reports_a_valid_summary_matching_the_exit_code
+run_test "LXC integration test exercises the curl | bash path" lxc_integration_test_exercises_the_curl_pipe_path
 run_test "doctor checks root state version" doctor_checks_root_state_version
 run_test "Happy daemon starts at boot" happy_daemon_starts_at_boot
 run_test "Happy .bashrc start remains a fallback" happy_bashrc_start_remains_as_fallback
