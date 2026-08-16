@@ -304,8 +304,18 @@ installer_requires_ubuntu() {
   grep -Fq 'require_supported_os() {' "$INSTALL_SCRIPT" &&
     grep -Fxq 'require_supported_os' "$INSTALL_SCRIPT" &&
     ! grep -Fq 'require_debian_like' "$INSTALL_SCRIPT" &&
-    grep -Fq 'ubuntu-24.04 | ubuntu-22.04 | ubuntu-20.04)' "$INSTALL_SCRIPT" &&
+    grep -Fq 'ubuntu-24.04 | ubuntu-22.04)' "$INSTALL_SCRIPT" &&
     grep -Fq 'add-apt-repository -y universe' "$NORM_FEATURE_BASE"
+}
+
+# P2.2: no OTP 29.0.5 artifact exists for 20.04 (see checksums.env), so the
+# default profile always failed on it - documented support and the actual
+# OS check must not claim otherwise. install.sh must not accept it, and
+# the README must say so explicitly rather than silently drop it.
+installer_does_not_claim_ubuntu_20_04_support() {
+  ! grep -Fq 'ubuntu-20.04' "$INSTALL_SCRIPT" &&
+    grep -Fq '20.04' "${PROJECT_ROOT}/README.md" &&
+    grep -Fq 'nicht** unterstützt' "${PROJECT_ROOT}/README.md"
 }
 
 elixir_is_pinned_to_the_erlang_otp_major() {
@@ -1895,6 +1905,7 @@ run_test "Erlang pinned to a verified release" erlang_is_pinned_to_a_verified_re
 run_test "precompiled Ubuntu Erlang build" erlang_comes_from_the_precompiled_ubuntu_build
 run_test "Erlang cookie provisioned" erlang_cookie_is_provisioned
 run_test "installer requires Ubuntu" installer_requires_ubuntu
+run_test "installer does not claim Ubuntu 20.04 support" installer_does_not_claim_ubuntu_20_04_support
 run_test "Elixir pinned to the Erlang OTP major" elixir_is_pinned_to_the_erlang_otp_major
 run_test "Claude CLI installed alongside Codex CLI" claude_cli_is_installed
 run_test "doctor checks Claude CLI" doctor_checks_claude_alongside_codex

@@ -89,12 +89,17 @@ require_supported_os() {
   fi
 
   case "${os_id}-${os_version}" in
-    ubuntu-24.04 | ubuntu-22.04 | ubuntu-20.04)
+    ubuntu-24.04 | ubuntu-22.04)
       msg_ok "Supported OS: Ubuntu ${os_version}"
       ;;
     *)
       msg_error "Unsupported OS: ${os_id:-unknown} ${os_version:-unknown}"
-      msg_error "Ubuntu 24.04 LTS is recommended; 22.04 and 20.04 are also supported."
+      # P2.2: 20.04 was previously accepted here, but no OTP 29.0.5
+      # artifact exists for it (see DEVBOX_CHECKSUMS below) - the default
+      # profile always failed on it. Dropped rather than pretending it
+      # works; the recommended path per #18-P2.2 (adding a real 20.04
+      # OTP artifact + checksum + E2E coverage) can restore it later.
+      msg_error "Ubuntu 24.04 LTS is recommended; 22.04 is also supported."
       exit 1
       ;;
   esac
