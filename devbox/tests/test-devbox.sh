@@ -16,6 +16,7 @@ readonly FEATURE_AGENTS="${PROJECT_ROOT}/features/agents.sh"
 readonly FEATURE_HAPPY="${PROJECT_ROOT}/features/happy.sh"
 readonly FEATURE_TOOLING="${PROJECT_ROOT}/features/tooling.sh"
 readonly FEATURE_ELIXIR="${PROJECT_ROOT}/features/elixir.sh"
+readonly LXC_INTEGRATION_TEST="${PROJECT_ROOT}/tests/lxc-integration-test.sh"
 TEST_TMP="$(mktemp -d /tmp/devbox-tests.XXXXXX)"
 readonly TEST_TMP
 readonly MANAGER="${TEST_TMP}/devbox"
@@ -1333,6 +1334,18 @@ devbox_status_composes_existing_status_commands() {
     grep -Fq 'status' "$NORM_MANAGER"
 }
 
+# P1.2: the LXC E2E test's idempotency re-run now uses the documented
+# `curl | bash` one-liner (where $0 is "bash", not a file path) instead of
+# downloading to a file first, so that invocation form is actually
+# exercised somewhere in CI rather than only asserted against as a README
+# string (installer_curl_pipeable_from_master, above).
+lxc_integration_test_exercises_the_curl_pipe_path() {
+  grep -Fq '| bash"' "$LXC_INTEGRATION_TEST" &&
+    grep -Fq '"$invocation" == "pipe"' "$LXC_INTEGRATION_TEST" &&
+    grep -Fq 'install_devbox pipe' "$LXC_INTEGRATION_TEST" &&
+    grep -Fq -- '-o /tmp/devbox-install.sh && bash /tmp/devbox-install.sh' "$LXC_INTEGRATION_TEST"
+}
+
 # P1.1: a real install-A -> update A->B -> rollback -> back-to-A sequence
 # against a fully faked Root-State directory (readonly stripped so
 # ROOT_STATE_DIR/ACTIVE_REF_FILE/PREVIOUS_REF_FILE can point at a temp
@@ -1784,6 +1797,7 @@ run_test "ssh commands use symlink-safe writes" ssh_commands_use_symlink_safe_wr
 run_test "postgres/elixir writes use the symlink-safe helper" postgres_and_elixir_writes_use_symlink_safe_helper
 run_test "legacy previous-update state never executes file contents" migrate_legacy_previous_update_state_never_executes_file_contents
 run_test "update and rollback round trip restores the active ref" update_and_rollback_round_trip_restores_the_active_ref
+run_test "LXC integration test exercises the curl | bash path" lxc_integration_test_exercises_the_curl_pipe_path
 run_test "doctor checks root state version" doctor_checks_root_state_version
 run_test "Happy daemon starts at boot" happy_daemon_starts_at_boot
 run_test "Happy .bashrc start remains a fallback" happy_bashrc_start_remains_as_fallback
