@@ -47,6 +47,38 @@ Installiert werden unter anderem Codex CLI, Claude CLI, Node.js 24, Git, Git
 LFS, GitHub CLI, Python, ShellCheck, ripgrep, `fd`, Erlang/OTP, Elixir,
 Phoenix und PostgreSQL.
 
+### Feature-Auswahl
+
+`base` (OS-Pakete, Git/GitHub-CLI), `agents` (Codex/Claude), `happy`, Node.js
+und `mise` bilden den Kern jeder DevBox — ohne sie wäre es keine
+Agenten-Laufzeitumgebung mehr und sie sind daher immer Teil der Installation.
+Nur die beiden schweren, projektspezifischen Laufzeiten lassen sich abwählen:
+
+| Feature | Inhalt |
+| --- | --- |
+| `elixir` | Erlang/OTP, Elixir, Phoenix |
+| `postgres` | PostgreSQL-Paket, -Dienst, Dev-Rolle/-Datenbank |
+
+Standardmäßig (`DEVBOX_PROFILE=default`, oder gar nicht gesetzt) sind beide
+aktiv. Ein schlankeres Profil ohne beide:
+
+```bash
+DEVBOX_PROFILE=minimal \
+  curl -fsSL https://raw.githubusercontent.com/c4kingpin/Scripts/master/devbox/install.sh | bash
+```
+
+Oder gezielt einzelne Features an-/abwählen (überschreibt das Profil
+vollständig):
+
+```bash
+DEVBOX_FEATURES=postgres \
+  curl -fsSL https://raw.githubusercontent.com/c4kingpin/Scripts/master/devbox/install.sh | bash
+```
+
+Die getroffene Auswahl landet in
+`~/.config/devbox/features` und wird von `devbox doctor` gelesen, damit dort
+keine falschen Warnungen für bewusst nicht installierte Features auftauchen.
+
 Erlang/OTP und Elixir werden **ohne Versionsmanager** systemweit unter
 `/opt/devbox` installiert und über einfache Symlinks in `/usr/local/bin`
 bereitgestellt:
@@ -387,9 +419,11 @@ Ohne SSH bleibt die Devbox vollständig über die Konsole des LXC-Hosts (z. B.
 
 ## PostgreSQL
 
-Der Installer legt die lokale Entwicklungsdatenbank `devbox` und die Rolle
-`dev` mit einem zufälligen Passwort an. Die Zugangsdaten liegen ausschließlich
-im Container:
+Teil des `postgres`-Features (siehe [Feature-Auswahl](#feature-auswahl)) —
+bei `DEVBOX_PROFILE=minimal` oder `DEVBOX_FEATURES` ohne `postgres` entfällt
+dieser Abschnitt. Standardmäßig legt der Installer die lokale
+Entwicklungsdatenbank `devbox` und die Rolle `dev` mit einem zufälligen
+Passwort an. Die Zugangsdaten liegen ausschließlich im Container:
 
 ```text
 /home/dev/.pgpass

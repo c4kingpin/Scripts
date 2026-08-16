@@ -157,6 +157,77 @@ install_script_loads_all_modules_after_bootstrap() {
     grep -Fq 'install_erlang() {' "$FEATURE_ELIXIR"
 }
 
+# P1.2: DEVBOX_PROFILE (default/minimal) and DEVBOX_FEATURES (explicit
+# override) resolve to the set of optional features (elixir, postgres) an
+# install actually runs. Extract just that block and exercise it in
+# isolation under different env combinations, without running the rest of
+# install.sh.
+extract_feature_resolution_block() {
+  sed -n '/^DEVBOX_ALL_OPTIONAL_FEATURES=/,/^msg_ok "DevBox profile:/p' "$INSTALL_SCRIPT"
+}
+
+feature_resolution_selects_features_from_profile_and_override() {
+  local block
+  block="$(extract_feature_resolution_block)"
+
+  [[ -n "$block" ]] || return 1
+
+  # default profile: both optional features on.
+  [[ "$(
+    bash -c '
+      msg_error() { echo "ERROR: $*" >&2; exit 1; }
+      msg_ok() { :; }
+      '"$block"'
+      echo "$devbox_selected_features"
+    '
+  )" == "elixir postgres" ]] &&
+    # minimal profile: no optional features.
+    [[ "$(
+      bash -c '
+        msg_error() { echo "ERROR: $*" >&2; exit 1; }
+        msg_ok() { :; }
+        DEVBOX_PROFILE=minimal
+        '"$block"'
+        echo "$devbox_selected_features"
+      '
+    )" == "" ]] &&
+    # explicit empty override: no optional features, even on default profile.
+    [[ "$(
+      bash -c '
+        msg_error() { echo "ERROR: $*" >&2; exit 1; }
+        msg_ok() { :; }
+        DEVBOX_FEATURES=""
+        '"$block"'
+        echo "$devbox_selected_features"
+      '
+    )" == "" ]] &&
+    # explicit override: only the named feature, regardless of profile.
+    [[ "$(
+      bash -c '
+        msg_error() { echo "ERROR: $*" >&2; exit 1; }
+        msg_ok() { :; }
+        DEVBOX_PROFILE=minimal
+        DEVBOX_FEATURES="postgres"
+        '"$block"'
+        echo "$devbox_selected_features"
+      '
+    )" == "postgres" ]] &&
+    # unknown feature: rejected.
+    ! bash -c '
+      msg_error() { echo "ERROR: $*" >&2; exit 1; }
+      msg_ok() { :; }
+      DEVBOX_FEATURES="not-a-real-feature"
+      '"$block"'
+    ' >/dev/null 2>&1 &&
+    # unknown profile: rejected.
+    ! bash -c '
+      msg_error() { echo "ERROR: $*" >&2; exit 1; }
+      msg_ok() { :; }
+      DEVBOX_PROFILE="not-a-real-profile"
+      '"$block"'
+    ' >/dev/null 2>&1
+}
+
 install_script_runs_standalone_preflight() {
   grep -Fq 'require_root() {' "$INSTALL_SCRIPT" &&
     grep -Fq 'require_supported_os() {' "$INSTALL_SCRIPT" &&
@@ -435,8 +506,10 @@ developer_home_parents_are_writable() {
   # The dev-user directories must exist before the toolchain install runs;
   # since that's now two separate sourced files, check the call order in
   # install.sh instead of a shared line-number space.
-  user_call_line="$(grep -nFx 'create_developer_user' "$INSTALL_SCRIPT" | head -n 1 | cut -d: -f1)"
-  toolchain_call_line="$(grep -nFx 'install_erlang' "$INSTALL_SCRIPT" | head -n 1 | cut -d: -f1)"
+  user_call_line="$(grep -nE '^create_developer_user$' "$INSTALL_SCRIPT" | head -n 1 | cut -d: -f1)"
+  # install_erlang now runs inside an "if feature_enabled elixir" guard, so
+  # it's indented rather than a bare top-level call.
+  toolchain_call_line="$(grep -nE '^[[:space:]]*install_erlang$' "$INSTALL_SCRIPT" | head -n 1 | cut -d: -f1)"
 
   grep -Fq 'run_as_dev test -w "$developer_dir"' "$NORM_LIB_USER" &&
     grep -Fq 'Developer directory is not writable:' "$LIB_USER" ||
@@ -744,6 +817,50 @@ installer_validates_complete_stack() {
     grep -Fq 'msg_ok "Validated Installation"' "$INSTALL_SCRIPT"
 }
 
+# P1.2: the postgres feature's package install moved out of base.sh's
+# monolithic apt-get call into its own function, gated by feature selection.
+postgres_package_is_a_separate_optional_feature() {
+  # shellcheck disable=SC1003
+  ! grep -Fq 'postgresql \' "$FEATURE_BASE" &&
+    grep -Fq 'install_postgres_package() {' "$FEATURE_POSTGRES" &&
+    grep -Fq 'if feature_enabled postgres; then' "$INSTALL_SCRIPT" &&
+    grep -Fq 'if feature_enabled elixir; then' "$INSTALL_SCRIPT" &&
+    grep -Fq 'install_postgres_package' "$INSTALL_SCRIPT" &&
+    grep -Fq 'enable_postgresql_service' "$INSTALL_SCRIPT" &&
+    grep -Fq 'configure_postgres_dev_access' "$INSTALL_SCRIPT"
+}
+
+# P1.2: validation must not hard-require tools that a minimal install never
+# installed; the elixir/postgres checks are the only ones gated because
+# node/agents/happy stay mandatory (see plan).
+validation_skips_checks_for_disabled_features() {
+  local validation_block
+  validation_block="$(sed -n '/^msg_info "Validating Installation"/,/^msg_ok "Validated Installation"/p' "$INSTALL_SCRIPT")"
+
+  grep -Fq 'if feature_enabled elixir; then' <<<"$validation_block" &&
+    grep -Fq 'if feature_enabled postgres; then' <<<"$validation_block" &&
+    grep -Fxq 'node --version' "$INSTALL_SCRIPT"
+}
+
+# P1.2: install.sh must persist which optional features it actually
+# installed, so bin/devbox.sh's doctor() (a separately-downloaded,
+# self-contained file, see P1.1) can tell which checks apply.
+install_script_records_feature_selection() {
+  grep -Fq '"${DEV_HOME}/.config/devbox/features"' "$NORM_INSTALL" &&
+    grep -Fq 'printf '\''%s\n'\'' "$devbox_selected_features"' "$INSTALL_SCRIPT"
+}
+
+# P1.2: doctor() must read that state file and skip elixir/postgres checks
+# when they weren't installed, but keep checking everything when the file
+# is absent (installs from before this feature, or before P1.2 entirely).
+doctor_is_feature_aware() {
+  grep -Fq 'readonly FEATURES_FILE="${STATE_DIR}/features"' "$MANAGER" &&
+    grep -Fq 'feature_was_installed() {' "$MANAGER" &&
+    grep -Fq '[[ -r "$FEATURES_FILE" ]] || return 0' "$MANAGER" &&
+    grep -Fq 'feature_was_installed elixir' "$MANAGER" &&
+    grep -Fq 'feature_was_installed postgres' "$MANAGER"
+}
+
 extract_manager
 normalize_continuations "$INSTALL_SCRIPT" >"$NORM_INSTALL"
 normalize_continuations "$MANAGER" >"$NORM_MANAGER"
@@ -760,6 +877,7 @@ run_test "curl-pipeable from master" installer_curl_pipeable_from_master
 run_test "project is self-contained under devbox/" project_is_self_contained
 run_test "install.sh fetches a version-matched manager" install_script_fetches_matching_manager_version
 run_test "install.sh loads all modules after bootstrap" install_script_loads_all_modules_after_bootstrap
+run_test "feature resolution selects features from profile and override" feature_resolution_selects_features_from_profile_and_override
 run_test "bare-metal install" install_script_is_bare_metal
 run_test "BEAM toolchain outside the version manager" toolchain_is_installed_outside_the_version_manager
 run_test "mise available as a developer tool" mise_is_available_as_a_developer_tool
@@ -797,6 +915,10 @@ run_test "devbox version reports the manifest" devbox_version_command_reports_th
 run_test "toolchain artifacts are checksum-verified" downloaded_toolchain_artifacts_are_checksum_verified
 run_test "checksums.env matches embedded checksums" checksums_env_matches_embedded_checksums
 run_test "complete stack validation" installer_validates_complete_stack
+run_test "postgres package is a separate optional feature" postgres_package_is_a_separate_optional_feature
+run_test "validation skips checks for disabled features" validation_skips_checks_for_disabled_features
+run_test "install.sh records feature selection" install_script_records_feature_selection
+run_test "doctor is feature-aware" doctor_is_feature_aware
 
 printf '\n%d passed, %d failed\n' "$PASSED" "$FAILED"
 ((FAILED == 0))

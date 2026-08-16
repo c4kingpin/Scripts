@@ -249,6 +249,45 @@ rm -f "$devbox_module_tmp"
 
 msg_ok "Loaded DevBox modules"
 
+# Feature selection: base/agents/happy/node/tooling are the DevBox core (an
+# agent runtime environment without them isn't a DevBox) and always run.
+# elixir and postgres are the heavy, project-specific runtimes a box may not
+# need, so they're the only toggleable features.
+DEVBOX_ALL_OPTIONAL_FEATURES="elixir postgres"
+
+DEVBOX_PROFILE="${DEVBOX_PROFILE:-default}"
+
+case "$DEVBOX_PROFILE" in
+  default) devbox_profile_features="elixir postgres" ;;
+  minimal) devbox_profile_features="" ;;
+  *)
+    msg_error "Invalid DEVBOX_PROFILE: ${DEVBOX_PROFILE} (expected default or minimal)"
+    exit 1
+    ;;
+esac
+
+# An explicitly empty DEVBOX_FEATURES ("no optional features") must be
+# honored, so this checks whether the variable is set at all rather than
+# falling back on emptiness.
+if [[ -n "${DEVBOX_FEATURES+set}" ]]; then
+  devbox_selected_features="${DEVBOX_FEATURES//,/ }"
+else
+  devbox_selected_features="$devbox_profile_features"
+fi
+
+for devbox_feature in $devbox_selected_features; do
+  [[ " $DEVBOX_ALL_OPTIONAL_FEATURES " == *" $devbox_feature "* ]] || {
+    msg_error "Unknown DevBox feature: ${devbox_feature} (expected: ${DEVBOX_ALL_OPTIONAL_FEATURES})"
+    exit 1
+  }
+done
+
+feature_enabled() {
+  [[ " $devbox_selected_features " == *" $1 "* ]]
+}
+
+msg_ok "DevBox profile: ${DEVBOX_PROFILE} (optional features: ${devbox_selected_features:-none})"
+
 select_autonomy() {
   local requested="${DEVBOX_AUTONOMY:-}"
 
@@ -315,8 +354,6 @@ ensure_sshd_runtime
 
 install_nodejs
 
-enable_postgresql_service
-
 create_developer_user
 
 install_codex_cli
@@ -325,15 +362,21 @@ install_happy
 
 install_mise
 
-install_erlang
-install_elixir_and_phoenix
+if feature_enabled elixir; then
+  install_erlang
+  install_elixir_and_phoenix
+fi
 
-readonly PG_DB_NAME="devbox"
-readonly PG_DB_USER="dev"
-# shellcheck disable=SC2034 # read by configure_postgres_dev_access() in features/postgres.sh
-readonly PG_ENV_FILE="${DEV_HOME}/.config/devbox/postgres.env"
+if feature_enabled postgres; then
+  readonly PG_DB_NAME="devbox"
+  readonly PG_DB_USER="dev"
+  # shellcheck disable=SC2034 # read by configure_postgres_dev_access() in features/postgres.sh
+  readonly PG_ENV_FILE="${DEV_HOME}/.config/devbox/postgres.env"
 
-configure_postgres_dev_access
+  install_postgres_package
+  enable_postgresql_service
+  configure_postgres_dev_access
+fi
 
 msg_info "Configuring Development Environment"
 
@@ -631,6 +674,27 @@ run_as_dev git config \
 
 msg_ok "Configured Development Environment"
 
+msg_info "Recording feature selection"
+
+install \
+  -d \
+  -m 0755 \
+  -o "$DEV_USER" \
+  -g "$DEV_USER" \
+  "${DEV_HOME}/.config/devbox"
+
+printf '%s\n' "$devbox_selected_features" >"${DEV_HOME}/.config/devbox/features"
+
+chown \
+  "$DEV_USER:$DEV_USER" \
+  "${DEV_HOME}/.config/devbox/features"
+
+chmod \
+  0644 \
+  "${DEV_HOME}/.config/devbox/features"
+
+msg_ok "Recorded feature selection"
+
 msg_info "Installing DevBox Manager"
 
 fetch_devbox_module "bin/devbox.sh" "/usr/local/bin/devbox"
@@ -830,27 +894,31 @@ run_as_dev npm list \
   --depth=0 \
   happy
 
-run_as_dev erl \
-  -noshell \
-  -eval 'halt(0).'
+if feature_enabled elixir; then
+  run_as_dev erl \
+    -noshell \
+    -eval 'halt(0).'
 
-run_as_dev elixir \
-  --version
+  run_as_dev elixir \
+    --version
 
-run_as_dev mix phx.new \
-  --version
+  run_as_dev mix phx.new \
+    --version
+fi
 
-systemctl is-active \
-  --quiet \
-  postgresql.service
+if feature_enabled postgres; then
+  systemctl is-active \
+    --quiet \
+    postgresql.service
 
-run_as_dev psql \
-  --host 127.0.0.1 \
-  --username "$PG_DB_USER" \
-  --dbname "$PG_DB_NAME" \
-  --no-password \
-  --command "SELECT 1;" \
-  >/dev/null
+  run_as_dev psql \
+    --host 127.0.0.1 \
+    --username "$PG_DB_USER" \
+    --dbname "$PG_DB_NAME" \
+    --no-password \
+    --command "SELECT 1;" \
+    >/dev/null
+fi
 
 # Validate both the installer and generated manager before success.
 bash \
