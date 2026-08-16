@@ -6,6 +6,7 @@ set -Eeuo pipefail
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 readonly PROJECT_ROOT
 readonly INSTALL_SCRIPT="${PROJECT_ROOT}/install.sh"
+readonly MANAGER_SOURCE="${PROJECT_ROOT}/bin/devbox.sh"
 TEST_TMP="$(mktemp -d /tmp/devbox-tests.XXXXXX)"
 readonly TEST_TMP
 readonly MANAGER="${TEST_TMP}/devbox"
@@ -34,16 +35,11 @@ run_test() {
 }
 
 extract_manager() {
-  awk '
-    /^cat <<'\''MANAGER'\'' >\/usr\/local\/bin\/devbox$/ {
-      capture=1
-      next
-    }
-    /^MANAGER$/ {
-      capture=0
-    }
-    capture
-  ' "$INSTALL_SCRIPT" >"$MANAGER"
+  # The manager used to be a heredoc embedded in install.sh; it now lives in
+  # its own source file (bin/devbox.sh) that install.sh downloads at install
+  # time and writes verbatim to /usr/local/bin/devbox, so extraction is just
+  # a copy.
+  cp "$MANAGER_SOURCE" "$MANAGER"
   chmod 0755 "$MANAGER"
 }
 
@@ -83,10 +79,22 @@ standalone_no_proxmox_framework() {
 project_is_self_contained() {
   [[ "$(basename "$PROJECT_ROOT")" == "devbox" ]] &&
     [[ -f "${PROJECT_ROOT}/install.sh" ]] &&
+    [[ -f "${PROJECT_ROOT}/bin/devbox.sh" ]] &&
     [[ -f "${PROJECT_ROOT}/README.md" ]] &&
     [[ -f "${PROJECT_ROOT}/tests/test-devbox.sh" ]] &&
-    grep -Fq '${repo_url%/}/${branch}/devbox/install.sh' "$INSTALL_SCRIPT" &&
-    ! grep -Eq 'Scripts/(master|\$\{branch\})/install\.sh' "$INSTALL_SCRIPT"
+    grep -Fq '${repo_url%/}/${branch}/devbox/install.sh' "$MANAGER" &&
+    ! grep -Eq 'Scripts/(master|\$\{branch\})/install\.sh' "$MANAGER"
+}
+
+# install.sh and the manager it downloads must always come from the same
+# commit/branch, or a mid-flight update could mix an old manager with a new
+# installer (or vice versa). Both must therefore key off the same ref
+# mechanism (DEVBOX_REPO_URL/DEVBOX_REF), not independent hardcoded values.
+install_script_fetches_matching_manager_version() {
+  grep -Fq 'DEVBOX_REF="${DEVBOX_REF:-master}"' "$INSTALL_SCRIPT" &&
+    grep -Fq 'fetch_devbox_module() {' "$INSTALL_SCRIPT" &&
+    grep -Fq '"${DEVBOX_REPO_URL%/}/${DEVBOX_REF}/devbox/${module_path}"' "$NORM_INSTALL" &&
+    grep -Fq 'fetch_devbox_module "bin/devbox.sh" "/usr/local/bin/devbox"' "$INSTALL_SCRIPT"
 }
 
 install_script_runs_standalone_preflight() {
@@ -411,13 +419,13 @@ old_name_is_gone_from_the_active_surface() {
     ! grep -Fq 'CODEX_AUTONOMY' "$INSTALL_SCRIPT" &&
     ! grep -Fq 'Usage: codex-devbox' "$MANAGER" &&
     grep -Fq 'Usage: devbox COMMAND' "$MANAGER" &&
-    grep -Fq 'cat <<'\''MANAGER'\'' >/usr/local/bin/devbox' "$INSTALL_SCRIPT" &&
+    grep -Fq 'fetch_devbox_module "bin/devbox.sh" "/usr/local/bin/devbox"' "$INSTALL_SCRIPT" &&
     grep -Fq 'DEVBOX_REPO_URL' "$INSTALL_SCRIPT" &&
     grep -Fq 'DEVBOX_AUTONOMY' "$INSTALL_SCRIPT"
 }
 
 ssh_onboarding_distinguishes_key_directions() {
-  grep -Fq 'Never copy a private key here.' "$INSTALL_SCRIPT" &&
+  grep -Fq 'Never copy a private key here.' "$MANAGER" &&
     grep -Fq 'SSH_AUTHORIZED_KEY' "$INSTALL_SCRIPT" &&
     grep -Fq 'keys generate' "$MANAGER" &&
     grep -Fq 'ssh-keygen' "$MANAGER" &&
@@ -676,6 +684,7 @@ run_test "standalone, no Proxmox/community-scripts framework" standalone_no_prox
 run_test "standalone preflight checks" install_script_runs_standalone_preflight
 run_test "curl-pipeable from master" installer_curl_pipeable_from_master
 run_test "project is self-contained under devbox/" project_is_self_contained
+run_test "install.sh fetches a version-matched manager" install_script_fetches_matching_manager_version
 run_test "bare-metal install" install_script_is_bare_metal
 run_test "BEAM toolchain outside the version manager" toolchain_is_installed_outside_the_version_manager
 run_test "mise available as a developer tool" mise_is_available_as_a_developer_tool

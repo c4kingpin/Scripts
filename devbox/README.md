@@ -7,6 +7,14 @@ LXD/Incus oder jede andere Plattform), wird als `root` ausgeführt und richtet
 dabei auch den `devbox`-Manager ein. Es hat keine Abhängigkeit zu Proxmox
 selbst oder zu einem Framework.
 
+Der `devbox`-Manager selbst liegt als eigenständige Quelldatei unter
+[`bin/devbox.sh`](bin/devbox.sh) und wird von `install.sh` während der
+Installation aus demselben Branch/Commit heruntergeladen und unverändert nach
+`/usr/local/bin/devbox` geschrieben — so bleiben Installer und Manager immer
+versionsgleich. Am dokumentierten Curl-Einzeiler ändert das nichts: `install.sh`
+lädt ohnehin schon während der Installation weitere Artefakte (Pakete, Node.js,
+Erlang/Elixir, Codex/Claude/Happy) nach.
+
 Das Skript erstellt oder konfiguriert den Container selbst nicht. Storage,
 Netzwerk, Template und Ressourcen des Containers müssen vor dem Aufruf bereits
 über das jeweilige Hypervisor-Tooling (`pct create`, `lxc launch`,
@@ -455,12 +463,13 @@ Artefakt bricht die Installation sofort ab, bevor es entpackt wird.
 Lokale Prüfungen, aus diesem Verzeichnis heraus:
 
 ```bash
-bash -n install.sh tests/test-devbox.sh
+bash -n install.sh bin/devbox.sh tests/test-devbox.sh
 
 bash tests/test-devbox.sh
 
 shellcheck -x --exclude=SC1090,SC1091,SC2086,SC2154 \
   install.sh \
+  bin/devbox.sh \
   tests/test-devbox.sh
 ```
 
