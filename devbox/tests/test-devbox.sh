@@ -14,6 +14,7 @@ readonly FEATURE_NODE="${PROJECT_ROOT}/features/node.sh"
 readonly FEATURE_POSTGRES="${PROJECT_ROOT}/features/postgres.sh"
 readonly FEATURE_AGENTS="${PROJECT_ROOT}/features/agents.sh"
 readonly FEATURE_HAPPY="${PROJECT_ROOT}/features/happy.sh"
+readonly FEATURE_AGENT_NOTIFY="${PROJECT_ROOT}/features/agent-notify.sh"
 readonly FEATURE_TOOLING="${PROJECT_ROOT}/features/tooling.sh"
 readonly FEATURE_ELIXIR="${PROJECT_ROOT}/features/elixir.sh"
 TEST_TMP="$(mktemp -d /tmp/devbox-tests.XXXXXX)"
@@ -75,6 +76,7 @@ readonly NORM_LIB_USER="${TEST_TMP}/lib_user.normalized"
 readonly NORM_FEATURE_BASE="${TEST_TMP}/feature_base.normalized"
 readonly NORM_FEATURE_POSTGRES="${TEST_TMP}/feature_postgres.normalized"
 readonly NORM_FEATURE_HAPPY="${TEST_TMP}/feature_happy.normalized"
+readonly NORM_FEATURE_AGENT_NOTIFY="${TEST_TMP}/feature_agent_notify.normalized"
 readonly NORM_FEATURE_TOOLING="${TEST_TMP}/feature_tooling.normalized"
 readonly NORM_FEATURE_ELIXIR="${TEST_TMP}/feature_elixir.normalized"
 
@@ -89,6 +91,7 @@ scripts_have_valid_syntax() {
     "$FEATURE_POSTGRES" \
     "$FEATURE_AGENTS" \
     "$FEATURE_HAPPY" \
+    "$FEATURE_AGENT_NOTIFY" \
     "$FEATURE_TOOLING" \
     "$FEATURE_ELIXIR"
 }
@@ -140,6 +143,7 @@ install_script_loads_all_modules_after_bootstrap() {
     features/postgres.sh \
     features/agents.sh \
     features/happy.sh \
+    features/agent-notify.sh \
     features/tooling.sh \
     features/elixir.sh; do
 
@@ -1237,6 +1241,173 @@ doctor_checks_happy_daemon_service() {
     grep -Fq 'is not installed; Happy only starts from an interactive dev shell' "$MANAGER"
 }
 
+# Issue #59: a Claude/Codex session that can't proceed because of a
+# usage/rate limit must push a Happy notification instead of just going
+# silent. install_agent_limit_notify has to run after Happy (it shells out
+# to `happy notify`) and wire both agents up: a Claude StopFailure hook
+# (matcher: rate_limit|billing_error) and a Codex `notify` command.
+agent_limit_notify_is_installed_and_wired() {
+  grep -Fq 'install_agent_limit_notify() {' "$FEATURE_AGENT_NOTIFY" &&
+    grep -Fxq 'install_agent_limit_notify' "$INSTALL_SCRIPT" &&
+    grep -Fq 'install_happy_daemon_service' "$INSTALL_SCRIPT" &&
+    (($(grep -Fn 'install_happy_daemon_service' "$INSTALL_SCRIPT" | head -1 | cut -d: -f1) \
+      < $(grep -Fn 'install_agent_limit_notify' "$INSTALL_SCRIPT" | head -1 | cut -d: -f1))) &&
+    grep -Fq '"${DEV_HOME}/.local/bin/devbox-agent-limit-notify"' "$FEATURE_AGENT_NOTIFY" &&
+    grep -Fq '"${DEV_HOME}/.local/bin/devbox-claude-limit-detect"' "$FEATURE_AGENT_NOTIFY" &&
+    grep -Fq '"${DEV_HOME}/.local/bin/devbox-codex-limit-detect"' "$FEATURE_AGENT_NOTIFY" &&
+    grep -Fq 'chmod 0755 "${DEV_HOME}/.local/bin/devbox-agent-limit-notify" "${DEV_HOME}/.local/bin/devbox-claude-limit-detect" "${DEV_HOME}/.local/bin/devbox-codex-limit-detect"' "$NORM_FEATURE_AGENT_NOTIFY" &&
+    # Claude: registered as a StopFailure hook filtered to limit-shaped errors.
+    grep -Fq '"StopFailure"' "$INSTALL_SCRIPT" &&
+    grep -Fq '"matcher": "rate_limit|billing_error"' "$INSTALL_SCRIPT" &&
+    grep -Fq '"${DEV_HOME}/.local/bin/devbox-claude-limit-detect"' "$INSTALL_SCRIPT" &&
+    # Codex: registered via config.toml's notify hook on a fresh install; an
+    # existing config.toml is left alone (same as the rest of that block).
+    grep -Fq 'notify = ["${DEV_HOME}/.local/bin/devbox-codex-limit-detect"]' "$INSTALL_SCRIPT" &&
+    grep -Fq 'Preserving existing ~/.codex/config.toml' "$INSTALL_SCRIPT" &&
+    grep -Fq 'devbox-codex-limit-detect' "$NORM_INSTALL"
+}
+
+# The jq merge that adds the StopFailure hook to an *existing*
+# ~/.claude/settings.json (a fresh install gets it straight from the
+# heredoc) has to be idempotent, same as the neighboring
+# permissions.deny merge it extends.
+extract_claude_settings_merge_filter() {
+  local start end
+
+  start="$(grep -Fn "      --arg command \"\${DEV_HOME}/.local/bin/devbox-claude-limit-detect\" \\" "$INSTALL_SCRIPT" | head -1 | cut -d: -f1)"
+  end="$(grep -Fn "    ' \\" "$INSTALL_SCRIPT" | head -1 | cut -d: -f1)"
+
+  [[ -n "$start" && -n "$end" && "$end" -gt "$start" ]] || return 1
+
+  # +2 skips the --arg line and the opening quote-only line.
+  sed -n "$((start + 2)),$((end - 1))p" "$INSTALL_SCRIPT"
+}
+
+claude_settings_hook_merge_is_idempotent() {
+  local command_path="/home/dev/.local/bin/devbox-claude-limit-detect"
+  local input="${TEST_TMP}/claude-settings-merge-input.json"
+  local once="${TEST_TMP}/claude-settings-merge-once.json"
+  local twice="${TEST_TMP}/claude-settings-merge-twice.json"
+  local filter
+
+  filter="$(extract_claude_settings_merge_filter)"
+  [[ -n "$filter" ]] || return 1
+
+  cat <<'EOF' >"$input"
+{
+  "permissions": {"deny": ["Read(./.env)"]},
+  "hooks": {"PreToolUse": [{"matcher": "Bash", "hooks": [{"type": "command", "command": "echo hi"}]}]}
+}
+EOF
+
+  jq --arg command "$command_path" "$filter" "$input" >"$once" || return 1
+  jq --arg command "$command_path" "$filter" "$once" >"$twice" || return 1
+
+  # Existing hooks (PreToolUse) and the deny merge stay untouched.
+  [[ "$(jq '.hooks.PreToolUse | length' "$once")" == "1" ]] &&
+    [[ "$(jq '.permissions.deny | length' "$once")" == "2" ]] &&
+    # Exactly one StopFailure entry, not duplicated on a second run.
+    [[ "$(jq '.hooks.StopFailure | length' "$once")" == "1" ]] &&
+    [[ "$(jq '.hooks.StopFailure | length' "$twice")" == "1" ]] &&
+    [[ "$(jq -r '.hooks.StopFailure[0].hooks[0].command' "$once")" == "$command_path" ]] &&
+    [[ "$(jq -r '.hooks.StopFailure[0].matcher' "$once")" == "rate_limit|billing_error" ]]
+}
+
+extract_agent_limit_notify_scripts() {
+  local dest_dir="$1"
+
+  sed -n '/^  cat <<'\''EOF'\'' >"\${DEV_HOME}\/\.local\/bin\/devbox-agent-limit-notify"$/,/^EOF$/p' \
+    "$FEATURE_AGENT_NOTIFY" | sed '1d;$d' >"${dest_dir}/devbox-agent-limit-notify"
+
+  sed -n '/^  cat <<'\''EOF'\'' >"\${DEV_HOME}\/\.local\/bin\/devbox-claude-limit-detect"$/,/^EOF$/p' \
+    "$FEATURE_AGENT_NOTIFY" | sed '1d;$d' >"${dest_dir}/devbox-claude-limit-detect"
+
+  sed -n '/^  cat <<'\''EOF'\'' >"\${DEV_HOME}\/\.local\/bin\/devbox-codex-limit-detect"$/,/^EOF$/p' \
+    "$FEATURE_AGENT_NOTIFY" | sed '1d;$d' >"${dest_dir}/devbox-codex-limit-detect"
+
+  local script
+  for script in devbox-agent-limit-notify devbox-claude-limit-detect devbox-codex-limit-detect; do
+    [[ -s "${dest_dir}/${script}" ]] || return 1
+    chmod 0755 "${dest_dir}/${script}"
+  done
+}
+
+# Runs the real, extracted scripts end to end against a stubbed `happy` CLI:
+# a genuine limit notifies exactly once per dedup window, everything else
+# (normal stops, other API errors, unrelated Codex turns, malformed input,
+# no `happy` on PATH) must stay silent and must never fail the caller.
+agent_limit_notify_scripts_behave_correctly() {
+  local bin_dir="${TEST_TMP}/agent-notify-bin"
+  local fake_home="${TEST_TMP}/agent-notify-home"
+  local stub_dir="${TEST_TMP}/agent-notify-happy-stub"
+  local calls="${TEST_TMP}/agent-notify-happy-calls"
+
+  mkdir -p "$bin_dir" "${fake_home}/.local/bin" "${fake_home}/.config/devbox" "$stub_dir"
+  extract_agent_limit_notify_scripts "$bin_dir" || return 1
+  cp "${bin_dir}/"* "${fake_home}/.local/bin/"
+
+  cat <<EOF >"${stub_dir}/happy"
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >>"$calls"
+EOF
+  chmod 0755 "${stub_dir}/happy"
+
+  run_with_stub() {
+    HOME="$fake_home" \
+      PATH="${stub_dir}:/usr/bin:/bin" \
+      "$@"
+  }
+
+  # A genuine rate-limit StopFailure notifies once.
+  : >"$calls"
+  echo '{"error_type":"rate_limit"}' \
+    | run_with_stub "${fake_home}/.local/bin/devbox-claude-limit-detect" || return 1
+  [[ "$(wc -l <"$calls")" == "1" ]] || return 1
+  grep -Fq -- '-t Claude-Limit erreicht' "$calls" || return 1
+
+  # A second hit inside the dedup window does not notify again.
+  echo '{"error_type":"rate_limit"}' \
+    | run_with_stub "${fake_home}/.local/bin/devbox-claude-limit-detect" || return 1
+  [[ "$(wc -l <"$calls")" == "1" ]] || return 1
+
+  # A non-limit API error (e.g. overloaded) stays silent.
+  : >"$calls"
+  echo '{"error_type":"overloaded"}' \
+    | run_with_stub "${fake_home}/.local/bin/devbox-claude-limit-detect" || return 1
+  [[ ! -s "$calls" ]] || return 1
+
+  # Malformed/empty stdin must not crash and must not notify.
+  echo 'not json' | run_with_stub "${fake_home}/.local/bin/devbox-claude-limit-detect" || return 1
+  [[ ! -s "$calls" ]] || return 1
+
+  # Codex: an unambiguous limit phrase in the last assistant message notifies.
+  : >"$calls"
+  echo '{"last-assistant-message":"Sorry, I have hit my Usage Limit for now."}' \
+    | run_with_stub "${fake_home}/.local/bin/devbox-codex-limit-detect" || return 1
+  [[ "$(wc -l <"$calls")" == "1" ]] || return 1
+  grep -Fq -- '-t Codex-Limit erreicht' "$calls" || return 1
+
+  # An ordinary Codex turn stays silent.
+  : >"$calls"
+  echo '{"last-assistant-message":"I finished refactoring the module."}' \
+    | run_with_stub "${fake_home}/.local/bin/devbox-codex-limit-detect" || return 1
+  [[ ! -s "$calls" ]] || return 1
+
+  # No `happy` on PATH: clean exit, no notification, no state written.
+  # `command -v happy` is a shell builtin, so a PATH holding nothing but bash
+  # keeps a `happy` that happens to be installed on the test host out of the
+  # way (same technique as happy_daemon_guard_starts_only_a_paired_idle_daemon).
+  local no_happy_dir="${TEST_TMP}/agent-notify-no-happy"
+  mkdir -p "$no_happy_dir"
+  ln -sf "$(command -v bash)" "${no_happy_dir}/bash"
+
+  rm -f "${fake_home}/.config/devbox/agent-limit-notify.claude.state"
+  HOME="$fake_home" \
+    PATH="$no_happy_dir" \
+    "${fake_home}/.local/bin/devbox-agent-limit-notify" claude || return 1
+  [[ ! -f "${fake_home}/.config/devbox/agent-limit-notify.claude.state" ]]
+}
+
 extract_manager
 normalize_continuations "$INSTALL_SCRIPT" >"$NORM_INSTALL"
 normalize_continuations "$MANAGER" >"$NORM_MANAGER"
@@ -1244,6 +1415,7 @@ normalize_continuations "$LIB_USER" >"$NORM_LIB_USER"
 normalize_continuations "$FEATURE_BASE" >"$NORM_FEATURE_BASE"
 normalize_continuations "$FEATURE_POSTGRES" >"$NORM_FEATURE_POSTGRES"
 normalize_continuations "$FEATURE_HAPPY" >"$NORM_FEATURE_HAPPY"
+normalize_continuations "$FEATURE_AGENT_NOTIFY" >"$NORM_FEATURE_AGENT_NOTIFY"
 normalize_continuations "$FEATURE_TOOLING" >"$NORM_FEATURE_TOOLING"
 normalize_continuations "$FEATURE_ELIXIR" >"$NORM_FEATURE_ELIXIR"
 
@@ -1306,6 +1478,9 @@ run_test "Happy daemon starts at boot" happy_daemon_starts_at_boot
 run_test "Happy .bashrc start remains a fallback" happy_bashrc_start_remains_as_fallback
 run_test "Happy boot guard only starts a paired, idle daemon" happy_daemon_guard_starts_only_a_paired_idle_daemon
 run_test "doctor checks the Happy daemon service" doctor_checks_happy_daemon_service
+run_test "agent limit-notify is installed and wired" agent_limit_notify_is_installed_and_wired
+run_test "Claude settings hook merge is idempotent" claude_settings_hook_merge_is_idempotent
+run_test "agent limit-notify scripts behave correctly" agent_limit_notify_scripts_behave_correctly
 
 printf '\n%d passed, %d failed\n' "$PASSED" "$FAILED"
 ((FAILED == 0))

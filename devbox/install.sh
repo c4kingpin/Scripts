@@ -243,6 +243,7 @@ for devbox_module in \
   features/postgres.sh \
   features/agents.sh \
   features/happy.sh \
+  features/agent-notify.sh \
   features/tooling.sh \
   features/elixir.sh; do
 
@@ -366,6 +367,7 @@ install_codex_cli
 install_claude_cli
 install_happy
 install_happy_daemon_service
+install_agent_limit_notify
 
 install_mise
 
@@ -472,6 +474,7 @@ if [[ ! -f "${DEV_HOME}/.codex/config.toml" ]]; then
 # Managed by the DevBox installer.
 approval_policy = "${codex_approval_policy}"
 sandbox_mode = "${codex_sandbox_mode}"
+notify = ["${DEV_HOME}/.local/bin/devbox-codex-limit-detect"]
 EOF
 
   if [[ -n "$codex_network_access" ]]; then
@@ -483,6 +486,14 @@ EOF
   fi
 else
   msg_info "Preserving existing ~/.codex/config.toml"
+
+  if ! grep \
+    -Fq \
+    'devbox-codex-limit-detect' \
+    "${DEV_HOME}/.codex/config.toml"; then
+
+    msg_info "Add notify = [\"${DEV_HOME}/.local/bin/devbox-codex-limit-detect\"] to ~/.codex/config.toml for Codex limit notifications"
+  fi
 fi
 
 if [[ ! -f "${DEV_HOME}/.claude/settings.json" ]]; then
@@ -501,6 +512,19 @@ if [[ ! -f "${DEV_HOME}/.claude/settings.json" ]]; then
       "Read(~/.claude/.credentials.json)",
       "Read(~/.config/devbox/openrouter.env)"
     ]
+  },
+  "hooks": {
+    "StopFailure": [
+      {
+        "matcher": "rate_limit|billing_error",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${DEV_HOME}/.local/bin/devbox-claude-limit-detect"
+          }
+        ]
+      }
+    ]
   }
 }
 EOF
@@ -514,7 +538,9 @@ else
 
     claude_settings_tmp="$(mktemp)"
 
-    jq '
+    jq \
+      --arg command "${DEV_HOME}/.local/bin/devbox-claude-limit-detect" \
+      '
       .permissions = (.permissions // {}) |
       .permissions.deny = (
         (
@@ -522,6 +548,17 @@ else
           + ["Read(~/.happy/access.key)"]
         )
         | unique
+      ) |
+      .hooks = (.hooks // {}) |
+      .hooks.StopFailure = (
+        (.hooks.StopFailure // []) as $existing |
+        if ($existing | any(.hooks[]?.command? == $command))
+        then $existing
+        else $existing + [{
+          "matcher": "rate_limit|billing_error",
+          "hooks": [{"type": "command", "command": $command}]
+        }]
+        end
       )
     ' \
       "${DEV_HOME}/.claude/settings.json" \
@@ -534,7 +571,7 @@ else
     rm -f "$claude_settings_tmp"
   else
     msg_error "Existing ~/.claude/settings.json is invalid JSON."
-    msg_error "Happy credential deny rule could not be added."
+    msg_error "Happy credential deny rule and limit-notify hook could not be added."
   fi
 fi
 
