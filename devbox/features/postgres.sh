@@ -47,6 +47,17 @@ configure_postgres_dev_access() {
         's/^PGPASSWORD=//p' \
         "$PG_ENV_FILE"
     )"
+
+    # P1.5: PG_ENV_FILE lives under the dev-writable user-state directory,
+    # and PG_DB_PASS is interpolated directly into SQL below. Only accept
+    # it back if it still matches the format we generate (openssl rand
+    # -hex 24 below); anything else - a tampered value with SQL/shell
+    # metacharacters included - is discarded in favor of a fresh password
+    # rather than ever reaching the ALTER/CREATE ROLE statements.
+    if [[ ! "$PG_DB_PASS" =~ ^[0-9a-f]{48}$ ]]; then
+      msg_error "Persisted PostgreSQL password has an unexpected format; generating a new one"
+      PG_DB_PASS="$(openssl rand -hex 24)"
+    fi
   else
     PG_DB_PASS="$(openssl rand -hex 24)"
   fi
@@ -92,12 +103,15 @@ configure_postgres_dev_access() {
         --command "CREATE DATABASE ${PG_DB_NAME} OWNER ${PG_DB_USER};"
   fi
 
-  cat <<EOF >"${DEV_HOME}/.pgpass"
+  local pgpass_content
+  pgpass_content="$(cat <<EOF
 127.0.0.1:5432:*:${PG_DB_USER}:${PG_DB_PASS}
 localhost:5432:*:${PG_DB_USER}:${PG_DB_PASS}
 EOF
+  )"
 
-  cat <<EOF >"$PG_ENV_FILE"
+  local pg_env_content
+  pg_env_content="$(cat <<EOF
 PGHOST=127.0.0.1
 PGPORT=5432
 PGUSER=${PG_DB_USER}
@@ -105,16 +119,10 @@ PGPASSWORD=${PG_DB_PASS}
 PGDATABASE=${PG_DB_NAME}
 DATABASE_URL=ecto://${PG_DB_USER}:${PG_DB_PASS}@127.0.0.1/${PG_DB_NAME}
 EOF
+  )"
 
-  chown \
-    "$DEV_USER:$DEV_USER" \
-    "${DEV_HOME}/.pgpass" \
-    "$PG_ENV_FILE"
-
-  chmod \
-    0600 \
-    "${DEV_HOME}/.pgpass" \
-    "$PG_ENV_FILE"
+  write_root_owned_file "${DEV_HOME}/.pgpass" 0600 "${pgpass_content}"$'\n'
+  write_root_owned_file "$PG_ENV_FILE" 0600 "${pg_env_content}"$'\n'
 
   unset PG_DB_PASS
 

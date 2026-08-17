@@ -42,6 +42,18 @@ Netzwerk, Template und Ressourcen des Containers müssen vor dem Aufruf bereits
 | Benutzer | `dev` |
 | Workspace | `/home/dev/workspace` |
 | Agenten-Autonomie | ausgewogen |
+| Remote-Provider | `happy` |
+
+Rein lesende Hilfsbefehle für den Workspace (kein Branch-Wechsel, keine
+Commits, kein Löschen, kein automatisches Anlegen von `.env`):
+
+```bash
+devbox workspace list
+devbox workspace doctor <project>
+```
+
+`workspace doctor` prüft nur, ob `<project>` unter dem Workspace existiert,
+ein Git-Repository ist und eine `.env`-Datei vorhanden ist.
 
 Installiert werden unter anderem Codex CLI, Claude CLI, Node.js 24, Git, Git
 LFS, GitHub CLI, Python, ShellCheck, ripgrep, `fd`, Erlang/OTP, Elixir,
@@ -49,30 +61,40 @@ Phoenix und PostgreSQL.
 
 ### Feature-Auswahl
 
-`base` (OS-Pakete, Git/GitHub-CLI), `agents` (Codex/Claude), `happy`, Node.js
+`base` (OS-Pakete, Git/GitHub-CLI), `agents` (Codex/Claude), Node.js
 und `mise` bilden den Kern jeder DevBox — ohne sie wäre es keine
 Agenten-Laufzeitumgebung mehr und sie sind daher immer Teil der Installation.
-Nur die beiden schweren, projektspezifischen Laufzeiten lassen sich abwählen:
+Die beiden schweren, projektspezifischen Laufzeiten lassen sich abwählen,
+`redis` ist rein optional und in keinem Profil standardmäßig aktiv:
 
-| Feature | Inhalt |
-| --- | --- |
-| `elixir` | Erlang/OTP, Elixir, Phoenix |
-| `postgres` | PostgreSQL-Paket, -Dienst, Dev-Rolle/-Datenbank |
+| Feature | Inhalt | Standardmäßig aktiv |
+| --- | --- | --- |
+| `elixir` | Erlang/OTP, Elixir, Phoenix | im `default`-Profil |
+| `postgres` | PostgreSQL-Paket, -Dienst, Dev-Rolle/-Datenbank | im `default`-Profil |
+| `redis` | Redis-Server, systemd-Dienst | nie — nur per `DEVBOX_FEATURES` |
 
-Standardmäßig (`DEVBOX_PROFILE=default`, oder gar nicht gesetzt) sind beide
-aktiv. Ein schlankeres Profil ohne beide:
+Standardmäßig (`DEVBOX_PROFILE=default`, oder gar nicht gesetzt) sind `elixir`
+und `postgres` aktiv, `redis` nicht. Ein schlankeres Profil ohne `elixir` und
+`postgres`:
 
 ```bash
-DEVBOX_PROFILE=minimal \
-  curl -fsSL https://raw.githubusercontent.com/c4kingpin/Scripts/master/devbox/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/c4kingpin/Scripts/master/devbox/install.sh |
+  env DEVBOX_PROFILE=minimal bash
 ```
 
 Oder gezielt einzelne Features an-/abwählen (überschreibt das Profil
 vollständig):
 
 ```bash
-DEVBOX_FEATURES=postgres \
-  curl -fsSL https://raw.githubusercontent.com/c4kingpin/Scripts/master/devbox/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/c4kingpin/Scripts/master/devbox/install.sh |
+  env DEVBOX_FEATURES=postgres bash
+```
+
+Oder `redis` zusätzlich zum Standardprofil aktivieren:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/c4kingpin/Scripts/master/devbox/install.sh |
+  env DEVBOX_FEATURES=elixir,postgres,redis bash
 ```
 
 Die getroffene Auswahl landet in
@@ -120,9 +142,13 @@ unprivilegiert. Kleinere Container funktionieren ebenfalls.
 
 ### Betriebssystem: Ubuntu LTS erforderlich
 
-Die DevBox setzt **Ubuntu 24.04 LTS** voraus (22.04 und 20.04 funktionieren
-ebenfalls); amd64 und arm64 werden unterstützt. Der Installer prüft das zu
-Beginn und bricht mit einer klaren Meldung ab, falls ein anderes System läuft.
+Die DevBox setzt **Ubuntu 24.04 LTS** voraus (22.04 funktioniert ebenfalls);
+amd64 und arm64 werden unterstützt. Der Installer prüft das zu Beginn und
+bricht mit einer klaren Meldung ab, falls ein anderes System läuft.
+
+Ubuntu 20.04 wird **nicht** unterstützt: für OTP 29.0.5 existiert kein
+passendes vorkompiliertes Artefakt für 20.04, das Standardprofil würde dort
+also grundsätzlich fehlschlagen.
 
 Der Grund ist Erlang/OTP: builds.hex.pm veröffentlicht vorkompilierte
 OTP-Builds ausschließlich für Ubuntu (für amd64 und arm64). Auf Debian gäbe es
@@ -196,8 +222,8 @@ Ohne interaktives Terminal (also auch beim `curl | bash`-Einzeiler) wird
 `balanced` verwendet, sofern nicht explizit ein Profil vorgegeben wird:
 
 ```bash
-DEVBOX_AUTONOMY=autonomous \
-  curl -fsSL https://raw.githubusercontent.com/c4kingpin/Scripts/master/devbox/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/c4kingpin/Scripts/master/devbox/install.sh |
+  env DEVBOX_AUTONOMY=autonomous bash
 ```
 
 Gültige Werte sind `controlled`, `balanced`, `autonomous` und `full-access`.
@@ -251,8 +277,8 @@ SSH bleibt deaktiviert, solange kein Public Key hinterlegt ist. Ein Key kann
 entweder vorab beim Installationsaufruf übergeben werden:
 
 ```bash
-SSH_AUTHORIZED_KEY="ssh-ed25519 AAAA... client" \
-  curl -fsSL https://raw.githubusercontent.com/c4kingpin/Scripts/master/devbox/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/c4kingpin/Scripts/master/devbox/install.sh |
+  env SSH_AUTHORIZED_KEY="ssh-ed25519 AAAA... client" bash
 ```
 
 Andernfalls wird der Zugriff später eingerichtet. Der private Schlüssel wird
@@ -343,10 +369,47 @@ Jede CLI verwaltet ihre Anmeldedaten selbst: Codex unter `~/.codex`, Claude in
 veröffentlicht oder eingecheckt werden; die `deny`-Regeln der
 Autonomie-Konfiguration halten die Agenten zusätzlich davon ab, sie zu lesen.
 
+## Remote-Provider
+
+Codex und Claude bilden zusammen mit der lokalen Entwicklungsumgebung den
+Kern der DevBox. Remote-Zugriff ist optional und wird über einen
+konfigurierbaren Remote-Provider bereitgestellt. Standardmäßig wird Happy
+verwendet:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/c4kingpin/Scripts/master/devbox/install.sh |
+  env DEVBOX_REMOTE=happy bash
+```
+
+Ohne Remote-Provider installiert der Installer kein Happy und richtet auch
+keinen Happy-Dienst ein; erreichbar bleibt die Box dann über die
+Host-Konsole (`pct enter`, `lxc exec`, `incus exec`) und optional SSH:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/c4kingpin/Scripts/master/devbox/install.sh |
+  env DEVBOX_REMOTE=none bash
+```
+
+Die getroffene Auswahl landet in `/var/lib/devbox/remote-provider`,
+erscheint in `devbox status` und `devbox doctor --json`
+(`remote_provider`), und `devbox update` übernimmt sie automatisch —
+ein Update ändert den konfigurierten Provider nicht. Bestehende
+Installationen ohne gespeicherte Auswahl (vor diesem Feature) werden beim
+nächsten Update automatisch als `happy` interpretiert; Happy-Pairing,
+-Credentials und -Dienst bleiben dabei unverändert erhalten.
+
+SSH ist davon unabhängig: es ist immer ein separater, optionaler
+Zugangsweg und insbesondere als Recovery-/Fallback-Zugang nutzbar, falls
+der konfigurierte Remote-Provider nicht verfügbar ist.
+
+Weitere Provider (z. B. Kisuke) sind für später vorgesehen, aber noch nicht
+implementiert.
+
 ## Happy-Daemon nach dem Booten
 
-Happy ist die Remote-Ebene der DevBox und muss deshalb ohne interaktiven
-Login verfügbar sein. Der Installer richtet dafür den systemd-Dienst
+Nur relevant, wenn Happy als Remote-Provider aktiv ist (Standard). Happy
+muss dafür ohne interaktiven Login verfügbar sein. Der Installer richtet
+dafür den systemd-Dienst
 `devbox-happy-daemon.service` ein:
 
 ```bash
@@ -493,10 +556,28 @@ solange `postgres.env` bereits existiert.
 
 ## Betrieb und Updates
 
+Überblick, wie diese konkrete Box konfiguriert ist (Version, Profil,
+Features, SSH, Agenten-Auth, GitHub, OpenRouter):
+
+```bash
+devbox status
+```
+
+`status` setzt sich aus den bereits bestehenden Einzelkommandos zusammen
+(`ssh status`, `auth status`, `github status`, `openrouter status`) und
+dupliziert deren Prüflogik nicht.
+
 Diagnose:
 
 ```bash
 devbox doctor
+```
+
+Dieselben Prüfungen maschinenlesbar für Agenten/Monitoring, mit Exit-Code
+`0` (gesund) bzw. `1` (ungesund):
+
+```bash
+devbox doctor --json
 ```
 
 `update`/`rollback` müssen als `root` laufen, nicht über `sudo` als `dev` –
@@ -572,7 +653,7 @@ DevBox trennt persistenten Zustand nach Zuständigkeit:
 
 | Bereich | Ort | Inhalt |
 | --- | --- | --- |
-| Root-State | `/var/lib/devbox/` | aktive Version (`version`), Version/Ref vor dem letzten Update (`previous-version`, `previous-ref`), gewählte optionale Features (`installed-features`), Installationsmetadaten (`install-state.json`) |
+| Root-State | `/var/lib/devbox/` | aktive Version (`version`), aktiver/vorheriger Ref (`active-ref`, `previous-ref`), installierter Commit (`commit`), gewählte optionale Features (`installed-features`), konfigurierter Remote-Provider (`remote-provider`), Installationsmetadaten (`install-state.json`) |
 | User-State | `~/.config/devbox/` | Onboarding-Marker, OpenRouter-Konfiguration, benutzerbezogene Einstellungen |
 | Fremdverwaltete Credentials | `~/.codex`, `~/.claude`, `~/.happy`, `~/.config/gh`, `~/.ssh` | jeweils ausschließlich vom zugehörigen Tool verwaltet |
 
@@ -596,6 +677,20 @@ Stellen nicht auseinanderlaufen. Keine der verwalteten npm-Komponenten nutzt
 devbox version
 ```
 
+Maschinenlesbar für Agenten/Tooling:
+
+```bash
+devbox version --json
+```
+
+Da `master` nach einem Release neue Commits enthalten kann, ohne dass sich
+`DEVBOX_VERSION` ändert, zeigen `devbox version` und `devbox status`
+zusätzlich den tatsächlich installierten Commit (persistiert von
+`install.sh`, sofern der Installationslauf ihn auflösen konnte —
+andernfalls `unknown`). `devbox update --check` auf einem Branch vergleicht
+diesen Commit gegen den aktuellen Stand des Branches, statt nur zu melden,
+dass Branch-Updates "nicht versionsverglichen" sind.
+
 Die heruntergeladenen Erlang/OTP- und Elixir-Artefakte werden vor der
 Installation gegen bekannte SHA256-Prüfsummen aus
 [`checksums.env`](checksums.env) verifiziert; ein manipuliertes oder falsches
@@ -610,7 +705,7 @@ bash -n install.sh bin/devbox.sh lib/*.sh features/*.sh tests/*.sh
 
 bash tests/test-devbox.sh
 
-shellcheck -x --exclude=SC1090,SC1091,SC2086,SC2154 \
+shellcheck -x --exclude=SC1090,SC1091 \
   install.sh \
   bin/devbox.sh \
   lib/*.sh \

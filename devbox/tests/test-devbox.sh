@@ -12,11 +12,13 @@ readonly LIB_USER="${PROJECT_ROOT}/lib/user.sh"
 readonly FEATURE_BASE="${PROJECT_ROOT}/features/base.sh"
 readonly FEATURE_NODE="${PROJECT_ROOT}/features/node.sh"
 readonly FEATURE_POSTGRES="${PROJECT_ROOT}/features/postgres.sh"
+readonly FEATURE_REDIS="${PROJECT_ROOT}/features/redis.sh"
 readonly FEATURE_AGENTS="${PROJECT_ROOT}/features/agents.sh"
 readonly FEATURE_HAPPY="${PROJECT_ROOT}/features/happy.sh"
 readonly FEATURE_AGENT_NOTIFY="${PROJECT_ROOT}/features/agent-notify.sh"
 readonly FEATURE_TOOLING="${PROJECT_ROOT}/features/tooling.sh"
 readonly FEATURE_ELIXIR="${PROJECT_ROOT}/features/elixir.sh"
+readonly LXC_INTEGRATION_TEST="${PROJECT_ROOT}/tests/lxc-integration-test.sh"
 TEST_TMP="$(mktemp -d /tmp/devbox-tests.XXXXXX)"
 readonly TEST_TMP
 readonly MANAGER="${TEST_TMP}/devbox"
@@ -307,8 +309,18 @@ installer_requires_ubuntu() {
   grep -Fq 'require_supported_os() {' "$INSTALL_SCRIPT" &&
     grep -Fxq 'require_supported_os' "$INSTALL_SCRIPT" &&
     ! grep -Fq 'require_debian_like' "$INSTALL_SCRIPT" &&
-    grep -Fq 'ubuntu-24.04 | ubuntu-22.04 | ubuntu-20.04)' "$INSTALL_SCRIPT" &&
+    grep -Fq 'ubuntu-24.04 | ubuntu-22.04)' "$INSTALL_SCRIPT" &&
     grep -Fq 'add-apt-repository -y universe' "$NORM_FEATURE_BASE"
+}
+
+# P2.2: no OTP 29.0.5 artifact exists for 20.04 (see checksums.env), so the
+# default profile always failed on it - documented support and the actual
+# OS check must not claim otherwise. install.sh must not accept it, and
+# the README must say so explicitly rather than silently drop it.
+installer_does_not_claim_ubuntu_20_04_support() {
+  ! grep -Fq 'ubuntu-20.04' "$INSTALL_SCRIPT" &&
+    grep -Fq '20.04' "${PROJECT_ROOT}/README.md" &&
+    grep -Fq 'nicht** unterstützt' "${PROJECT_ROOT}/README.md"
 }
 
 elixir_is_pinned_to_the_erlang_otp_major() {
@@ -489,6 +501,9 @@ update_check_reports_without_installing() {
   local output_file="${TEST_TMP}/update-check-output.log"
   local bin_dir="${TEST_TMP}/bin-check"
   local manager_functions="${TEST_TMP}/manager-functions-check.sh"
+  local current_version
+
+  current_version="$(grep -oP 'readonly DEVBOX_VERSION="\K[^"]+' "$MANAGER")"
 
   mkdir -p "$bin_dir"
 
@@ -519,7 +534,7 @@ EOF
     update_devbox --check
   ) >"$output_file" 2>&1
 
-  grep -Fq "Update available: 1.1.1 -> v99.0.0" "$output_file" &&
+  grep -Fq "Update available: ${current_version} -> v99.0.0" "$output_file" &&
     ! grep -Fq "Downloading installer" "$output_file"
 }
 
@@ -805,9 +820,8 @@ no_hardcoded_default_credentials() {
 
 managed_secrets_have_restricted_permissions() {
   grep -Fq 'chmod 0600' "$NORM_INSTALL" &&
-    grep -Fq 'chmod 0600' "$NORM_FEATURE_POSTGRES" &&
-    grep -Fq '"${DEV_HOME}/.pgpass"' "$FEATURE_POSTGRES" &&
-    grep -Fq '"$PG_ENV_FILE"' "$FEATURE_POSTGRES" &&
+    grep -Fq 'write_root_owned_file "${DEV_HOME}/.pgpass" 0600' "$NORM_FEATURE_POSTGRES" &&
+    grep -Fq 'write_root_owned_file "$PG_ENV_FILE" 0600' "$NORM_FEATURE_POSTGRES" &&
     grep -Fq '"${DEV_HOME}/.codex/config.toml"' "$INSTALL_SCRIPT" &&
     grep -Fq '"${DEV_HOME}/.claude/settings.json"' "$INSTALL_SCRIPT" &&
     grep -Fq 'chmod 0600 "$OPENROUTER_ENV"' "$NORM_MANAGER"
@@ -939,6 +953,22 @@ devbox_version_command_reports_the_manifest() {
     grep -Fq 'show_version' "$NORM_MANAGER"
 }
 
+# P2.1: devbox version --json exposes the same manifest as a JSON object,
+# for agents/tooling that would otherwise have to parse the text output.
+devbox_version_json_reports_the_manifest() {
+  local text_output json_output expected_devbox_version
+
+  text_output="$("$MANAGER" version)"
+  json_output="$("$MANAGER" version --json)"
+  expected_devbox_version="$(awk -F': +' '/^DevBox:/ { print $2 }' <<<"$text_output")"
+
+  jq -e '.devbox and .node and .erlang and .elixir and .phoenix and .codex_cli and .claude_code and .happy' \
+    <<<"$json_output" >/dev/null &&
+    [[ "$(jq -r '.devbox' <<<"$json_output")" == "$expected_devbox_version" ]] &&
+    grep -Fq 'version:--json)' "$MANAGER" &&
+    grep -Fq 'show_version_json' "$NORM_MANAGER"
+}
+
 # P0.3: versioned binary artifacts are verified against a known checksum
 # before being unpacked; a missing or wrong checksum aborts the install.
 downloaded_toolchain_artifacts_are_checksum_verified() {
@@ -1034,7 +1064,41 @@ install_script_records_devbox_state() {
     grep -Fq 'install -d -m 0755 "$ROOT_STATE_DIR"' "$NORM_INSTALL" &&
     grep -Fq 'printf '\''%s\n'\'' "$DEVBOX_VERSION" >"${ROOT_STATE_DIR}/version"' "$INSTALL_SCRIPT" &&
     grep -Fq 'printf '\''%s\n'\'' "$devbox_selected_features" >"${ROOT_STATE_DIR}/installed-features"' "$INSTALL_SCRIPT" &&
-    grep -Fq '"${ROOT_STATE_DIR}/install-state.json"' "$INSTALL_SCRIPT"
+    grep -Fq '"${ROOT_STATE_DIR}/install-state.json"' "$INSTALL_SCRIPT" &&
+    grep -Fq '"${ROOT_STATE_DIR}/active-ref"' "$INSTALL_SCRIPT"
+}
+
+# P1.1: install.sh seeds active-ref with a best-effort release/branch
+# classification of DEVBOX_REF, so the first `devbox update` after a fresh
+# install has something real to snapshot as "previous" before overwriting
+# it (update_devbox() itself always overwrites this with the exact mode it
+# already knows, so this guess only matters until the first update).
+install_script_classifies_active_ref_mode() {
+  local classify_block
+  classify_block="$(sed -n '/^if \[\[ "\$DEVBOX_REF" =~/,/^fi$/p' "$INSTALL_SCRIPT")"
+
+  [[ -n "$classify_block" ]] || return 1
+
+  local release_result branch_result
+
+  release_result="$(
+    bash -c '
+      DEVBOX_REF="v1.2.3"
+      '"$classify_block"'
+      echo "$devbox_active_mode"
+    '
+  )"
+
+  branch_result="$(
+    bash -c '
+      DEVBOX_REF="master"
+      '"$classify_block"'
+      echo "$devbox_active_mode"
+    '
+  )"
+
+  [[ "$release_result" == "release" ]] &&
+    [[ "$branch_result" == "branch" ]]
 }
 
 # The P1.2/P1.3 user-state files are migrated into root-state once, so an
@@ -1062,6 +1126,828 @@ doctor_is_feature_aware() {
 # file is simply missing (installs from before P1.4). Extract just the
 # check (not the whole doctor(), which needs a real dev user/toolchain)
 # and exercise its three branches directly.
+# P2.6: devbox workspace list/doctor are read-only helpers over the dev
+# user's project directories. Strip "readonly" from the sourced copy so
+# WORKSPACE_DIR can point at a temp fixture instead of the real
+# /home/dev/workspace, same technique as the doctor --json test above.
+workspace_list_and_doctor_report_project_health_read_only() {
+  local ws_dir="${TEST_TMP}/workspace-fixture"
+  local manager_functions="${TEST_TMP}/manager-functions-workspace.sh"
+  local list_output doctor_git_output doctor_no_git_output doctor_missing_status=0
+
+  mkdir -p "${ws_dir}/project-a" "${ws_dir}/project-b"
+  git -C "${ws_dir}/project-a" init -q
+  : >"${ws_dir}/project-a/.env"
+
+  sed 's/^readonly //' "$MANAGER" | head -n -1 >"$manager_functions"
+
+  list_output="$(
+    bash -c '
+      # shellcheck source=/dev/null
+      source "'"$manager_functions"'"
+      WORKSPACE_DIR="'"$ws_dir"'"
+      require_dev() { :; }
+      workspace_list
+    '
+  )"
+
+  doctor_git_output="$(
+    bash -c '
+      # shellcheck source=/dev/null
+      source "'"$manager_functions"'"
+      WORKSPACE_DIR="'"$ws_dir"'"
+      require_dev() { :; }
+      workspace_doctor project-a
+    ' 2>&1
+  )"
+
+  doctor_no_git_output="$(
+    bash -c '
+      # shellcheck source=/dev/null
+      source "'"$manager_functions"'"
+      WORKSPACE_DIR="'"$ws_dir"'"
+      require_dev() { :; }
+      workspace_doctor project-b
+    ' 2>&1
+  )"
+
+  bash -c '
+    # shellcheck source=/dev/null
+    source "'"$manager_functions"'"
+    WORKSPACE_DIR="'"$ws_dir"'"
+    require_dev() { :; }
+    workspace_doctor does-not-exist
+  ' >/dev/null 2>&1 || doctor_missing_status=$?
+
+  grep -Fq 'project-a' <<<"$list_output" &&
+    grep -Fq 'project-b' <<<"$list_output" &&
+    grep -Fq 'Git repository' <<<"$doctor_git_output" &&
+    grep -Fq '.env present' <<<"$doctor_git_output" &&
+    grep -Fq 'Not a Git repository' <<<"$doctor_no_git_output" &&
+    grep -Fq '.env not present' <<<"$doctor_no_git_output" &&
+    [[ "$doctor_missing_status" -ne 0 ]] &&
+    # Read-only by construction: no command in workspace_doctor()/
+    # workspace_list() ever mutates the project directory it inspects.
+    ! sed -n '/^workspace_list() {/,/^workspace_doctor() {/p' "$MANAGER" \
+      | grep -Eq 'git (commit|checkout|branch -[dD]|push|reset)|rm -rf' &&
+    grep -Fq 'workspace:list)' "$MANAGER" &&
+    grep -Fq 'workspace:doctor)' "$MANAGER"
+}
+
+# P2.3: devbox doctor --json runs the exact same checks as devbox doctor
+# (no duplicated logic) and reports the result as the JSON schema from
+# #18's audit issue. Builds a fully stubbed environment (PATH shadow +
+# readonly-stripped constants) so the result is deterministic regardless
+# of this machine's real Codex/Claude/GitHub/Postgres/Happy state.
+doctor_json_reports_a_valid_summary_matching_the_exit_code() {
+  local bin_dir="${TEST_TMP}/doctor-json-bin"
+  local root_state="${TEST_TMP}/doctor-json-root-state"
+  local home_dir="${TEST_TMP}/doctor-json-home"
+  local ssh_config="${TEST_TMP}/doctor-json-sshd.conf"
+  local happy_unit="${TEST_TMP}/doctor-json-happy.service"
+  local manager_functions="${TEST_TMP}/manager-functions-doctor-json.sh"
+  local devbox_version
+  local tool
+
+  devbox_version="$(grep -oP 'readonly DEVBOX_VERSION="\K[^"]+' "$MANAGER")"
+
+  mkdir -p "$bin_dir" "$root_state" "${home_dir}/.happy"
+
+  printf '%s\n' "$devbox_version" >"${root_state}/version"
+  printf 'elixir postgres\n' >"${root_state}/installed-features"
+
+  printf 'test-access-key\n' >"${home_dir}/.happy/access.key"
+  chmod 0600 "${home_dir}/.happy/access.key"
+  chmod 0700 "${home_dir}/.happy"
+  printf '{"machineId":"test-machine"}\n' >"${home_dir}/.happy/settings.json"
+  printf '{"pid": %d}\n' "$$" >"${home_dir}/.happy/daemon.state.json"
+  : >"$happy_unit"
+
+  for tool in claude codex happy fd gh git python3 rg elixir mix psql erl; do
+    printf '#!/usr/bin/env bash\nexit 0\n' >"${bin_dir}/${tool}"
+    chmod 0755 "${bin_dir}/${tool}"
+  done
+
+  # is-active/is-enabled succeed (service healthy); is-failed must fail
+  # (service is NOT in a failed state) - a stub that always exits 0 would
+  # make is-failed report a false failure.
+  printf '#!/usr/bin/env bash\ncase "$1" in\n  is-failed) exit 1 ;;\n  *) exit 0 ;;\nesac\n' >"${bin_dir}/systemctl"
+  chmod 0755 "${bin_dir}/systemctl"
+
+  printf '#!/usr/bin/env bash\n[[ "$1" == "--version" ]] && echo "v24.0.0"\nexit 0\n' >"${bin_dir}/node"
+  chmod 0755 "${bin_dir}/node"
+
+  printf '#!/usr/bin/env bash\necho "|-- happy@1.2.0"\nexit 0\n' >"${bin_dir}/npm"
+  chmod 0755 "${bin_dir}/npm"
+
+  # Drop the trailing "main \"\$@\"" call and the readonly keyword so the
+  # sourced copy's Root-State/Happy/SSH path constants can be redirected at
+  # temp fixtures below, instead of the real /var/lib/devbox and /home/dev.
+  sed 's/^readonly //' "$MANAGER" | head -n -1 >"$manager_functions"
+
+  local healthy_output healthy_status=0
+  healthy_output="$(
+    PATH="${bin_dir}:/usr/bin:/bin" \
+    HOME="$home_dir" \
+    bash -c '
+      # shellcheck source=/dev/null
+      source "'"$manager_functions"'"
+      ROOT_STATE_DIR="'"$root_state"'"
+      ROOT_VERSION_FILE="'"${root_state}/version"'"
+      FEATURES_FILE="'"${root_state}/installed-features"'"
+      INSTALL_STATE_FILE="'"${root_state}/install-state.json"'"
+      HAPPY_HOME="'"${home_dir}/.happy"'"
+      HAPPY_ACCESS_KEY="'"${home_dir}/.happy/access.key"'"
+      HAPPY_SETTINGS="'"${home_dir}/.happy/settings.json"'"
+      HAPPY_DAEMON_STATE="'"${home_dir}/.happy/daemon.state.json"'"
+      SSH_CONFIG="'"$ssh_config"'"
+      HAPPY_SERVICE_UNIT="'"$happy_unit"'"
+      doctor json
+    '
+  )" || healthy_status=$?
+
+  # Now flip the root-state version so it no longer matches the running
+  # manager, to exercise the unhealthy path deterministically (a missing
+  # PATH stub would silently fall back to a real binary on a real DevBox).
+  printf '9.9.9\n' >"${root_state}/version"
+
+  local unhealthy_output unhealthy_status=0
+  unhealthy_output="$(
+    PATH="${bin_dir}:/usr/bin:/bin" \
+    HOME="$home_dir" \
+    bash -c '
+      # shellcheck source=/dev/null
+      source "'"$manager_functions"'"
+      ROOT_STATE_DIR="'"$root_state"'"
+      ROOT_VERSION_FILE="'"${root_state}/version"'"
+      FEATURES_FILE="'"${root_state}/installed-features"'"
+      INSTALL_STATE_FILE="'"${root_state}/install-state.json"'"
+      HAPPY_HOME="'"${home_dir}/.happy"'"
+      HAPPY_ACCESS_KEY="'"${home_dir}/.happy/access.key"'"
+      HAPPY_SETTINGS="'"${home_dir}/.happy/settings.json"'"
+      HAPPY_DAEMON_STATE="'"${home_dir}/.happy/daemon.state.json"'"
+      SSH_CONFIG="'"$ssh_config"'"
+      HAPPY_SERVICE_UNIT="'"$happy_unit"'"
+      doctor json
+    '
+  )" || unhealthy_status=$?
+
+  jq -e '.healthy == true' <<<"$healthy_output" >/dev/null &&
+    [[ "$healthy_status" -eq 0 ]] &&
+    [[ "$(jq -r '.devbox_version' <<<"$healthy_output")" == "$devbox_version" ]] &&
+    [[ "$(jq -r '.runtime.node' <<<"$healthy_output")" == "24.0.0" ]] &&
+    [[ "$(jq -r '.runtime.erlang' <<<"$healthy_output")" != "null" ]] &&
+    [[ "$(jq -r '.services.postgres' <<<"$healthy_output")" == "running" ]] &&
+    [[ "$(jq -r '.authentication.codex' <<<"$healthy_output")" == "true" ]] &&
+    [[ "$(jq -r '.authentication.github' <<<"$healthy_output")" == "true" ]] &&
+    [[ "$(jq -r '.security.happy_dir_permissions' <<<"$healthy_output")" == "true" ]] &&
+    jq -e '.healthy == false' <<<"$unhealthy_output" >/dev/null &&
+    [[ "$unhealthy_status" -eq 1 ]] &&
+    grep -Fq 'doctor:--json)' "$MANAGER" &&
+    grep -Fq 'doctor json' "$NORM_MANAGER"
+}
+
+# P2.2: devbox status is a composite view built from Root-State files and
+# the existing per-domain status commands (ssh_status, auth/github/
+# openrouter status), not a reimplementation of their checks. Extract the
+# function body and re-run it standalone with faked state/collaborators,
+# same technique as doctor_checks_root_state_version below.
+devbox_status_composes_existing_status_commands() {
+  local status_fn
+  status_fn="$(sed -n '/^status() {/,/^}/p' "$MANAGER")"
+
+  [[ -n "$status_fn" ]] || return 1
+
+  local root_version_file="${TEST_TMP}/status-root-version"
+  local install_state_file="${TEST_TMP}/status-install-state.json"
+  local features_file="${TEST_TMP}/status-installed-features"
+  local output
+
+  printf '1.2.3\n' >"$root_version_file"
+  printf '{"profile":"default"}\n' >"$install_state_file"
+  printf 'elixir\n' >"$features_file"
+
+  output="$(
+    bash -c '
+      ROOT_VERSION_FILE="'"$root_version_file"'"
+      INSTALL_STATE_FILE="'"$install_state_file"'"
+      FEATURES_FILE="'"$features_file"'"
+      feature_was_installed() { grep -Fqw "$1" "$FEATURES_FILE"; }
+      ssh_status() { echo "STUB:ssh_status"; }
+      run_as_dev() { echo "STUB:run_as_dev:$*"; }
+      '"$status_fn"'
+      status
+    '
+  )"
+
+  grep -Fq 'DevBox version:      1.2.3' <<<"$output" &&
+    grep -Fq 'Profile:             default' <<<"$output" &&
+    grep -Fq 'elixir             enabled' <<<"$output" &&
+    grep -Fq 'postgres           disabled' <<<"$output" &&
+    grep -Fq 'STUB:ssh_status' <<<"$output" &&
+    grep -Eq '^STUB:run_as_dev:.* auth status$' <<<"$output" &&
+    grep -Eq '^STUB:run_as_dev:.* github status$' <<<"$output" &&
+    grep -Eq '^STUB:run_as_dev:.* openrouter status$' <<<"$output" &&
+    grep -Fq 'status:)' "$MANAGER" &&
+    grep -Fq 'status' "$NORM_MANAGER"
+}
+
+# P1.5: a persisted PGPASSWORD read back from the dev-writable PG_ENV_FILE
+# is interpolated directly into ALTER/CREATE ROLE SQL. Extract the
+# reuse-or-generate block and confirm a tampered value (SQL/shell
+# metacharacters included) is discarded for a fresh password, while a
+# value in the actually-generated format (openssl rand -hex 24) passes
+# through unchanged - re-installing must not silently rotate a good
+# password.
+postgres_password_reuse_validates_the_persisted_format() {
+  local reuse_block
+  reuse_block="$(sed -n '/^  if \[\[ -r "\$PG_ENV_FILE" \]\] &&$/,/^  fi$/p' "$FEATURE_POSTGRES")"
+
+  [[ -n "$reuse_block" ]] || return 1
+
+  local pg_env_file="${TEST_TMP}/postgres-password-env"
+  local valid_password="0123456789abcdef0123456789abcdef0123456789abcdef"
+  local tampered_output valid_output
+
+  printf "PGPASSWORD=' OR '1'='1\n" >"$pg_env_file"
+  tampered_output="$(
+    bash -c '
+      msg_error() { echo "ERROR: $*" >&2; }
+      PG_ENV_FILE="'"$pg_env_file"'"
+      '"$reuse_block"'
+      echo "PG_DB_PASS=$PG_DB_PASS"
+    ' 2>&1
+  )"
+
+  printf 'PGPASSWORD=%s\n' "$valid_password" >"$pg_env_file"
+  valid_output="$(
+    bash -c '
+      msg_error() { echo "ERROR: $*" >&2; }
+      PG_ENV_FILE="'"$pg_env_file"'"
+      '"$reuse_block"'
+      echo "PG_DB_PASS=$PG_DB_PASS"
+    '
+  )"
+
+  local tampered_password
+  tampered_password="$(grep -oP '^PG_DB_PASS=\K.*' <<<"$tampered_output")"
+
+  [[ "$tampered_password" != "' OR '1'='1" ]] &&
+    [[ "$tampered_password" =~ ^[0-9a-f]{48}$ ]] &&
+    grep -Fq 'ERROR: Persisted PostgreSQL password has an unexpected format' <<<"$tampered_output" &&
+    [[ "$valid_output" == "PG_DB_PASS=${valid_password}" ]]
+}
+
+# Reuse validation must run before the value ever reaches the SQL commands.
+postgres_password_is_validated_before_sql_interpolation() {
+  local validate_line sql_line
+
+  validate_line="$(grep -n '\^\[0-9a-f\]{48}\$' "$FEATURE_POSTGRES" | head -n1 | cut -d: -f1)"
+  sql_line="$(grep -n 'ALTER ROLE' "$FEATURE_POSTGRES" | head -n1 | cut -d: -f1)"
+
+  [[ -n "$validate_line" && -n "$sql_line" ]] &&
+    ((validate_line < sql_line))
+}
+
+# P1.4: downloaded artifacts without a checksum to verify (OTP/Elixir are
+# checksum-verified separately; the mise installer script isn't) used
+# predictable, fixed /tmp paths - unpredictable via mktemp closes that gap
+# for the artifacts this PR can reasonably harden without taking on an
+# external, frequently-changing checksum to maintain for mise.run itself.
+temp_artifact_downloads_use_unpredictable_paths() {
+  grep -Fq 'otp_tarball="$(mktemp)"' "$FEATURE_ELIXIR" &&
+    grep -Fq 'elixir_zip="$(mktemp)"' "$FEATURE_ELIXIR" &&
+    grep -Fq 'mise_installer="$(mktemp)"' "$FEATURE_TOOLING" &&
+    ! grep -Fq '/tmp/devbox-otp.tar.gz' "$FEATURE_ELIXIR" &&
+    ! grep -Fq '/tmp/devbox-elixir.zip' "$FEATURE_ELIXIR" &&
+    ! grep -Fq '/tmp/devbox-mise-install.sh' "$FEATURE_TOOLING"
+}
+
+# P1.3: install.sh resolves DEVBOX_REF to a commit SHA once, up front, so
+# every module fetch in this run (lib/*.sh, features/*.sh, bin/devbox.sh -
+# ~10 separate downloads) uses the exact same commit even if the branch
+# moves mid-install. Extract the resolution block and exercise both the
+# success and the fallback path with a stubbed curl (no real GitHub API
+# dependency in this test).
+install_pins_module_fetches_to_a_resolved_commit() {
+  local resolve_block
+  resolve_block="$(sed -n '/^resolve_devbox_ref_to_commit() {/,/^fi$/p' "$INSTALL_SCRIPT")"
+
+  [[ -n "$resolve_block" ]] || return 1
+
+  local bin_dir="${TEST_TMP}/commit-pin-bin"
+  mkdir -p "$bin_dir"
+
+  cat <<'EOF' >"${bin_dir}/curl"
+#!/usr/bin/env bash
+printf '{"sha":"deadbeefdeadbeefdeadbeefdeadbeefdeadbeef","other":"noise"}'
+EOF
+  chmod 0755 "${bin_dir}/curl"
+
+  local output
+  output="$(
+    PATH="${bin_dir}:/usr/bin:/bin" \
+    bash -c '
+      msg_ok() { echo "OK: $*"; }
+      msg_info() { echo "INFO: $*"; }
+      DEVBOX_GITHUB_REPO="c4kingpin/Scripts"
+      DEVBOX_REF="master"
+      '"$resolve_block"'
+      echo "DEVBOX_REF=$DEVBOX_REF"
+      echo "devbox_resolved_commit=$devbox_resolved_commit"
+    '
+  )"
+
+  grep -Fq "OK: Pinned installer modules to commit deadbeefdeadbeefdeadbeefdeadbeefdeadbeef" <<<"$output" &&
+    grep -Fq "DEVBOX_REF=deadbeefdeadbeefdeadbeefdeadbeefdeadbeef" <<<"$output" &&
+    grep -Fq "devbox_resolved_commit=deadbeefdeadbeefdeadbeefdeadbeefdeadbeef" <<<"$output"
+}
+
+# A failed/empty API response (rate limit, network blip, nonexistent ref)
+# must not block the install - fall back to fetching modules by the ref
+# string directly, exactly like every install did before this feature.
+install_falls_back_to_the_ref_when_resolution_fails() {
+  local resolve_block
+  resolve_block="$(sed -n '/^resolve_devbox_ref_to_commit() {/,/^fi$/p' "$INSTALL_SCRIPT")"
+
+  [[ -n "$resolve_block" ]] || return 1
+
+  local bin_dir="${TEST_TMP}/commit-pin-fallback-bin"
+  mkdir -p "$bin_dir"
+
+  cat <<'EOF' >"${bin_dir}/curl"
+#!/usr/bin/env bash
+exit 22
+EOF
+  chmod 0755 "${bin_dir}/curl"
+
+  local output
+  output="$(
+    PATH="${bin_dir}:/usr/bin:/bin" \
+    bash -c '
+      msg_ok() { echo "OK: $*"; }
+      msg_info() { echo "INFO: $*"; }
+      DEVBOX_GITHUB_REPO="c4kingpin/Scripts"
+      DEVBOX_REF="master"
+      '"$resolve_block"'
+      echo "DEVBOX_REF=$DEVBOX_REF"
+      echo "devbox_resolved_commit=[$devbox_resolved_commit]"
+    '
+  )"
+
+  grep -Fq "INFO: Could not resolve 'master' to a commit" <<<"$output" &&
+    grep -Fq "DEVBOX_REF=master" <<<"$output" &&
+    grep -Fq "devbox_resolved_commit=[]" <<<"$output"
+}
+
+# P1.2: the LXC E2E test's idempotency re-run now uses the documented
+# `curl | bash` one-liner (where $0 is "bash", not a file path) instead of
+# downloading to a file first, so that invocation form is actually
+# exercised somewhere in CI rather than only asserted against as a README
+# string (installer_curl_pipeable_from_master, above).
+lxc_integration_test_exercises_the_curl_pipe_path() {
+  grep -Fq '| bash"' "$LXC_INTEGRATION_TEST" &&
+    grep -Fq '"$invocation" == "pipe"' "$LXC_INTEGRATION_TEST" &&
+    grep -Fq 'install_devbox pipe' "$LXC_INTEGRATION_TEST" &&
+    grep -Fq -- '-o /tmp/devbox-install.sh && bash /tmp/devbox-install.sh' "$LXC_INTEGRATION_TEST"
+}
+
+# P1.1: a real install-A -> update A->B -> rollback -> back-to-A sequence
+# against a fully faked Root-State directory (readonly stripped so
+# ROOT_STATE_DIR/ACTIVE_REF_FILE/PREVIOUS_REF_FILE can point at a temp
+# fixture instead of the real /var/lib/devbox, same technique as the
+# doctor --json and workspace tests use).
+update_and_rollback_round_trip_restores_the_active_ref() {
+  local root_state="${TEST_TMP}/rollback-roundtrip-root-state"
+  local bin_dir="${TEST_TMP}/rollback-roundtrip-bin"
+  local manager_functions="${TEST_TMP}/rollback-roundtrip-manager-functions.sh"
+  local output_file="${TEST_TMP}/rollback-roundtrip-output.log"
+
+  mkdir -p "$root_state" "$bin_dir"
+
+  printf 'release:v1.0.0\n' >"${root_state}/active-ref"
+
+  cat <<'EOF' >"${bin_dir}/curl"
+#!/usr/bin/env bash
+out=""
+prev=""
+for arg in "$@"; do
+  if [[ "$prev" == "-o" ]]; then
+    out="$arg"
+  fi
+  prev="$arg"
+done
+printf '#!/usr/bin/env bash\necho ran fake installer\n' >"$out"
+chmod 0755 "$out"
+EOF
+  chmod 0755 "${bin_dir}/curl"
+
+  sed 's/^readonly //' "$MANAGER" | head -n -1 >"$manager_functions"
+
+  (
+    set -Eeuo pipefail
+    PATH="${bin_dir}:/usr/bin:/bin"
+    # shellcheck source=/dev/null
+    source "$manager_functions"
+    # shellcheck disable=SC2034 # read by update_devbox below (sourced at runtime)
+    ROOT_STATE_DIR="$root_state"
+    ACTIVE_REF_FILE="${root_state}/active-ref"
+    PREVIOUS_REF_FILE="${root_state}/previous-ref"
+    # shellcheck disable=SC2034 # read by record_previous_update_state below (sourced at runtime)
+    PREVIOUS_VERSION_FILE="${root_state}/previous-version"
+    # shellcheck disable=SC2317,SC2329
+    require_root() { :; }
+    # shellcheck disable=SC2317,SC2329
+    doctor() { :; }
+    # shellcheck disable=SC2317,SC2329
+    migrate_legacy_previous_update_state() { :; }
+
+    echo "=== update A(v1.0.0) -> B(v2.0.0) ==="
+    update_devbox --to v2.0.0
+    echo "active-ref after update: $(<"$ACTIVE_REF_FILE")"
+    echo "previous-ref after update: $(<"$PREVIOUS_REF_FILE")"
+
+    echo "=== rollback ==="
+    rollback_devbox
+    echo "active-ref after rollback: $(<"$ACTIVE_REF_FILE")"
+    echo "previous-ref after rollback: $(<"$PREVIOUS_REF_FILE")"
+  ) >"$output_file" 2>&1
+
+  grep -Fq "active-ref after update: release:v2.0.0" "$output_file" &&
+    grep -Fq "previous-ref after update: release:v1.0.0" "$output_file" &&
+    grep -Fq "active-ref after rollback: release:v1.0.0" "$output_file" &&
+    grep -Fq "previous-ref after rollback: release:v2.0.0" "$output_file"
+}
+
+# P0.2: migrate_legacy_previous_update_state() reads a dev-writable file
+# as root (via update_devbox()/rollback_devbox()). It must never `source`
+# or `eval` that file's contents - extract the function and run it against
+# a file containing a shell-injection payload disguised as a third env
+# line, confirming nothing executes, while legitimate KEY=VALUE lines
+# still migrate correctly (regression coverage for the existing behavior).
+migrate_legacy_previous_update_state_never_executes_file_contents() {
+  local migrate_fn
+  migrate_fn="$(sed -n '/^migrate_legacy_previous_update_state() {/,/^}/p' "$MANAGER")"
+
+  [[ -n "$migrate_fn" ]] || return 1
+
+  local legacy_file="${TEST_TMP}/legacy-previous-update.env"
+  local previous_ref_file="${TEST_TMP}/legacy-previous-ref"
+  local previous_version_file="${TEST_TMP}/legacy-previous-version"
+  local canary="${TEST_TMP}/legacy-payload-canary"
+  local output
+
+  rm -f "$canary" "$previous_ref_file" "$previous_version_file"
+
+  cat <<'EOF' >"$legacy_file"
+PREVIOUS_MODE=release
+PREVIOUS_TARGET=v1.2.3
+PREVIOUS_VERSION=1.2.3
+touch TEST_TMP_PLACEHOLDER/legacy-payload-canary
+PREVIOUS_TARGET=$(touch TEST_TMP_PLACEHOLDER/legacy-payload-canary)
+EOF
+
+  sed -i "s#TEST_TMP_PLACEHOLDER#${TEST_TMP}#g" "$legacy_file"
+
+  output="$(
+    bash -c '
+      LEGACY_PREVIOUS_UPDATE_FILE="'"$legacy_file"'"
+      PREVIOUS_REF_FILE="'"$previous_ref_file"'"
+      PREVIOUS_VERSION_FILE="'"$previous_version_file"'"
+      '"$migrate_fn"'
+      migrate_legacy_previous_update_state
+    ' 2>&1
+  )"
+
+  [[ ! -e "$canary" ]] &&
+    [[ "$(<"$previous_ref_file")" == "release:v1.2.3" ]] &&
+    [[ "$(<"$previous_version_file")" == "1.2.3" ]] &&
+    [[ ! -f "$legacy_file" ]] &&
+    ! grep -Fq 'source' <<<"$(sed -n '/^migrate_legacy_previous_update_state() {/,/^}/p' "$MANAGER")" &&
+    [[ -z "$output" ]]
+}
+
+# P0.1: a root-executed write into a dev-controlled path must not follow a
+# symlink dev planted there in advance. write_root_owned_file() is shared
+# by ssh_setup()/ssh_disable() (bin/devbox.sh) and the install.sh feature
+# scripts (lib/common.sh's copy); exercise the manager's copy directly by
+# extracting it, since both implementations are identical in behavior.
+write_root_owned_file_refuses_to_follow_a_symlink() {
+  local write_fn reject_fn
+  write_fn="$(sed -n '/^write_root_owned_file() {/,/^}/p' "$MANAGER")"
+  reject_fn="$(sed -n '/^reject_symlink() {/,/^}/p' "$MANAGER")"
+
+  [[ -n "$write_fn" && -n "$reject_fn" ]] || return 1
+
+  local outside_secret="${TEST_TMP}/write-root-owned-outside-secret"
+  local planted_target="${TEST_TMP}/write-root-owned-planted-target"
+  local normal_target="${TEST_TMP}/write-root-owned-normal-target"
+  local symlink_output normal_output symlink_status=0
+
+  printf 'ORIGINAL' >"$outside_secret"
+  ln -s "$outside_secret" "$planted_target"
+
+  symlink_output="$(
+    bash -c '
+      die() { printf "error - %s\n" "$*" >&2; exit 1; }
+      DEV_USER="'"$(id -un)"'"
+      '"$reject_fn"'
+      '"$write_fn"'
+      write_root_owned_file "'"$planted_target"'" 0600 "PWNED"
+    ' 2>&1
+  )" || symlink_status=$?
+
+  normal_output="$(
+    bash -c '
+      die() { printf "error - %s\n" "$*" >&2; exit 1; }
+      DEV_USER="'"$(id -un)"'"
+      '"$reject_fn"'
+      '"$write_fn"'
+      write_root_owned_file "'"$normal_target"'" 0600 "hello"
+    ' 2>&1
+  )"
+
+  [[ "$symlink_status" -ne 0 ]] &&
+    grep -Fq 'it is a symlink' <<<"$symlink_output" &&
+    [[ "$(<"$outside_secret")" == "ORIGINAL" ]] &&
+    [[ -z "$normal_output" ]] &&
+    [[ "$(<"$normal_target")" == "hello" ]] &&
+    [[ "$(stat -c '%a' "$normal_target")" == "600" ]]
+}
+
+# lib/user.sh's developer-directory scaffolding runs on every install.sh
+# invocation (including devbox update on an already-provisioned box), so a
+# symlink dev planted at any of these paths must be rejected before the
+# install -d calls that would otherwise chown/chmod through it.
+developer_scaffold_dirs_are_symlink_guarded() {
+  local dirs_block
+  dirs_block="$(sed -n '/for developer_scaffold_dir in /,/^done$/p' "$NORM_LIB_USER")"
+
+  [[ -n "$dirs_block" ]] &&
+    grep -Fq 'reject_symlink "$developer_scaffold_dir"' <<<"$dirs_block" &&
+    grep -Fq '"${DEV_HOME}/.ssh"' <<<"$dirs_block" &&
+    grep -Fq '"${DEV_HOME}/.config/devbox"' <<<"$dirs_block" &&
+    grep -Fq '"${DEV_HOME}/workspace"' <<<"$dirs_block"
+}
+
+# Static checks that the symlink-unsafe direct-redirect writes identified
+# in #18 (P0.1) were actually replaced, not just supplemented.
+ssh_commands_use_symlink_safe_writes() {
+  grep -Fq 'reject_symlink "${DEV_HOME}/.ssh"' "$MANAGER" &&
+    grep -Fq 'write_root_owned_file "$SSH_KEY_FILE" 0600' "$NORM_MANAGER" &&
+    grep -Fq 'reject_symlink "$STATE_DIR"' "$MANAGER" &&
+    grep -Fq 'write_root_owned_file "$SSH_DISABLED_MARKER" 0600' "$NORM_MANAGER" &&
+    ! grep -Fq '>"$SSH_KEY_FILE"' "$NORM_MANAGER" &&
+    ! grep -Fq ': >"$SSH_DISABLED_MARKER"' "$NORM_MANAGER"
+}
+
+postgres_and_elixir_writes_use_symlink_safe_helper() {
+  grep -Fq 'write_root_owned_file "${DEV_HOME}/.erlang.cookie" 0400' "$NORM_FEATURE_ELIXIR" &&
+    grep -Fq 'reject_symlink "${DEV_HOME}/.erlang.cookie"' "$FEATURE_ELIXIR" &&
+    ! grep -Fq '>"${DEV_HOME}/.erlang.cookie"' "$NORM_FEATURE_ELIXIR" &&
+    ! grep -Fq 'cat <<EOF >"${DEV_HOME}/.pgpass"' "$FEATURE_POSTGRES" &&
+    ! grep -Fq 'cat <<EOF >"$PG_ENV_FILE"' "$FEATURE_POSTGRES"
+}
+
+# P2.1: DEVBOX_VERSION alone doesn't uniquely identify installed code, so
+# devbox version/status also report the installed commit (persisted by
+# install.sh, P1.3).
+devbox_version_reports_the_installed_commit() {
+  local text_output json_output
+
+  text_output="$("$MANAGER" version)"
+  json_output="$("$MANAGER" version --json)"
+
+  grep -Fq 'Commit:' <<<"$text_output" &&
+    jq -e '.commit' <<<"$json_output" >/dev/null &&
+    grep -Fq 'installed_commit' "$MANAGER"
+}
+
+# update --check on a branch used to only say "not version-compared"; it
+# now resolves the branch's current remote commit and compares it against
+# the locally installed one, so a real "up to date"/"update available"
+# state exists for branch updates too, not just releases.
+update_check_compares_branch_commits() {
+  local root_state="${TEST_TMP}/update-check-commit-root-state"
+  local bin_dir="${TEST_TMP}/update-check-commit-bin"
+  local manager_functions="${TEST_TMP}/update-check-commit-manager-functions.sh"
+  local up_to_date_output stale_output
+
+  mkdir -p "$root_state" "$bin_dir"
+
+  cat <<'EOF' >"${bin_dir}/curl"
+#!/usr/bin/env bash
+url="${!#}"
+case "$url" in
+*/commits/feature-branch)
+  echo '{"sha":"cccccccccccccccccccccccccccccccccccccccc"}'
+  ;;
+*)
+  echo "unexpected curl invocation: $url" >&2
+  exit 22
+  ;;
+esac
+EOF
+  chmod 0755 "${bin_dir}/curl"
+
+  sed 's/^readonly //' "$MANAGER" | head -n -1 >"$manager_functions"
+
+  printf 'cccccccccccccccccccccccccccccccccccccccc\n' >"${root_state}/commit"
+  up_to_date_output="$(
+    PATH="${bin_dir}:/usr/bin:/bin" \
+    bash -c '
+      # shellcheck source=/dev/null
+      source "'"$manager_functions"'"
+      ROOT_COMMIT_FILE="'"${root_state}/commit"'"
+      require_root() { :; }
+      update_devbox --branch feature-branch --check
+    '
+  )"
+
+  printf 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n' >"${root_state}/commit"
+  stale_output="$(
+    PATH="${bin_dir}:/usr/bin:/bin" \
+    bash -c '
+      # shellcheck source=/dev/null
+      source "'"$manager_functions"'"
+      ROOT_COMMIT_FILE="'"${root_state}/commit"'"
+      require_root() { :; }
+      update_devbox --branch feature-branch --check
+    '
+  )"
+
+  grep -Fq "Already up to date (branch 'feature-branch' at cccccccccccccccccccccccccccccccccccccccc)" <<<"$up_to_date_output" &&
+    grep -Fq "Update available on branch 'feature-branch': aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa -> cccccccccccccccccccccccccccccccccccccccc" <<<"$stale_output"
+}
+
+# P2.3: `VAR=value curl ... | bash` only sets VAR in curl's process, not
+# bash's - README examples must put the override on the bash side of the
+# pipe (`curl ... | env VAR=value bash`) for it to actually reach the
+# installer.
+readme_pipe_examples_pass_env_vars_to_bash_not_curl() {
+  ! grep -Eq '^(DEVBOX_PROFILE|DEVBOX_FEATURES|DEVBOX_AUTONOMY|SSH_AUTHORIZED_KEY)=.*\\$' \
+    "${PROJECT_ROOT}/README.md" &&
+    grep -Fq 'env DEVBOX_PROFILE=minimal bash' "${PROJECT_ROOT}/README.md" &&
+    grep -Fq 'env DEVBOX_FEATURES=postgres bash' "${PROJECT_ROOT}/README.md" &&
+    grep -Fq 'env DEVBOX_AUTONOMY=autonomous bash' "${PROJECT_ROOT}/README.md" &&
+    grep -Fq 'env SSH_AUTHORIZED_KEY=' "${PROJECT_ROOT}/README.md"
+}
+
+# P2.4: SC2086/SC2154 catch real word-splitting/quoting and
+# unassigned-variable bugs; a global --exclude for them can let a real new
+# finding pass silently. A repo-wide `shellcheck -x --exclude=SC1090,SC1091`
+# pass (i.e. everything except the two that are structurally unavoidable -
+# dynamically sourced, downloaded modules shellcheck can't statically
+# follow) currently finds nothing to disable locally, so no per-line
+# `# shellcheck disable=SC2086` exceptions exist anywhere in the repo
+# either. This only guards against the global exclusion creeping back into
+# CI/docs; it isn't itself a substitute for the "Run ShellCheck" CI step.
+shellcheck_exceptions_are_not_globally_disabled() {
+  local repo_root="${PROJECT_ROOT}/.."
+
+  ! grep -Fq 'SC2086' "${repo_root}/.github/workflows/ci.yml" &&
+    ! grep -Fq 'SC2154' "${repo_root}/.github/workflows/ci.yml" &&
+    ! grep -Fq 'SC2086' "${repo_root}/README.md" &&
+    ! grep -Fq 'SC2154' "${repo_root}/README.md" &&
+    ! grep -Fq 'SC2086' "${PROJECT_ROOT}/README.md" &&
+    ! grep -Fq 'SC2154' "${PROJECT_ROOT}/README.md" &&
+    grep -Fq 'exclude=SC1090,SC1091' "${repo_root}/.github/workflows/ci.yml"
+}
+
+# P3 (#10/#27): redis is a fully optional feature module, following the
+# same shape as postgres/elixir - its own features/*.sh file, gated by
+# feature_enabled/feature_was_installed, never on by default in either
+# built-in profile (opt in explicitly via DEVBOX_FEATURES).
+redis_is_a_separate_optional_feature_disabled_by_default() {
+  grep -Fq 'DEVBOX_ALL_OPTIONAL_FEATURES="elixir postgres redis"' "$INSTALL_SCRIPT" &&
+    grep -Fq 'default) devbox_profile_features="elixir postgres" ;;' "$INSTALL_SCRIPT" &&
+    grep -Fq 'minimal) devbox_profile_features="" ;;' "$INSTALL_SCRIPT" &&
+    grep -Fq 'features/redis.sh' "$INSTALL_SCRIPT" &&
+    grep -Fq 'if feature_enabled redis; then' "$INSTALL_SCRIPT" &&
+    grep -Fq 'install_redis_package' "$INSTALL_SCRIPT" &&
+    grep -Fq 'enable_redis_service' "$INSTALL_SCRIPT" &&
+    grep -Fq 'install_redis_package() {' "$FEATURE_REDIS" &&
+    grep -Fq 'enable_redis_service() {' "$FEATURE_REDIS" &&
+    grep -Fq 'redis-server' "$FEATURE_REDIS"
+}
+
+redis_validation_and_doctor_are_feature_aware() {
+  local validation_block
+  validation_block="$(sed -n '/^msg_info "Validating Installation"/,/^msg_ok "Validated Installation"/p' "$INSTALL_SCRIPT")"
+
+  grep -Fq 'if feature_enabled redis; then' <<<"$validation_block" &&
+    grep -Fq 'redis-server.service' <<<"$validation_block" &&
+    grep -Fq 'feature_was_installed redis' "$MANAGER" &&
+    grep -Fq 'redis-cli' "$MANAGER" &&
+    grep -Fq 'redis: (if $redis == "" then null else $redis end)' "$NORM_MANAGER"
+}
+
+# #43: the remote-access layer is a swappable, optional provider - Happy
+# stays the default, but DEVBOX_REMOTE=none must produce a fully usable
+# DevBox that never installs or configures Happy at all.
+devbox_remote_defaults_to_happy_and_validates_input() {
+  grep -Fq 'DEVBOX_REMOTE="${DEVBOX_REMOTE:-happy}"' "$INSTALL_SCRIPT" &&
+    grep -Fq 'happy | none) ;;' "$NORM_INSTALL" &&
+    grep -Fq 'Invalid DEVBOX_REMOTE' "$INSTALL_SCRIPT"
+}
+
+install_gates_happy_installation_on_remote_provider() {
+  grep -Fq 'if [[ "$DEVBOX_REMOTE" == "happy" ]]; then' "$NORM_INSTALL" &&
+    grep -Fq 'install_happy' "$NORM_INSTALL" &&
+    grep -Fq 'install_happy_daemon_service' "$NORM_INSTALL" &&
+    grep -Fq 'printf '\''%s\n'\'' "$DEVBOX_REMOTE" >"${ROOT_STATE_DIR}/remote-provider"' "$INSTALL_SCRIPT" &&
+    grep -Fq '"remote": "${DEVBOX_REMOTE}"' "$INSTALL_SCRIPT" &&
+    grep -Fq '"${ROOT_STATE_DIR}/remote-provider"' "$NORM_INSTALL"
+}
+
+# No REMOTE_PROVIDER_FILE means the box predates #43, when Happy was
+# unconditionally installed - migrating it as "happy" (not "unknown" or
+# erroring) is the whole backward-compatibility point.
+remote_provider_is_persisted_and_migrated_as_happy() {
+  local configured_fn
+  configured_fn="$(sed -n '/^configured_remote_provider() {/,/^}/p' "$MANAGER")"
+
+  [[ -n "$configured_fn" ]] || return 1
+
+  local provider_file="${TEST_TMP}/remote-provider-migration-test"
+  local happy_result none_result missing_result
+
+  printf 'happy\n' >"$provider_file"
+  happy_result="$(bash -c 'REMOTE_PROVIDER_FILE="'"$provider_file"'"; '"$configured_fn"'; configured_remote_provider')"
+
+  printf 'none\n' >"$provider_file"
+  none_result="$(bash -c 'REMOTE_PROVIDER_FILE="'"$provider_file"'"; '"$configured_fn"'; configured_remote_provider')"
+
+  missing_result="$(bash -c 'REMOTE_PROVIDER_FILE="'"${TEST_TMP}/does-not-exist"'"; '"$configured_fn"'; configured_remote_provider')"
+
+  [[ "$happy_result" == "happy" ]] &&
+    [[ "$none_result" == "none" ]] &&
+    [[ "$missing_result" == "happy" ]]
+}
+
+# devbox status/doctor must reflect and respect the configured provider:
+# status shows it, doctor --json reports it, and doctor's Happy-specific
+# checks (pairing, daemon, boot service, credential permissions) are
+# skipped entirely - not just reported as failing - when it's "none".
+status_and_doctor_are_remote_provider_aware() {
+  grep -Fq 'configured_remote_provider' "$MANAGER" &&
+    grep -Fq 'Remote provider:' "$NORM_MANAGER" &&
+    grep -Fq 'remote_provider: $remote_provider' "$NORM_MANAGER" &&
+    grep -Fq 'if [[ "$remote_provider" == "happy" ]]; then' "$NORM_MANAGER" &&
+    grep -Fq 'Happy is paired' "$MANAGER"
+}
+
+# update_devbox() must thread the box's existing provider selection back
+# into the re-run installer, not let it silently fall back to "happy".
+update_devbox_passes_through_the_persisted_remote_provider() {
+  local fake_repo="${TEST_TMP}/remote-provider-update-fake-repo"
+  local output_file="${TEST_TMP}/remote-provider-update-output.log"
+  local bin_dir="${TEST_TMP}/remote-provider-update-bin"
+  local manager_functions="${TEST_TMP}/remote-provider-update-manager-functions.sh"
+  local provider_file="${TEST_TMP}/remote-provider-update-state"
+
+  mkdir -p "$fake_repo" "$bin_dir"
+  printf 'none\n' >"$provider_file"
+
+  cat <<'EOF' >"${fake_repo}/install.sh"
+#!/usr/bin/env bash
+echo "DEVBOX_REMOTE=${DEVBOX_REMOTE:-<unset>}"
+EOF
+  chmod 0755 "${fake_repo}/install.sh"
+
+  cat <<EOF >"${bin_dir}/curl"
+#!/usr/bin/env bash
+out=""
+prev=""
+for arg in "\$@"; do
+  if [[ "\$prev" == "-o" ]]; then
+    out="\$arg"
+  fi
+  prev="\$arg"
+done
+cp "${fake_repo}/install.sh" "\$out"
+EOF
+  chmod 0755 "${bin_dir}/curl"
+
+  sed 's/^readonly //' "$MANAGER" | head -n -1 >"$manager_functions"
+
+  (
+    set -Eeuo pipefail
+    PATH="${bin_dir}:/usr/bin:/bin"
+    # shellcheck source=/dev/null
+    source "$manager_functions"
+    # shellcheck disable=SC2034 # read by update_devbox below (sourced at runtime)
+    REMOTE_PROVIDER_FILE="$provider_file"
+    # shellcheck disable=SC2317,SC2329
+    require_root() { :; }
+    # shellcheck disable=SC2317,SC2329
+    doctor() { :; }
+    update_devbox --branch feature-branch
+  ) >"$output_file" 2>&1 || true
+
+  grep -Fq "DEVBOX_REMOTE=none" "$output_file"
+}
+
 doctor_checks_root_state_version() {
   local check_block
   check_block="$(sed -n '/if \[\[ -r "\$ROOT_VERSION_FILE" \]\]; then/,/^  fi$/p' "$MANAGER")"
@@ -1116,7 +2002,7 @@ doctor_checks_root_state_version() {
 # user's .bashrc, i.e. after somebody had already logged in interactively.
 happy_daemon_starts_at_boot() {
   grep -Fq 'install_happy_daemon_service() {' "$FEATURE_HAPPY" &&
-    grep -Fxq 'install_happy_daemon_service' "$INSTALL_SCRIPT" &&
+    grep -Fq 'install_happy_daemon_service' "$NORM_INSTALL" &&
     grep -Fq 'HAPPY_SERVICE="devbox-happy-daemon.service"' "$FEATURE_HAPPY" &&
     grep -Fq 'HAPPY_SERVICE_UNIT="/etc/systemd/system/${HAPPY_SERVICE}"' "$FEATURE_HAPPY" &&
     # Runs as dev with a dev-shaped HOME, only once the network is up.
@@ -1246,12 +2132,28 @@ doctor_checks_happy_daemon_service() {
 # silent. install_agent_limit_notify has to run after Happy (it shells out
 # to `happy notify`) and wire both agents up: a Claude StopFailure hook
 # (matcher: rate_limit|billing_error) and a Codex `notify` command.
+# install_agent_limit_notify has to live in the same DEVBOX_REMOTE=happy
+# gate as install_happy/install_happy_daemon_service: the notify scripts
+# shell out to `happy notify`, so they're pointless (and shouldn't be
+# installed) on a box configured with no remote provider.
+extract_first_happy_remote_gate() {
+  awk '
+    /^if \[\[ "\$DEVBOX_REMOTE" == "happy" \]\]; then$/ { flag=1 }
+    flag { print }
+    flag && /^fi$/ { exit }
+  ' "$INSTALL_SCRIPT"
+}
+
 agent_limit_notify_is_installed_and_wired() {
+  local happy_gate
+  happy_gate="$(extract_first_happy_remote_gate)"
+
   grep -Fq 'install_agent_limit_notify() {' "$FEATURE_AGENT_NOTIFY" &&
-    grep -Fxq 'install_agent_limit_notify' "$INSTALL_SCRIPT" &&
-    grep -Fq 'install_happy_daemon_service' "$INSTALL_SCRIPT" &&
-    (($(grep -Fn 'install_happy_daemon_service' "$INSTALL_SCRIPT" | head -1 | cut -d: -f1) \
-      < $(grep -Fn 'install_agent_limit_notify' "$INSTALL_SCRIPT" | head -1 | cut -d: -f1))) &&
+    grep -Fq 'install_happy' <<<"$happy_gate" &&
+    grep -Fq 'install_happy_daemon_service' <<<"$happy_gate" &&
+    grep -Fq 'install_agent_limit_notify' <<<"$happy_gate" &&
+    (($(grep -Fn 'install_happy_daemon_service' <<<"$happy_gate" | head -1 | cut -d: -f1) \
+      < $(grep -Fn 'install_agent_limit_notify' <<<"$happy_gate" | head -1 | cut -d: -f1))) &&
     grep -Fq '"${DEV_HOME}/.local/bin/devbox-agent-limit-notify"' "$FEATURE_AGENT_NOTIFY" &&
     grep -Fq '"${DEV_HOME}/.local/bin/devbox-claude-limit-detect"' "$FEATURE_AGENT_NOTIFY" &&
     grep -Fq '"${DEV_HOME}/.local/bin/devbox-codex-limit-detect"' "$FEATURE_AGENT_NOTIFY" &&
@@ -1434,6 +2336,7 @@ run_test "Erlang pinned to a verified release" erlang_is_pinned_to_a_verified_re
 run_test "precompiled Ubuntu Erlang build" erlang_comes_from_the_precompiled_ubuntu_build
 run_test "Erlang cookie provisioned" erlang_cookie_is_provisioned
 run_test "installer requires Ubuntu" installer_requires_ubuntu
+run_test "installer does not claim Ubuntu 20.04 support" installer_does_not_claim_ubuntu_20_04_support
 run_test "Elixir pinned to the Erlang OTP major" elixir_is_pinned_to_the_erlang_otp_major
 run_test "Claude CLI installed alongside Codex CLI" claude_cli_is_installed
 run_test "doctor checks Claude CLI" doctor_checks_claude_alongside_codex
@@ -1465,14 +2368,42 @@ run_test "updates preserve user state" update_preserves_user_state
 run_test "managed agent CLIs are pinned, not @latest" managed_agent_clis_are_pinned_not_latest
 run_test "versions.env matches embedded defaults" versions_env_matches_embedded_defaults
 run_test "devbox version reports the manifest" devbox_version_command_reports_the_manifest
+run_test "devbox version --json reports the manifest" devbox_version_json_reports_the_manifest
 run_test "toolchain artifacts are checksum-verified" downloaded_toolchain_artifacts_are_checksum_verified
 run_test "checksums.env matches embedded checksums" checksums_env_matches_embedded_checksums
 run_test "complete stack validation" installer_validates_complete_stack
 run_test "postgres package is a separate optional feature" postgres_package_is_a_separate_optional_feature
 run_test "validation skips checks for disabled features" validation_skips_checks_for_disabled_features
 run_test "install.sh records DevBox state" install_script_records_devbox_state
+run_test "install.sh classifies active-ref mode" install_script_classifies_active_ref_mode
 run_test "install.sh migrates legacy user-state features" install_script_migrates_legacy_user_state_features
 run_test "doctor is feature-aware" doctor_is_feature_aware
+run_test "devbox status composes existing status commands" devbox_status_composes_existing_status_commands
+run_test "workspace list/doctor report project health read-only" workspace_list_and_doctor_report_project_health_read_only
+run_test "doctor --json reports a valid summary matching the exit code" doctor_json_reports_a_valid_summary_matching_the_exit_code
+run_test "write_root_owned_file refuses to follow a symlink" write_root_owned_file_refuses_to_follow_a_symlink
+run_test "developer scaffold directories are symlink-guarded" developer_scaffold_dirs_are_symlink_guarded
+run_test "ssh commands use symlink-safe writes" ssh_commands_use_symlink_safe_writes
+run_test "postgres/elixir writes use the symlink-safe helper" postgres_and_elixir_writes_use_symlink_safe_helper
+run_test "legacy previous-update state never executes file contents" migrate_legacy_previous_update_state_never_executes_file_contents
+run_test "update and rollback round trip restores the active ref" update_and_rollback_round_trip_restores_the_active_ref
+run_test "LXC integration test exercises the curl | bash path" lxc_integration_test_exercises_the_curl_pipe_path
+run_test "install pins module fetches to a resolved commit" install_pins_module_fetches_to_a_resolved_commit
+run_test "install falls back to the ref when resolution fails" install_falls_back_to_the_ref_when_resolution_fails
+run_test "temp artifact downloads use unpredictable paths" temp_artifact_downloads_use_unpredictable_paths
+run_test "postgres password reuse validates the persisted format" postgres_password_reuse_validates_the_persisted_format
+run_test "postgres password is validated before SQL interpolation" postgres_password_is_validated_before_sql_interpolation
+run_test "devbox version reports the installed commit" devbox_version_reports_the_installed_commit
+run_test "update --check compares branch commits" update_check_compares_branch_commits
+run_test "README pipe examples pass env vars to bash, not curl" readme_pipe_examples_pass_env_vars_to_bash_not_curl
+run_test "shellcheck exceptions are not globally disabled" shellcheck_exceptions_are_not_globally_disabled
+run_test "redis is a separate optional feature, disabled by default" redis_is_a_separate_optional_feature_disabled_by_default
+run_test "redis validation and doctor are feature-aware" redis_validation_and_doctor_are_feature_aware
+run_test "DEVBOX_REMOTE defaults to happy and validates input" devbox_remote_defaults_to_happy_and_validates_input
+run_test "install gates Happy installation on remote provider" install_gates_happy_installation_on_remote_provider
+run_test "remote provider is persisted and migrated as happy" remote_provider_is_persisted_and_migrated_as_happy
+run_test "status/doctor are remote-provider aware" status_and_doctor_are_remote_provider_aware
+run_test "update passes through the persisted remote provider" update_devbox_passes_through_the_persisted_remote_provider
 run_test "doctor checks root state version" doctor_checks_root_state_version
 run_test "Happy daemon starts at boot" happy_daemon_starts_at_boot
 run_test "Happy .bashrc start remains a fallback" happy_bashrc_start_remains_as_fallback

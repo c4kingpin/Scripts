@@ -27,7 +27,7 @@ install_erlang() {
     printf '%s' "${VERSION_ID}"
   )"
 
-  otp_tarball="/tmp/devbox-otp.tar.gz"
+  otp_tarball="$(mktemp)"
 
   curl_with_retry \
     "https://builds.hex.pm/builds/otp/${otp_arch}/${otp_os}/OTP-${ERLANG_VERSION}.tar.gz" \
@@ -79,19 +79,28 @@ install_erlang() {
     fi
   done
 
-  if [[ ! -f "${DEV_HOME}/.erlang.cookie" ]]; then
-    openssl rand \
-      -hex 32 \
-      >"${DEV_HOME}/.erlang.cookie"
+  # P0.1: reject a symlinked cookie path outright, whether or not we're
+  # about to (re)generate it - a symlink pointing at an existing regular
+  # file would otherwise pass the plain `-f` reuse check below too.
+  reject_symlink "${DEV_HOME}/.erlang.cookie"
+
+  if [[ -f "${DEV_HOME}/.erlang.cookie" ]]; then
+    chown \
+      "$DEV_USER:$DEV_USER" \
+      "${DEV_HOME}/.erlang.cookie"
+
+    chmod \
+      0400 \
+      "${DEV_HOME}/.erlang.cookie"
+  else
+    local erlang_cookie
+    erlang_cookie="$(openssl rand -hex 32)"
+
+    write_root_owned_file \
+      "${DEV_HOME}/.erlang.cookie" \
+      0400 \
+      "$erlang_cookie"
   fi
-
-  chown \
-    "$DEV_USER:$DEV_USER" \
-    "${DEV_HOME}/.erlang.cookie"
-
-  chmod \
-    0400 \
-    "${DEV_HOME}/.erlang.cookie"
 
   if ! run_as_dev erl \
     -noshell \
@@ -107,7 +116,7 @@ install_erlang() {
 install_elixir_and_phoenix() {
   msg_info "Installing Elixir ${ELIXIR_VERSION} and Phoenix ${PHOENIX_VERSION}"
 
-  elixir_zip="/tmp/devbox-elixir.zip"
+  elixir_zip="$(mktemp)"
 
   curl_with_retry \
     "https://github.com/elixir-lang/elixir/releases/download/v${ELIXIR_VERSION}/elixir-otp-${ERLANG_OTP_MAJOR}.zip" \

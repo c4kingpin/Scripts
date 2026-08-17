@@ -89,12 +89,17 @@ require_supported_os() {
   fi
 
   case "${os_id}-${os_version}" in
-    ubuntu-24.04 | ubuntu-22.04 | ubuntu-20.04)
+    ubuntu-24.04 | ubuntu-22.04)
       msg_ok "Supported OS: Ubuntu ${os_version}"
       ;;
     *)
       msg_error "Unsupported OS: ${os_id:-unknown} ${os_version:-unknown}"
-      msg_error "Ubuntu 24.04 LTS is recommended; 22.04 and 20.04 are also supported."
+      # P2.2: 20.04 was previously accepted here, but no OTP 29.0.5
+      # artifact exists for it (see DEVBOX_CHECKSUMS below) - the default
+      # profile always failed on it. Dropped rather than pretending it
+      # works; the recommended path per #18-P2.2 (adding a real 20.04
+      # OTP artifact + checksum + E2E coverage) can restore it later.
+      msg_error "Ubuntu 24.04 LTS is recommended; 22.04 is also supported."
       exit 1
       ;;
   esac
@@ -201,7 +206,7 @@ readonly DEV_HOME="/home/${DEV_USER}"
 readonly ROOT_STATE_DIR="/var/lib/devbox"
 
 # Central version manifest (mirrors devbox/versions.env; see header comment).
-readonly DEVBOX_VERSION="${DEVBOX_VERSION:-1.1.1}"
+readonly DEVBOX_VERSION="${DEVBOX_VERSION:-1.2.1}"
 NODE_VERSION="${NODE_VERSION:-24}"
 readonly NODE_VERSION
 ERLANG_VERSION="${ERLANG_VERSION:-29.0.5}"
@@ -212,12 +217,58 @@ CLAUDE_VERSION="${CLAUDE_VERSION:-2.1.233}"
 HAPPY_VERSION="${HAPPY_VERSION:-1.2.0}"
 
 DEVBOX_REPO_URL="${DEVBOX_REPO_URL:-https://raw.githubusercontent.com/c4kingpin/Scripts}"
+DEVBOX_GITHUB_REPO="${DEVBOX_GITHUB_REPO:-c4kingpin/Scripts}"
 
 # Branch/ref that sibling files (e.g. bin/devbox.sh) are fetched from during
 # this install, so install.sh and the installed manager always come from the
-# same commit. Real commit/tag pinning arrives with release-based updates
-# (P1.3); until then this defaults to the same branch `devbox update` uses.
+# same commit. Defaults to the same branch `devbox update` uses.
 DEVBOX_REF="${DEVBOX_REF:-master}"
+
+# P1.3: DEVBOX_REF is a branch/tag name, resolved by GitHub's CDN
+# independently on every raw.githubusercontent.com fetch below - if the
+# branch moves mid-install, different modules could come from different
+# commits. Resolve it once to the commit it names right now, then fetch
+# every module from that fixed commit instead. No jq dependency: base.sh
+# (which installs it) hasn't been fetched yet at this point.
+resolve_devbox_ref_to_commit() {
+  local ref="$1"
+  local response sha
+
+  response="$(
+    curl \
+      --proto '=https' \
+      --tlsv1.2 \
+      --connect-timeout 15 \
+      --max-time 15 \
+      --fail \
+      --silent \
+      --show-error \
+      --header "Accept: application/vnd.github+json" \
+      "https://api.github.com/repos/${DEVBOX_GITHUB_REPO}/commits/${ref}" \
+      2>/dev/null
+  )" || return 1
+
+  sha="$(
+    printf '%s' "$response" \
+      | grep -o '"sha"[[:space:]]*:[[:space:]]*"[0-9a-f]\{40\}"' \
+      | head -n1 \
+      | grep -o '[0-9a-f]\{40\}'
+  )"
+
+  [[ -n "$sha" ]] || return 1
+
+  printf '%s' "$sha"
+}
+
+devbox_resolved_commit=""
+
+if devbox_resolved_commit="$(resolve_devbox_ref_to_commit "$DEVBOX_REF")"; then
+  msg_ok "Pinned installer modules to commit ${devbox_resolved_commit}"
+  DEVBOX_REF="$devbox_resolved_commit"
+else
+  devbox_resolved_commit=""
+  msg_info "Could not resolve '${DEVBOX_REF}' to a commit; module downloads use the ref directly"
+fi
 
 # Known-good SHA256 checksums for versioned binary artifacts (mirrors
 # devbox/checksums.env). Keyed as "<artifact>:<version-or-otp-major>[:<os>:<arch>]".
@@ -241,6 +292,7 @@ for devbox_module in \
   features/base.sh \
   features/node.sh \
   features/postgres.sh \
+  features/redis.sh \
   features/agents.sh \
   features/happy.sh \
   features/agent-notify.sh \
@@ -256,11 +308,12 @@ rm -f "$devbox_module_tmp"
 
 msg_ok "Loaded DevBox modules"
 
-# Feature selection: base/agents/happy/node/tooling are the DevBox core (an
+# Feature selection: base/agents/node/tooling are the DevBox core (an
 # agent runtime environment without them isn't a DevBox) and always run.
 # elixir and postgres are the heavy, project-specific runtimes a box may not
-# need, so they're the only toggleable features.
-DEVBOX_ALL_OPTIONAL_FEATURES="elixir postgres"
+# need; redis (#10 P3) is a fully optional extra never on by default in
+# either built-in profile - opt in explicitly via DEVBOX_FEATURES.
+DEVBOX_ALL_OPTIONAL_FEATURES="elixir postgres redis"
 
 DEVBOX_PROFILE="${DEVBOX_PROFILE:-default}"
 
@@ -292,6 +345,24 @@ done
 feature_enabled() {
   [[ " $devbox_selected_features " == *" $1 "* ]]
 }
+
+# #43: the remote-access layer is a swappable provider, not a DevBox-core
+# requirement. Happy remains the default and the only implemented provider
+# today; "none" installs no remote layer at all (host console/SSH only).
+# DEVBOX_REMOTE is unset (not "happy") on a re-install/update unless the
+# caller passes it explicitly - update_devbox() in bin/devbox.sh always
+# passes the box's persisted provider through, so a plain re-run of this
+# script (no DEVBOX_REMOTE set) only happens on a genuinely fresh install,
+# where "happy" is the correct default.
+DEVBOX_REMOTE="${DEVBOX_REMOTE:-happy}"
+
+case "$DEVBOX_REMOTE" in
+  happy | none) ;;
+  *)
+    msg_error "Invalid DEVBOX_REMOTE: ${DEVBOX_REMOTE} (expected happy or none)"
+    exit 1
+    ;;
+esac
 
 msg_ok "DevBox profile: ${DEVBOX_PROFILE} (optional features: ${devbox_selected_features:-none})"
 
@@ -365,9 +436,12 @@ create_developer_user
 
 install_codex_cli
 install_claude_cli
-install_happy
-install_happy_daemon_service
-install_agent_limit_notify
+
+if [[ "$DEVBOX_REMOTE" == "happy" ]]; then
+  install_happy
+  install_happy_daemon_service
+  install_agent_limit_notify
+fi
 
 install_mise
 
@@ -385,6 +459,11 @@ if feature_enabled postgres; then
   install_postgres_package
   enable_postgresql_service
   configure_postgres_dev_access
+fi
+
+if feature_enabled redis; then
+  install_redis_package
+  enable_redis_service
 fi
 
 msg_info "Configuring Development Environment"
@@ -616,11 +695,12 @@ fi
 EOF
 fi
 
-if ! grep \
-  -Fq \
-  '# DevBox Happy' \
-  "${DEV_HOME}/.bashrc" \
-  2>/dev/null; then
+if [[ "$DEVBOX_REMOTE" == "happy" ]] &&
+  ! grep \
+    -Fq \
+    '# DevBox Happy' \
+    "${DEV_HOME}/.bashrc" \
+    2>/dev/null; then
 
   cat <<'EOF' >>"${DEV_HOME}/.bashrc"
 
@@ -741,6 +821,34 @@ fi
 printf '%s\n' "$DEVBOX_VERSION" >"${ROOT_STATE_DIR}/version"
 printf '%s\n' "$devbox_selected_features" >"${ROOT_STATE_DIR}/installed-features"
 
+# #43: persists which remote provider this box was configured with, so
+# devbox status/doctor can report it and so a later `devbox update`
+# (which threads the persisted value back in as DEVBOX_REMOTE) doesn't
+# silently fall back to the "happy" default and reconfigure a box that
+# was deliberately installed with DEVBOX_REMOTE=none.
+printf '%s\n' "$DEVBOX_REMOTE" >"${ROOT_STATE_DIR}/remote-provider"
+
+# P1.1: seeds active-ref for a fresh install, so the first `devbox update`
+# has something real to record as "previous" before overwriting it.
+# devbox update itself always overwrites this afterwards with the exact
+# mode it already knows (--to/--branch), which is more accurate than this
+# guess - DEVBOX_REF alone doesn't say whether it's a release tag or a
+# branch name. Note DEVBOX_REF may already be a resolved commit SHA at
+# this point (P1.3), which the branch heuristic below correctly falls
+# into "branch" (a SHA is not a SemVer tag) - the more precise of the two
+# anyway, since it pins the exact commit rather than a moving branch tip.
+if [[ "$DEVBOX_REF" =~ ^v?[0-9]+\.[0-9]+\.[0-9]+ ]]; then
+  devbox_active_mode="release"
+else
+  devbox_active_mode="branch"
+fi
+
+printf '%s:%s\n' "$devbox_active_mode" "$DEVBOX_REF" >"${ROOT_STATE_DIR}/active-ref"
+
+if [[ -n "$devbox_resolved_commit" ]]; then
+  printf '%s\n' "$devbox_resolved_commit" >"${ROOT_STATE_DIR}/commit"
+fi
+
 install_os_version="$(
   . /etc/os-release
   printf '%s' "${VERSION_ID}"
@@ -751,8 +859,10 @@ install_timestamp="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 cat <<EOF >"${ROOT_STATE_DIR}/install-state.json"
 {
   "version": "${DEVBOX_VERSION}",
+  "commit": "${devbox_resolved_commit}",
   "profile": "${DEVBOX_PROFILE}",
   "features": "${devbox_selected_features}",
+  "remote": "${DEVBOX_REMOTE}",
   "os": "${install_os_version}",
   "arch": "${install_arch}",
   "installed_at": "${install_timestamp}"
@@ -763,7 +873,13 @@ chmod \
   0644 \
   "${ROOT_STATE_DIR}/version" \
   "${ROOT_STATE_DIR}/installed-features" \
-  "${ROOT_STATE_DIR}/install-state.json"
+  "${ROOT_STATE_DIR}/install-state.json" \
+  "${ROOT_STATE_DIR}/active-ref" \
+  "${ROOT_STATE_DIR}/remote-provider"
+
+if [[ -f "${ROOT_STATE_DIR}/commit" ]]; then
+  chmod 0644 "${ROOT_STATE_DIR}/commit"
+fi
 
 msg_ok "Recorded DevBox state"
 
@@ -960,16 +1076,18 @@ run_as_dev codex \
 run_as_dev claude \
   --version
 
-# Do not execute Happy during unattended validation.
-run_as_dev npm list \
-  --global \
-  --depth=0 \
-  happy
+if [[ "$DEVBOX_REMOTE" == "happy" ]]; then
+  # Do not execute Happy during unattended validation.
+  run_as_dev npm list \
+    --global \
+    --depth=0 \
+    happy
 
-# Remote access must survive a reboot without an interactive dev login.
-systemctl is-enabled \
-  --quiet \
-  devbox-happy-daemon.service
+  # Remote access must survive a reboot without an interactive dev login.
+  systemctl is-enabled \
+    --quiet \
+    devbox-happy-daemon.service
+fi
 
 if feature_enabled elixir; then
   run_as_dev erl \
@@ -994,6 +1112,15 @@ if feature_enabled postgres; then
     --dbname "$PG_DB_NAME" \
     --no-password \
     --command "SELECT 1;" \
+    >/dev/null
+fi
+
+if feature_enabled redis; then
+  systemctl is-active \
+    --quiet \
+    redis-server.service
+
+  redis-cli ping \
     >/dev/null
 fi
 
@@ -1044,7 +1171,15 @@ echo "The first interactive dev shell starts:"
 echo
 echo "  devbox onboard"
 echo
-echo -e "${YW}After onboarding, use Happy as the primary agent entry point:${CL}"
-echo
-echo "  happy"
-echo "  happy codex"
+if [[ "$DEVBOX_REMOTE" == "happy" ]]; then
+  echo -e "${YW}After onboarding, use Happy as the primary agent entry point:${CL}"
+  echo
+  echo "  happy"
+  echo "  happy codex"
+else
+  echo -e "${YW}No remote provider configured (DEVBOX_REMOTE=none). Use Codex/Claude${CL}"
+  echo -e "${YW}directly, or reach this box over SSH:${CL}"
+  echo
+  echo "  codex"
+  echo "  claude"
+fi

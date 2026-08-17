@@ -11,7 +11,7 @@ set -Eeuo pipefail
 install_mise() {
   msg_info "Installing mise"
 
-  mise_installer="/tmp/devbox-mise-install.sh"
+  mise_installer="$(mktemp)"
 
   curl_with_retry \
     "https://mise.run" \
