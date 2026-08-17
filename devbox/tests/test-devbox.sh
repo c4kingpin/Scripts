@@ -497,6 +497,9 @@ update_check_reports_without_installing() {
   local output_file="${TEST_TMP}/update-check-output.log"
   local bin_dir="${TEST_TMP}/bin-check"
   local manager_functions="${TEST_TMP}/manager-functions-check.sh"
+  local current_version
+
+  current_version="$(grep -oP 'readonly DEVBOX_VERSION="\K[^"]+' "$MANAGER")"
 
   mkdir -p "$bin_dir"
 
@@ -527,7 +530,7 @@ EOF
     update_devbox --check
   ) >"$output_file" 2>&1
 
-  grep -Fq "Update available: 1.1.1 -> v99.0.0" "$output_file" &&
+  grep -Fq "Update available: ${current_version} -> v99.0.0" "$output_file" &&
     ! grep -Fq "Downloading installer" "$output_file"
 }
 
