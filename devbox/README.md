@@ -22,7 +22,7 @@ nachgeladene Module unter [`lib/`](lib) und [`features/`](features):
 und [`lib/user.sh`](lib/user.sh) (Dev-User-Anlage) sind quer genutzte
 Bausteine; [`features/`](features) enthält je eine Datei pro
 Installationsphase (`base.sh`, `node.sh`, `postgres.sh`, `agents.sh`,
-`happy.sh`, `tooling.sh`, `elixir.sh`). Jede Datei definiert nur Funktionen —
+`happy.sh`, `agent-notify.sh`, `tooling.sh`, `elixir.sh`). Jede Datei definiert nur Funktionen —
 `install.sh` ruft sie in derselben Reihenfolge auf, in der die Phasen früher
 inline standen. Die Bootstrap-Kette selbst bleibt bewusst in `install.sh`, da
 sie gebraucht wird, um diese Module überhaupt herunterzuladen. `bin/devbox.sh`
@@ -433,6 +433,27 @@ deaktiviert wurde.
 
 `devbox auth status` und `devbox doctor` melden zusätzlich, ob der Dienst
 installiert und aktiviert ist.
+
+## Push-Benachrichtigung bei Claude-/Codex-Limit
+
+Erreicht eine über Happy laufende Claude- oder Codex-Session ein Usage-/
+Rate-Limit, schickt der Installer dafür automatisch eine Happy-Push-
+Benachrichtigung, statt die Session einfach kommentarlos stehen zu lassen:
+
+- **Claude** meldet sich strukturiert über den `StopFailure`-Hook (feuert nur
+  bei einem echten API-Fehler, nie bei einem normalen Stop) mit
+  `matcher: "rate_limit|billing_error"` in `~/.claude/settings.json`.
+- **Codex** kennt kein vergleichbares strukturiertes Signal; die
+  `notify`-Konfiguration in `~/.codex/config.toml` prüft deshalb konservativ
+  die letzte Assistant-Nachricht auf eindeutige Limit-Formulierungen (z. B.
+  "usage limit", "rate limit reached") und bleibt bei Unsicherheit still.
+
+Beide Detektoren rufen den gemeinsamen Mechanismus unter
+`~/.local/bin/devbox-agent-limit-notify` auf, der die eigentliche
+`happy notify` ausführt und pro Agent höchstens eine Benachrichtigung
+innerhalb eines kurzen Zeitfensters verschickt. Ein bereits vorhandenes
+`~/.codex/config.toml` bleibt wie gewohnt unangetastet — der Installer weist
+dann nur mit einem Hinweis darauf hin, `notify` selbst zu ergänzen.
 
 ## OpenRouter für Codex
 
