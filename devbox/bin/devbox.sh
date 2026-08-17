@@ -1493,8 +1493,14 @@ doctor() {
   local security_happy_dir_permissions=false
   local security_secret_permissions=false
 
-  local checks_target=/dev/stdout
-  [[ "$json_mode" == 1 ]] && checks_target=/dev/null
+  # Duplicated via an fd number (dup2), not reopened by path: opening
+  # "/dev/stdout" (-> /proc/self/fd/1) can fail with EACCES depending on
+  # how the parent process set up the pipe backing fd 1, even though the
+  # process already holds fd 1 open for writing.
+  local checks_fd=1
+  if [[ "$json_mode" == 1 ]]; then
+    exec {checks_fd}>/dev/null
+  fi
 
   # #43: doctor only checks the configured remote provider. A box with
   # DEVBOX_REMOTE=none never installed Happy, so none of its checks apply
@@ -1857,7 +1863,7 @@ doctor() {
     fi
   fi
 
-  } >"$checks_target"
+  } >&"$checks_fd"
 
   if [[ "$json_mode" == 1 ]]; then
     jq \
