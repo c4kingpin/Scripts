@@ -38,6 +38,15 @@ readonly HAPPY_DAEMON_STATE="${HAPPY_HOME}/daemon.state.json"
 readonly HAPPY_SERVICE="devbox-happy-daemon.service"
 readonly HAPPY_SERVICE_UNIT="/etc/systemd/system/${HAPPY_SERVICE}"
 
+# #43: Kisuke Connect, an alternative to Happy as DEVBOX_REMOTE. Kisuke
+# manages its own boot-time service - a systemd --user unit named "kisuke",
+# installed by `kisuke connect`/`kisuke install` itself (not by DevBox).
+# DevBox's only Kisuke-specific boot-time setup is enabling a lingering user
+# session (devbox/features/kisuke.sh) so `systemctl --user` has a D-Bus bus
+# to talk to before anyone has ever logged in interactively.
+readonly KISUKE_HOME="${DEV_HOME}/.kisuke"
+readonly KISUKE_SERVICE="kisuke"
+
 readonly OPENROUTER_ENV="${STATE_DIR}/openrouter.env"
 readonly OPENROUTER_PROFILE="${DEV_HOME}/.codex/openrouter.config.toml"
 readonly OPENROUTER_WRAPPER="${DEV_HOME}/.local/bin/codex-openrouter"
@@ -53,6 +62,7 @@ readonly PHOENIX_VERSION="1.8.9"
 readonly CODEX_VERSION="0.147.0"
 readonly CLAUDE_VERSION="2.1.233"
 readonly HAPPY_VERSION="1.2.0"
+readonly KISUKE_VERSION="1.2.20"
 
 readonly PACKAGE_NAME_PATTERN='^[a-z0-9][a-z0-9+.-]*$'
 
@@ -112,13 +122,15 @@ Commands:
       Same as version, as a JSON object.
 
   auth status
-      Show Happy, Codex and Claude authentication status.
+      Show Codex, Claude and remote-provider (Happy/Kisuke) authentication
+      status.
 
   auth login
-      Authenticate Codex and Claude, pair Happy and start Happy daemon.
+      Authenticate Codex and Claude, then pair/authenticate and start the
+      configured remote provider (Happy or Kisuke).
 
   auth logout
-      Sign out of Happy, Codex and Claude.
+      Sign out of Codex, Claude and the configured remote provider.
 
   openrouter status
       Show OpenRouter fallback configuration.
@@ -145,7 +157,7 @@ Commands:
       Upload the identity key to GitHub.
 
   remote-info
-      Explain Happy remote access.
+      Explain the configured remote provider (Happy, Kisuke, or none).
 
   status
       Show how this box is configured: version, profile, features,
@@ -197,6 +209,9 @@ run_as_dev() {
     (
       cd "$DEV_HOME"
 
+      # XDG_RUNTIME_DIR is required for `systemctl --user` (used by the
+      # Kisuke remote-provider checks) to find dev's D-Bus user session when
+      # invoked from a root shell via runuser, rather than an actual login.
       exec runuser \
         -u "$DEV_USER" \
         -- \
@@ -208,6 +223,7 @@ run_as_dev() {
           LANG="C.UTF-8" \
           LC_ALL="C.UTF-8" \
           PATH="${DEV_HOME}/.local/bin:/usr/local/bin:/usr/bin:/bin" \
+          XDG_RUNTIME_DIR="/run/user/$(id -u "$DEV_USER")" \
           "$@"
     )
   else
@@ -604,6 +620,7 @@ Phoenix:       ${PHOENIX_VERSION}
 Codex CLI:     ${CODEX_VERSION}
 Claude Code:   ${CLAUDE_VERSION}
 Happy:         ${HAPPY_VERSION}
+Kisuke:        ${KISUKE_VERSION}
 EOF
 }
 
@@ -619,6 +636,7 @@ show_version_json() {
     --arg codex_cli "$CODEX_VERSION" \
     --arg claude_code "$CLAUDE_VERSION" \
     --arg happy "$HAPPY_VERSION" \
+    --arg kisuke "$KISUKE_VERSION" \
     '{
       devbox: $devbox,
       commit: $commit,
@@ -628,7 +646,8 @@ show_version_json() {
       phoenix: $phoenix,
       codex_cli: $codex_cli,
       claude_code: $claude_code,
-      happy: $happy
+      happy: $happy,
+      kisuke: $kisuke
     }'
 }
 
@@ -721,10 +740,70 @@ harden_happy_state() {
   done
 }
 
+# Kisuke's on-disk state (~/.kisuke: auth_token, kisuke.db, ...) isn't a
+# documented format the way Happy's access.key/settings.json are, so -
+# unlike happy_is_authenticated() - this shells out to the CLI itself
+# (matching how codex_is_authenticated()/claude_is_authenticated() work)
+# rather than inferring state from files.
+kisuke_is_authenticated() {
+  run_as_dev kisuke whoami \
+    >/dev/null 2>&1
+}
+
+# `systemctl list-unit-files` exits 0 with an empty result for an unknown
+# unit name, so this uses `cat` instead - it fails when there is no unit
+# file to display at all, which is the actual "installed?" question.
+# shellcheck disable=SC2016 # single-quoted on purpose: expands inside the nested `bash -lc` shell, not here
+kisuke_daemon_service_is_installed() {
+  run_as_dev \
+    bash \
+    -lc \
+    'systemctl --user cat "$1" >/dev/null 2>&1' \
+    _ \
+    "${KISUKE_SERVICE}.service"
+}
+
+# shellcheck disable=SC2016 # single-quoted on purpose: expands inside the nested `bash -lc` shell, not here
+kisuke_daemon_service_is_enabled() {
+  run_as_dev \
+    bash \
+    -lc \
+    'systemctl --user is-enabled --quiet "$1"' \
+    _ \
+    "$KISUKE_SERVICE"
+}
+
+# shellcheck disable=SC2016 # single-quoted on purpose: expands inside the nested `bash -lc` shell, not here
+kisuke_daemon_is_running() {
+  run_as_dev \
+    bash \
+    -lc \
+    'systemctl --user is-active --quiet "$1"' \
+    _ \
+    "$KISUKE_SERVICE"
+}
+
+# Kisuke manages the permissions of its own state files; DevBox only
+# tightens the directory itself, the same defense-in-depth it applies to
+# ~/.happy, without guessing at which specific file inside holds the
+# account credential.
+harden_kisuke_state() {
+  install \
+    -d \
+    -m 0700 \
+    "$KISUKE_HOME"
+
+  chmod \
+    0700 \
+    "$KISUKE_HOME"
+}
+
 agents_auth_status() {
   require_dev
 
   local status=0
+  local remote_provider
+  remote_provider="$(configured_remote_provider)"
 
   if codex_is_authenticated; then
     ok "Codex CLI is authenticated"
@@ -740,27 +819,51 @@ agents_auth_status() {
     status=1
   fi
 
-  if happy_is_authenticated; then
-    ok "Happy is authenticated and this DevBox is registered"
-  else
-    warn "Happy is not paired"
-    status=1
-  fi
-
-  if happy_is_authenticated; then
-    if happy_daemon_is_running; then
-      ok "Happy daemon is running"
+  if [[ "$remote_provider" == "happy" ]]; then
+    if happy_is_authenticated; then
+      ok "Happy is authenticated and this DevBox is registered"
     else
-      warn "Happy daemon is not running"
+      warn "Happy is not paired"
+      status=1
     fi
-  fi
 
-  if happy_daemon_service_is_installed &&
-    happy_daemon_service_is_enabled; then
+    if happy_is_authenticated; then
+      if happy_daemon_is_running; then
+        ok "Happy daemon is running"
+      else
+        warn "Happy daemon is not running"
+      fi
+    fi
 
-    ok "Happy daemon starts automatically at boot (${HAPPY_SERVICE})"
-  else
-    warn "Happy daemon does not start at boot; run 'devbox update' as root"
+    if happy_daemon_service_is_installed &&
+      happy_daemon_service_is_enabled; then
+
+      ok "Happy daemon starts automatically at boot (${HAPPY_SERVICE})"
+    else
+      warn "Happy daemon does not start at boot; run 'devbox update' as root"
+    fi
+
+  elif [[ "$remote_provider" == "kisuke" ]]; then
+    if kisuke_is_authenticated; then
+      ok "Kisuke is authenticated and this DevBox is registered"
+    else
+      warn "Kisuke is not authenticated"
+      status=1
+    fi
+
+    if kisuke_daemon_is_running; then
+      ok "Kisuke daemon is running"
+    else
+      warn "Kisuke daemon is not running"
+    fi
+
+    if kisuke_daemon_service_is_installed &&
+      kisuke_daemon_service_is_enabled; then
+
+      ok "Kisuke daemon starts automatically at boot (systemd --user, lingering session)"
+    else
+      warn "Kisuke daemon service is not installed yet; run: devbox auth login"
+    fi
   fi
 
   return "$status"
@@ -768,6 +871,9 @@ agents_auth_status() {
 
 agents_auth_login() {
   require_dev
+
+  local remote_provider
+  remote_provider="$(configured_remote_provider)"
 
   if codex_is_authenticated; then
     ok "Codex CLI is already authenticated"
@@ -798,31 +904,51 @@ agents_auth_login() {
     fi
   fi
 
-  if happy_is_authenticated; then
-    ok "Happy is already paired"
-  else
-    info "Pairing this DevBox with Happy"
-    info "Happy asking you to connect/pair at this point is expected."
-
-    happy auth login
-  fi
-
-  harden_happy_state
-
-  if happy_is_authenticated; then
-    if happy_daemon_is_running; then
-      ok "Happy daemon is already running"
+  if [[ "$remote_provider" == "happy" ]]; then
+    if happy_is_authenticated; then
+      ok "Happy is already paired"
     else
-      info "Starting Happy daemon"
+      info "Pairing this DevBox with Happy"
+      info "Happy asking you to connect/pair at this point is expected."
 
-      if happy daemon start \
-        >/dev/null 2>&1; then
+      happy auth login
+    fi
 
-        ok "Happy daemon started"
+    harden_happy_state
+
+    if happy_is_authenticated; then
+      if happy_daemon_is_running; then
+        ok "Happy daemon is already running"
       else
-        warn "Happy daemon could not be started; run: happy daemon start"
+        info "Starting Happy daemon"
+
+        if happy daemon start \
+          >/dev/null 2>&1; then
+
+          ok "Happy daemon started"
+        else
+          warn "Happy daemon could not be started; run: happy daemon start"
+        fi
       fi
     fi
+
+  elif [[ "$remote_provider" == "kisuke" ]]; then
+    if kisuke_is_authenticated; then
+      ok "Kisuke is already authenticated"
+    else
+      info "Setting up Kisuke Connect"
+      info "Kisuke prints a URL to open on another device; no local browser is needed."
+
+      # `kisuke connect` is the guided setup path: it installs and starts
+      # Kisuke's own systemd --user service (which enable_kisuke_user_linger
+      # made reachable at install time) and completes login in one command -
+      # it also no-ops cleanly if already set up, so this is safe to run
+      # even when only some of that already happened.
+      kisuke connect \
+        --headless
+    fi
+
+    harden_kisuke_state
   fi
 
   agents_auth_status
@@ -831,20 +957,44 @@ agents_auth_login() {
 agents_auth_logout() {
   require_dev
 
-  if happy_daemon_is_running; then
-    happy daemon stop \
-      || warn "Happy daemon stop reported an error"
-  fi
+  local remote_provider
+  remote_provider="$(configured_remote_provider)"
 
-  if happy_is_authenticated; then
-    if [[ -t 0 && -t 1 ]]; then
-      happy auth logout \
-        || warn "Happy logout reported an error"
-    else
-      warn "Happy logout requires an interactive terminal and was skipped"
+  if [[ "$remote_provider" == "happy" ]]; then
+    if happy_daemon_is_running; then
+      happy daemon stop \
+        || warn "Happy daemon stop reported an error"
     fi
-  else
-    ok "Happy is already signed out"
+
+    if happy_is_authenticated; then
+      if [[ -t 0 && -t 1 ]]; then
+        happy auth logout \
+          || warn "Happy logout reported an error"
+      else
+        warn "Happy logout requires an interactive terminal and was skipped"
+      fi
+    else
+      ok "Happy is already signed out"
+    fi
+
+  elif [[ "$remote_provider" == "kisuke" ]]; then
+    if kisuke_is_authenticated; then
+      kisuke logout \
+        || warn "Kisuke logout reported an error"
+    else
+      ok "Kisuke is already signed out"
+    fi
+
+    if kisuke_daemon_is_running; then
+      # shellcheck disable=SC2016 # single-quoted on purpose: expands inside the nested `bash -lc` shell, not here
+      run_as_dev \
+        bash \
+        -lc \
+        'systemctl --user stop "$1"' \
+        _ \
+        "${KISUKE_SERVICE}.service" \
+        || warn "Kisuke daemon stop reported an error"
+    fi
   fi
 
   codex logout \
@@ -1270,7 +1420,11 @@ keys_upload_github() {
 }
 
 remote_info() {
-  cat <<'EOF'
+  local remote_provider
+  remote_provider="$(configured_remote_provider)"
+
+  if [[ "$remote_provider" == "happy" ]]; then
+    cat <<'EOF'
 Happy remote development
 
   Happy iOS / Android / Web
@@ -1329,6 +1483,92 @@ SSH:
 DevBox SSH configuration applies only to user "dev" and does not intentionally
 change root/admin SSH policy.
 EOF
+
+  elif [[ "$remote_provider" == "kisuke" ]]; then
+    cat <<'EOF'
+Kisuke Connect remote development
+
+  Kisuke iOS / Android / Web
+              |
+              v
+     Kisuke Connect daemon
+              |
+        +-----+-----+
+        |           |
+      Claude      Codex
+        |           |
+        +-----+-----+
+              |
+      /home/dev/workspace
+
+
+Primary commands (from the Kisuke app: terminal, editor, chat):
+
+  claude
+  codex
+
+
+Authentication:
+
+  devbox auth status
+  devbox auth login
+  devbox auth logout
+
+`devbox auth login` runs `kisuke connect --headless`: it prints a URL to
+open on another device (no local browser is needed on this DevBox), then
+waits for you to complete sign-in there.
+
+
+Boot behaviour:
+
+  systemctl --user status kisuke
+
+Kisuke Connect manages its own boot-time service (a systemd --user unit
+named "kisuke", installed by `kisuke connect` above). DevBox only enables a
+lingering session for user "dev" (`loginctl enable-linger dev`) so that
+service can start without an interactive login. No interactive login is
+required after a reboot; a DevBox that hasn't been through `devbox auth
+login` yet simply has no "kisuke" unit installed.
+
+
+SSH:
+
+  devbox ssh status
+  devbox ssh setup
+  devbox ssh disable
+
+DevBox SSH configuration applies only to user "dev" and does not intentionally
+change root/admin SSH policy.
+EOF
+
+  else
+    cat <<'EOF'
+No remote provider configured (DEVBOX_REMOTE=none)
+
+This DevBox has no Happy or Kisuke remote-access layer installed. Reach it
+over SSH or the host console, and use Codex/Claude directly:
+
+  claude
+  codex
+
+
+Authentication:
+
+  devbox auth status
+  devbox auth login
+  devbox auth logout
+
+
+SSH:
+
+  devbox ssh status
+  devbox ssh setup
+  devbox ssh disable
+
+DevBox SSH configuration applies only to user "dev" and does not intentionally
+change root/admin SSH policy.
+EOF
+  fi
 }
 
 # P2.6: read-only helpers over the dev user's project workspace. DevBox
@@ -1410,7 +1650,7 @@ feature_was_installed() {
   grep -Fqw "$1" "$FEATURES_FILE"
 }
 
-# #43: the configured remote provider ("happy" or "none"). No
+# #43: the configured remote provider ("happy", "kisuke" or "none"). No
 # REMOTE_PROVIDER_FILE means the box predates this feature, when Happy was
 # unconditionally installed - "happy" is the correct migrated value.
 configured_remote_provider() {
@@ -1474,6 +1714,7 @@ doctor() {
   local command
   local status=0
   local happy_version=""
+  local kisuke_version=""
 
   # Captured alongside the checks below (unchanged) so --json can report a
   # structured summary without re-running or duplicating any of them.
@@ -1485,12 +1726,15 @@ doctor() {
   local service_postgres=""
   local service_redis=""
   local service_happy_daemon="unknown"
+  local service_kisuke_daemon="unknown"
   local auth_codex=false
   local auth_claude=false
   local auth_happy=false
+  local auth_kisuke=false
   local auth_github=false
   local security_ssh_policy="unmanaged"
   local security_happy_dir_permissions=false
+  local security_kisuke_dir_permissions=false
   local security_secret_permissions=false
 
   # Duplicated via an fd number (dup2), not reopened by path: opening
@@ -1503,14 +1747,26 @@ doctor() {
   fi
 
   # #43: doctor only checks the configured remote provider. A box with
-  # DEVBOX_REMOTE=none never installed Happy, so none of its checks apply
-  # there - "not configured" rather than a failure.
+  # DEVBOX_REMOTE=none never installed Happy or Kisuke, so none of their
+  # checks apply there - "not configured" rather than a failure.
   local remote_provider
   remote_provider="$(configured_remote_provider)"
 
   if [[ "$remote_provider" != "happy" ]]; then
     service_happy_daemon="not configured"
     security_happy_dir_permissions=true
+  fi
+
+  if [[ "$remote_provider" != "kisuke" ]]; then
+    service_kisuke_daemon="not configured"
+    security_kisuke_dir_permissions=true
+  fi
+
+  # Kisuke manages its own credential file permissions (its on-disk format
+  # isn't documented the way Happy's is - see harden_kisuke_state()), so
+  # this field only ever reflects Happy's access-key check; it defaults
+  # true for both "kisuke" and "none".
+  if [[ "$remote_provider" != "happy" ]]; then
     security_secret_permissions=true
   fi
 
@@ -1547,6 +1803,8 @@ doctor() {
 
   if [[ "$remote_provider" == "happy" ]]; then
     commands+=(happy)
+  elif [[ "$remote_provider" == "kisuke" ]]; then
+    commands+=(kisuke)
   fi
 
   if feature_was_installed elixir; then
@@ -1656,6 +1914,33 @@ doctor() {
       ok "${happy_version:-Happy npm package}"
     else
       warn "Happy npm package is missing"
+      status=1
+    fi
+  fi
+
+  # Do not invoke `kisuke --version` for the same reason as `happy` above -
+  # validate the globally installed npm package instead.
+  if [[ "$remote_provider" == "kisuke" ]]; then
+    if run_as_dev npm list \
+      --global \
+      --depth=0 \
+      @kisuke/cli \
+      >/dev/null 2>&1; then
+
+      kisuke_version="$(
+        run_as_dev npm list \
+          --global \
+          --depth=0 \
+          @kisuke/cli \
+          2>/dev/null \
+        | grep -E '@kisuke/cli@' \
+        | head -n1 \
+        || true
+      )"
+
+      ok "${kisuke_version:-Kisuke npm package}"
+    else
+      warn "Kisuke npm package is missing"
       status=1
     fi
   fi
@@ -1811,6 +2096,55 @@ doctor() {
       warn "~/.happy/access.key should have mode 0600"
       status=1
     fi
+
+  elif [[ "$remote_provider" == "kisuke" ]]; then
+    if kisuke_is_authenticated; then
+      ok "Kisuke is authenticated"
+      auth_kisuke=true
+    else
+      warn "Kisuke is not authenticated (run: devbox auth login)"
+    fi
+
+    if kisuke_daemon_is_running; then
+      ok "Kisuke daemon"
+      service_kisuke_daemon="running"
+    else
+      warn "Kisuke daemon is not running"
+      service_kisuke_daemon="not running"
+    fi
+
+    # Unlike Happy's devbox-happy-daemon.service (installed unconditionally
+    # by install.sh), the "kisuke" systemd --user unit is installed lazily
+    # by `kisuke connect` itself, during `devbox auth login` - a box that
+    # hasn't been through that yet correctly has no unit at all, so its
+    # absence here is expected, not a failure.
+    if kisuke_daemon_service_is_installed; then
+      if kisuke_daemon_service_is_enabled; then
+        ok "Kisuke daemon service (${KISUKE_SERVICE})"
+      else
+        warn "${KISUKE_SERVICE} service is installed but not enabled"
+        status=1
+      fi
+    else
+      warn "${KISUKE_SERVICE} service is not installed yet; run: devbox auth login"
+    fi
+
+    # shellcheck disable=SC2016 # single-quoted on purpose: expands inside the nested `bash -lc` shell, not here
+    if run_as_dev \
+      bash \
+      -lc \
+      '
+        [[ ! -e "$HOME/.kisuke" ]] ||
+        [[ "$(stat -c "%a" "$HOME/.kisuke")" == "700" ]]
+      '; then
+
+      ok "Kisuke data directory permissions"
+      security_kisuke_dir_permissions=true
+    else
+      # shellcheck disable=SC2088 # literal display text, not a path expansion
+      warn "~/.kisuke should have mode 0700"
+      status=1
+    fi
   fi
 
   # shellcheck disable=SC2016 # single-quoted on purpose: expands inside the nested `bash -lc` shell, not here
@@ -1879,12 +2213,15 @@ doctor() {
       --arg postgres "$service_postgres" \
       --arg redis "$service_redis" \
       --arg happy_daemon "$service_happy_daemon" \
+      --arg kisuke_daemon "$service_kisuke_daemon" \
       --argjson auth_codex "$auth_codex" \
       --argjson auth_claude "$auth_claude" \
       --argjson auth_happy "$auth_happy" \
+      --argjson auth_kisuke "$auth_kisuke" \
       --argjson auth_github "$auth_github" \
       --arg ssh_policy "$security_ssh_policy" \
       --argjson happy_dir_permissions "$security_happy_dir_permissions" \
+      --argjson kisuke_dir_permissions "$security_kisuke_dir_permissions" \
       --argjson secret_permissions "$security_secret_permissions" \
       '{
         healthy: $healthy,
@@ -1899,17 +2236,20 @@ doctor() {
         services: {
           postgres: (if $postgres == "" then null else $postgres end),
           redis: (if $redis == "" then null else $redis end),
-          happy_daemon: $happy_daemon
+          happy_daemon: $happy_daemon,
+          kisuke_daemon: $kisuke_daemon
         },
         authentication: {
           codex: $auth_codex,
           claude: $auth_claude,
           happy: $auth_happy,
+          kisuke: $auth_kisuke,
           github: $auth_github
         },
         security: {
           ssh_dev_policy: $ssh_policy,
           happy_dir_permissions: $happy_dir_permissions,
+          kisuke_dir_permissions: $kisuke_dir_permissions,
           secret_permissions: $secret_permissions
         }
       }'
@@ -2267,18 +2607,31 @@ onboard() {
     -m 0700 \
     "$STATE_DIR"
 
-  cat <<'EOF'
+  local remote_provider
+  remote_provider="$(configured_remote_provider)"
+
+  local remote_step="Authenticate Codex and Claude"
+  case "$remote_provider" in
+    happy) remote_step="Authenticate Codex and Claude and pair Happy" ;;
+    kisuke) remote_step="Authenticate Codex, Claude and Kisuke Connect" ;;
+  esac
+
+  cat <<EOF
 
 DevBox onboarding
 
 1. Optional SSH access for the dev account
-2. Authenticate Codex and Claude and pair Happy
+2. ${remote_step}
 3. Optional OpenRouter Codex fallback
 4. GitHub authentication and Git identity
 5. Optional outbound Ed25519 identity key
 6. Environment diagnostics
 
+EOF
 
+  case "$remote_provider" in
+    happy)
+      cat <<'EOF'
 Primary agent commands after onboarding:
 
   happy
@@ -2291,7 +2644,32 @@ Native backends remain available:
   claude
   codex
 
+EOF
+      ;;
+    kisuke)
+      cat <<'EOF'
+Agent commands after onboarding:
 
+  claude
+  codex
+
+Reach this box from the Kisuke app (terminal, editor, chat) once
+'devbox auth login' has authenticated Kisuke Connect.
+
+EOF
+      ;;
+    *)
+      cat <<'EOF'
+Agent commands after onboarding:
+
+  claude
+  codex
+
+EOF
+      ;;
+  esac
+
+  cat <<'EOF'
 Configuring dev SSH does not disable or alter administrative/root SSH access.
 
 EOF
@@ -2305,8 +2683,14 @@ EOF
       ssh setup
   fi
 
+  local login_prompt="Sign in to Codex and Claude now?"
+  case "$remote_provider" in
+    happy) login_prompt="Sign in to Codex and Claude and pair Happy now?" ;;
+    kisuke) login_prompt="Sign in to Codex, Claude and Kisuke Connect now?" ;;
+  esac
+
   if prompt_yes_no \
-    "Sign in to Codex and Claude and pair Happy now?"; then
+    "$login_prompt"; then
 
     agents_auth_login
   fi

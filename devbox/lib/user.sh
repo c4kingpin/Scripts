@@ -86,6 +86,7 @@ create_developer_user() {
     "${DEV_HOME}/.codex" \
     "${DEV_HOME}/.claude" \
     "${DEV_HOME}/.happy" \
+    "${DEV_HOME}/.kisuke" \
     "${DEV_HOME}/.config" \
     "${DEV_HOME}/.config/devbox" \
     "${DEV_HOME}/.cache" \
@@ -105,6 +106,7 @@ create_developer_user() {
     "${DEV_HOME}/.codex" \
     "${DEV_HOME}/.claude" \
     "${DEV_HOME}/.happy" \
+    "${DEV_HOME}/.kisuke" \
     "${DEV_HOME}/.config" \
     "${DEV_HOME}/.config/devbox" \
     "${DEV_HOME}/.cache"
@@ -123,6 +125,7 @@ create_developer_user() {
     "${DEV_HOME}/.cache" \
     "${DEV_HOME}/.local" \
     "${DEV_HOME}/.happy" \
+    "${DEV_HOME}/.kisuke" \
     "${DEV_HOME}/workspace"; do
 
     if ! run_as_dev test \

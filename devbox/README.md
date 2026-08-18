@@ -13,7 +13,7 @@ Installation aus demselben Branch/Commit heruntergeladen und unverändert nach
 `/usr/local/bin/devbox` geschrieben — so bleiben Installer und Manager immer
 versionsgleich. Am dokumentierten Curl-Einzeiler ändert das nichts: `install.sh`
 lädt ohnehin schon während der Installation weitere Artefakte (Pakete, Node.js,
-Erlang/Elixir, Codex/Claude/Happy) nach.
+Erlang/Elixir, Codex/Claude/Happy oder Kisuke) nach.
 
 Betriebslogik, die `install.sh` erst nach seiner Bootstrap-Phase (Root-/OS-/
 Netzwerk-Check) braucht, wandert schrittweise in eigene, ebenfalls
@@ -22,7 +22,7 @@ nachgeladene Module unter [`lib/`](lib) und [`features/`](features):
 und [`lib/user.sh`](lib/user.sh) (Dev-User-Anlage) sind quer genutzte
 Bausteine; [`features/`](features) enthält je eine Datei pro
 Installationsphase (`base.sh`, `node.sh`, `postgres.sh`, `agents.sh`,
-`happy.sh`, `agent-notify.sh`, `tooling.sh`, `elixir.sh`). Jede Datei definiert nur Funktionen —
+`happy.sh`, `kisuke.sh`, `agent-notify.sh`, `tooling.sh`, `elixir.sh`). Jede Datei definiert nur Funktionen —
 `install.sh` ruft sie in derselben Reihenfolge auf, in der die Phasen früher
 inline standen. Die Bootstrap-Kette selbst bleibt bewusst in `install.sh`, da
 sie gebraucht wird, um diese Module überhaupt herunterzuladen. `bin/devbox.sh`
@@ -381,9 +381,18 @@ curl -fsSL https://raw.githubusercontent.com/c4kingpin/Scripts/master/devbox/ins
   env DEVBOX_REMOTE=happy bash
 ```
 
-Ohne Remote-Provider installiert der Installer kein Happy und richtet auch
-keinen Happy-Dienst ein; erreichbar bleibt die Box dann über die
-Host-Konsole (`pct enter`, `lxc exec`, `incus exec`) und optional SSH:
+Alternativ steht [Kisuke Connect](https://kisuke.dev) als Remote-Provider
+zur Verfügung:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/c4kingpin/Scripts/master/devbox/install.sh |
+  env DEVBOX_REMOTE=kisuke bash
+```
+
+Ohne Remote-Provider installiert der Installer weder Happy noch Kisuke und
+richtet auch keinen zugehörigen Dienst ein; erreichbar bleibt die Box dann
+über die Host-Konsole (`pct enter`, `lxc exec`, `incus exec`) und optional
+SSH:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/c4kingpin/Scripts/master/devbox/install.sh |
@@ -402,8 +411,15 @@ SSH ist davon unabhängig: es ist immer ein separater, optionaler
 Zugangsweg und insbesondere als Recovery-/Fallback-Zugang nutzbar, falls
 der konfigurierte Remote-Provider nicht verfügbar ist.
 
-Weitere Provider (z. B. Kisuke) sind für später vorgesehen, aber noch nicht
-implementiert.
+Kisuke Connect ist als npm-Paket `@kisuke/cli` installiert (Binary `kisuke`)
+und bringt eine eigene Terminal-/Editor-/Chat-Oberfläche in der Kisuke-App
+mit; anders als Happy stellt es keine `happy claude`/`happy codex`-Wrapper
+bereit — Codex und Claude werden dort direkt aufgerufen. Die Einrichtung
+läuft headless über `kisuke connect --headless` (siehe
+[Kisuke-Daemon nach dem Booten](#kisuke-daemon-nach-dem-booten) unten für
+Details zum Boot-Verhalten): der Befehl druckt eine URL, die auf einem
+anderen Gerät geöffnet wird, ein lokaler Browser ist auf der DevBox nicht
+nötig (vgl. [Anmeldung der Agenten](#anmeldung-der-agenten) oben).
 
 ## Happy-Daemon nach dem Booten
 
@@ -433,6 +449,54 @@ deaktiviert wurde.
 
 `devbox auth status` und `devbox doctor` melden zusätzlich, ob der Dienst
 installiert und aktiviert ist.
+
+## Kisuke-Daemon nach dem Booten
+
+Nur relevant, wenn Kisuke als Remote-Provider aktiv ist (`DEVBOX_REMOTE=kisuke`).
+Anders als bei Happy schreibt DevBox hierfür keinen eigenen systemd-Dienst:
+Kisuke Connect verwaltet seinen Daemon selbst, über einen systemd-`--user`-
+Dienst namens `kisuke` (Standard-Service-Level `user`), den `kisuke connect`
+beim ersten `devbox auth login` selbst anlegt und startet:
+
+```bash
+systemctl --user status kisuke
+```
+
+Ein frischer LXC-Container hat aber noch nie ein interaktives Login gesehen
+und damit auch keine laufende D-Bus-User-Session — `systemctl --user` liefe
+ohne weiteres Zutun ins Leere, und `kisuke connect`/`kisuke login` kämen
+dadurch nicht einmal bis zur Anmelde-URL (der Daemon-Vordergrundmodus
+`kisuke run` beendet sich bei fehlender Anmeldung sofort wieder, und die
+Login-Guided-Setup-Flow braucht selbst einen bereits erreichbaren Daemon).
+Der Installer behebt genau das mit einem Einzeiler:
+
+```bash
+loginctl enable-linger dev
+```
+
+Das lässt systemd unabhängig von jedem Login eine persistente
+User-Session (`user@<uid>.service`) inklusive D-Bus-Bus für `dev` starten —
+der Standardweg für genau diesen Anwendungsfall. Mit dieser Session
+funktioniert Kisukes eigener, für Server/Headless-Umgebungen vorgesehener
+Einrichtungspfad zuverlässig, ohne dass DevBox einen eigenen
+Daemon-Wrapper nachbauen muss.
+
+`devbox auth login` ruft dafür `kisuke connect --headless` auf: der Befehl
+installiert und startet den `kisuke`-Dienst und schließt die Anmeldung in
+einem Schritt ab (URL öffnen, kein lokaler Browser nötig). Ein
+`kisuke`-Dienst, der noch nicht existiert, ist auf einer frisch
+installierten, noch nicht angemeldeten Box der erwartete Zustand, keine
+Störung.
+
+Nach einem Reboot ist damit kein `sudo -iu dev` mehr nötig, damit die DevBox
+in der Kisuke-App erscheint. Die ältere Startlogik in der `.bashrc` von `dev`
+bleibt als Fallback bestehen, falls der Dienst in einem Boot einmal nicht von
+selbst hochkommt (`systemctl --user start kisuke`).
+
+`devbox auth status` und `devbox doctor` melden zusätzlich, ob der Dienst
+installiert und aktiviert ist; die Authentifizierungsprüfung selbst läuft
+über `kisuke whoami`, da Kisukes Datenformat unter `~/.kisuke` — anders als
+bei Happy — nicht dokumentiert ist.
 
 ## Push-Benachrichtigung bei Claude-/Codex-Limit
 
@@ -655,7 +719,7 @@ DevBox trennt persistenten Zustand nach Zuständigkeit:
 | --- | --- | --- |
 | Root-State | `/var/lib/devbox/` | aktive Version (`version`), aktiver/vorheriger Ref (`active-ref`, `previous-ref`), installierter Commit (`commit`), gewählte optionale Features (`installed-features`), konfigurierter Remote-Provider (`remote-provider`), Installationsmetadaten (`install-state.json`) |
 | User-State | `~/.config/devbox/` | Onboarding-Marker, OpenRouter-Konfiguration, benutzerbezogene Einstellungen |
-| Fremdverwaltete Credentials | `~/.codex`, `~/.claude`, `~/.happy`, `~/.config/gh`, `~/.ssh` | jeweils ausschließlich vom zugehörigen Tool verwaltet |
+| Fremdverwaltete Credentials | `~/.codex`, `~/.claude`, `~/.happy`, `~/.kisuke`, `~/.config/gh`, `~/.ssh` | jeweils ausschließlich vom zugehörigen Tool verwaltet |
 
 Root-State wird ausschließlich von `install.sh`/`devbox update`/
 `devbox rollback` (alle als `root`) geschrieben, ist aber für `dev` lesbar —
@@ -666,7 +730,8 @@ Root-State zur laufenden Manager-Version passt.
 
 Alle aktiv verwalteten Tool-Versionen sind zentral in
 [`versions.env`](versions.env) definiert (DevBox selbst, Node.js,
-Erlang/OTP, Elixir, Phoenix, Codex CLI, Claude Code, Happy). `install.sh`
+Erlang/OTP, Elixir, Phoenix, Codex CLI, Claude Code, Happy, Kisuke).
+`install.sh`
 bleibt ein einzelnes, per `curl | bash` ausführbares Skript und trägt dieselben
 Werte als eingebettete Defaults; ein Regressionstest stellt sicher, dass beide
 Stellen nicht auseinanderlaufen. Keine der verwalteten npm-Komponenten nutzt

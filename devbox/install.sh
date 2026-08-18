@@ -215,6 +215,7 @@ PHOENIX_VERSION="${PHOENIX_VERSION:-1.8.9}"
 CODEX_VERSION="${CODEX_VERSION:-0.147.0}"
 CLAUDE_VERSION="${CLAUDE_VERSION:-2.1.233}"
 HAPPY_VERSION="${HAPPY_VERSION:-1.2.0}"
+KISUKE_VERSION="${KISUKE_VERSION:-1.2.20}"
 
 DEVBOX_REPO_URL="${DEVBOX_REPO_URL:-https://raw.githubusercontent.com/c4kingpin/Scripts}"
 DEVBOX_GITHUB_REPO="${DEVBOX_GITHUB_REPO:-c4kingpin/Scripts}"
@@ -295,6 +296,7 @@ for devbox_module in \
   features/redis.sh \
   features/agents.sh \
   features/happy.sh \
+  features/kisuke.sh \
   features/agent-notify.sh \
   features/tooling.sh \
   features/elixir.sh; do
@@ -347,8 +349,8 @@ feature_enabled() {
 }
 
 # #43: the remote-access layer is a swappable provider, not a DevBox-core
-# requirement. Happy remains the default and the only implemented provider
-# today; "none" installs no remote layer at all (host console/SSH only).
+# requirement. Happy remains the default; Kisuke Connect is an alternative
+# provider; "none" installs no remote layer at all (host console/SSH only).
 # DEVBOX_REMOTE is unset (not "happy") on a re-install/update unless the
 # caller passes it explicitly - update_devbox() in bin/devbox.sh always
 # passes the box's persisted provider through, so a plain re-run of this
@@ -357,9 +359,9 @@ feature_enabled() {
 DEVBOX_REMOTE="${DEVBOX_REMOTE:-happy}"
 
 case "$DEVBOX_REMOTE" in
-  happy | none) ;;
+  happy | kisuke | none) ;;
   *)
-    msg_error "Invalid DEVBOX_REMOTE: ${DEVBOX_REMOTE} (expected happy or none)"
+    msg_error "Invalid DEVBOX_REMOTE: ${DEVBOX_REMOTE} (expected happy, kisuke or none)"
     exit 1
     ;;
 esac
@@ -441,6 +443,9 @@ if [[ "$DEVBOX_REMOTE" == "happy" ]]; then
   install_happy
   install_happy_daemon_service
   install_agent_limit_notify
+elif [[ "$DEVBOX_REMOTE" == "kisuke" ]]; then
+  install_kisuke
+  enable_kisuke_user_linger
 fi
 
 install_mise
@@ -506,8 +511,9 @@ agent_instructions() {
 - Create focused commits and draft pull requests when GitHub is authenticated.
 - Never commit credentials, tokens, `.env` files, or generated secrets.
 - Never inspect credential stores such as `~/.ssh`, `~/.happy/access.key`,
-  `~/.codex/auth.json`, `~/.claude/.credentials.json`, or DevBox secret files
-  unless the user explicitly requests authentication troubleshooting.
+  `~/.kisuke`, `~/.codex/auth.json`, `~/.claude/.credentials.json`, or
+  DevBox secret files unless the user explicitly requests authentication
+  troubleshooting.
 - Never force-push unless the user explicitly requests it.
 EOF
 }
@@ -587,6 +593,7 @@ if [[ ! -f "${DEV_HOME}/.claude/settings.json" ]]; then
       "Read(~/.ssh/**)",
       "Read(~/.pgpass)",
       "Read(~/.happy/access.key)",
+      "Read(~/.kisuke/**)",
       "Read(~/.codex/auth.json)",
       "Read(~/.claude/.credentials.json)",
       "Read(~/.config/devbox/openrouter.env)"
@@ -624,7 +631,7 @@ else
       .permissions.deny = (
         (
           (.permissions.deny // [])
-          + ["Read(~/.happy/access.key)"]
+          + ["Read(~/.happy/access.key)", "Read(~/.kisuke/**)"]
         )
         | unique
       ) |
@@ -757,6 +764,36 @@ fi
 EOF
 fi
 
+if [[ "$DEVBOX_REMOTE" == "kisuke" ]] &&
+  ! grep \
+    -Fq \
+    '# DevBox Kisuke' \
+    "${DEV_HOME}/.bashrc" \
+    2>/dev/null; then
+
+  cat <<'EOF' >>"${DEV_HOME}/.bashrc"
+
+# DevBox Kisuke
+# Fallback for Kisuke's own "kisuke" systemd --user unit: nudges it awake
+# from an interactive shell if the lingering user session didn't bring it
+# up on its own (e.g. linger was only just enabled this boot). Only
+# meaningful once Kisuke has been authenticated (run: devbox auth login) -
+# `systemctl --user start` on an unauthenticated box is a harmless no-op
+# retry, not a failure.
+if [[ $- == *i* ]] &&
+  [[ -z "${KISUKE_DAEMON_CHECKED:-}" ]] &&
+  command -v kisuke >/dev/null 2>&1; then
+
+  export KISUKE_DAEMON_CHECKED=1
+
+  (
+    systemctl --user is-active --quiet kisuke 2>/dev/null ||
+      systemctl --user start kisuke >/dev/null 2>&1 || true
+  ) >/dev/null 2>&1 &
+fi
+EOF
+fi
+
 chown \
   "$DEV_USER:$DEV_USER" \
   "${DEV_HOME}/.bashrc" \
@@ -778,7 +815,8 @@ chmod \
 
 chmod \
   0700 \
-  "${DEV_HOME}/.happy"
+  "${DEV_HOME}/.happy" \
+  "${DEV_HOME}/.kisuke"
 
 run_as_dev git lfs install \
   --skip-repo
@@ -1087,6 +1125,23 @@ if [[ "$DEVBOX_REMOTE" == "happy" ]]; then
   systemctl is-enabled \
     --quiet \
     devbox-happy-daemon.service
+elif [[ "$DEVBOX_REMOTE" == "kisuke" ]]; then
+  # Do not execute Kisuke during unattended validation.
+  run_as_dev npm list \
+    --global \
+    --depth=0 \
+    @kisuke/cli
+
+  # Kisuke's own boot-time service needs a lingering user session to work
+  # headlessly (see features/kisuke.sh); the "kisuke" systemd --user unit
+  # itself is only installed later, by `devbox auth login`.
+  [[ "$(
+    loginctl show-user \
+      "$DEV_USER" \
+      --property=Linger \
+      --value \
+      2>/dev/null
+  )" == "yes" ]]
 fi
 
 if feature_enabled elixir; then
@@ -1176,6 +1231,12 @@ if [[ "$DEVBOX_REMOTE" == "happy" ]]; then
   echo
   echo "  happy"
   echo "  happy codex"
+elif [[ "$DEVBOX_REMOTE" == "kisuke" ]]; then
+  echo -e "${YW}After onboarding, use Codex/Claude directly and reach this box from${CL}"
+  echo -e "${YW}the Kisuke app once 'devbox auth login' has authenticated Kisuke Connect:${CL}"
+  echo
+  echo "  codex"
+  echo "  claude"
 else
   echo -e "${YW}No remote provider configured (DEVBOX_REMOTE=none). Use Codex/Claude${CL}"
   echo -e "${YW}directly, or reach this box over SSH:${CL}"
