@@ -84,3 +84,76 @@ enable_kisuke_user_linger() {
     msg_error "Kisuke's D-Bus user session did not come up within 15s; devbox auth login may need a retry"
   fi
 }
+
+# Remote-provider hook (DEVBOX_REMOTE=kisuke), called generically by
+# install.sh - see devbox/README.md, "Neuen Remote-Provider hinzufügen".
+# Kisuke has no Happy-style push-notification integration; only Happy's own
+# module (features/happy.sh) wires up agent limit notifications.
+remote_install_kisuke() {
+  install_kisuke
+  enable_kisuke_user_linger
+}
+
+# Remote-provider hook: appends Kisuke's dev-shell fallback snippet to
+# ~/.bashrc (nudges its systemd --user unit awake if the lingering session
+# didn't bring it up already).
+remote_bashrc_kisuke() {
+  grep \
+    -Fq \
+    '# DevBox Kisuke' \
+    "${DEV_HOME}/.bashrc" \
+    2>/dev/null &&
+    return 0
+
+  cat <<'EOF' >>"${DEV_HOME}/.bashrc"
+
+# DevBox Kisuke
+# Fallback for Kisuke's own "kisuke" systemd --user unit: nudges it awake
+# from an interactive shell if the lingering user session didn't bring it
+# up on its own (e.g. linger was only just enabled this boot). Only
+# meaningful once Kisuke has been authenticated (run: devbox auth login) -
+# `systemctl --user start` on an unauthenticated box is a harmless no-op
+# retry, not a failure.
+if [[ $- == *i* ]] &&
+  [[ -z "${KISUKE_DAEMON_CHECKED:-}" ]] &&
+  command -v kisuke >/dev/null 2>&1; then
+
+  export KISUKE_DAEMON_CHECKED=1
+
+  (
+    systemctl --user is-active --quiet kisuke 2>/dev/null ||
+      systemctl --user start kisuke >/dev/null 2>&1 || true
+  ) >/dev/null 2>&1 &
+fi
+EOF
+}
+
+# Remote-provider hook: unattended (no `kisuke` execution) post-install
+# validation.
+remote_validate_kisuke() {
+  # Do not execute Kisuke during unattended validation.
+  run_as_dev npm list \
+    --global \
+    --depth=0 \
+    @kisuke/cli
+
+  # Kisuke's own boot-time service needs a lingering user session to work
+  # headlessly (see enable_kisuke_user_linger above); the "kisuke" systemd
+  # --user unit itself is only installed later, by `devbox auth login`.
+  [[ "$(
+    loginctl show-user \
+      "$DEV_USER" \
+      --property=Linger \
+      --value \
+      2>/dev/null
+  )" == "yes" ]]
+}
+
+# Remote-provider hook: final "how to use it" banner lines.
+remote_banner_kisuke() {
+  echo -e "${YW}After onboarding, use Codex/Claude directly and reach this box from${CL}"
+  echo -e "${YW}the Kisuke app once 'devbox auth login' has authenticated Kisuke Connect:${CL}"
+  echo
+  echo "  codex"
+  echo "  claude"
+}

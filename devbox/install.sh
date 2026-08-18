@@ -52,7 +52,7 @@ msg_error() { printf '%b\n' "${RD}✗ $*${CL}" >&2; }
 # installer version that produced it. The rest of the version manifest
 # (Node.js, Erlang, agent CLIs, ...) is defined further down, where it's
 # actually used.
-readonly DEVBOX_VERSION="${DEVBOX_VERSION:-1.3.0-RC1}"
+readonly DEVBOX_VERSION="${DEVBOX_VERSION:-1.3.0}"
 
 msg_info "DevBox installer v${DEVBOX_VERSION}"
 
@@ -227,6 +227,15 @@ CLAUDE_VERSION="${CLAUDE_VERSION:-2.1.233}"
 HAPPY_VERSION="${HAPPY_VERSION:-1.2.0}"
 KISUKE_VERSION="${KISUKE_VERSION:-1.2.20}"
 
+# Single source of truth for which remote/session providers exist. Each name
+# here must have a devbox/features/<name>.sh module that defines the four
+# provider hooks install.sh dispatches to below: remote_install_<name>,
+# remote_bashrc_<name>, remote_validate_<name>, remote_banner_<name> (see
+# devbox/README.md, "Neuen Remote-Provider hinzufügen"). "none" is always a
+# valid DEVBOX_REMOTE value but deliberately not listed here - it has no
+# module and no hooks to call.
+readonly DEVBOX_REMOTE_PROVIDERS="happy kisuke"
+
 DEVBOX_REPO_URL="${DEVBOX_REPO_URL:-https://raw.githubusercontent.com/c4kingpin/Scripts}"
 DEVBOX_GITHUB_REPO="${DEVBOX_GITHUB_REPO:-c4kingpin/Scripts}"
 
@@ -297,20 +306,30 @@ msg_info "Loading DevBox modules"
 
 devbox_module_tmp="$(mktemp)"
 
-for devbox_module in \
-  lib/common.sh \
-  lib/user.sh \
-  features/base.sh \
-  features/node.sh \
-  features/postgres.sh \
-  features/redis.sh \
-  features/agents.sh \
-  features/happy.sh \
-  features/kisuke.sh \
-  features/agent-notify.sh \
-  features/tooling.sh \
-  features/elixir.sh; do
+devbox_modules=(
+  lib/common.sh
+  lib/user.sh
+  features/base.sh
+  features/node.sh
+  features/postgres.sh
+  features/redis.sh
+  features/agents.sh
+)
 
+# Every registered remote provider is loaded as its own module - adding one
+# to DEVBOX_REMOTE_PROVIDERS above is enough to have it fetched here, no
+# further change needed in this list.
+for devbox_remote_provider in $DEVBOX_REMOTE_PROVIDERS; do
+  devbox_modules+=("features/${devbox_remote_provider}.sh")
+done
+
+devbox_modules+=(
+  features/agent-notify.sh
+  features/tooling.sh
+  features/elixir.sh
+)
+
+for devbox_module in "${devbox_modules[@]}"; do
   fetch_devbox_module "$devbox_module" "$devbox_module_tmp"
   # shellcheck disable=SC1090
   source "$devbox_module_tmp"
@@ -453,13 +472,12 @@ select_remote
 
 DEVBOX_REMOTE="${DEVBOX_REMOTE:-happy}"
 
-case "$DEVBOX_REMOTE" in
-  happy | kisuke | none) ;;
-  *)
-    msg_error "Invalid DEVBOX_REMOTE: ${DEVBOX_REMOTE} (expected happy, kisuke or none)"
-    exit 1
-    ;;
-esac
+if [[ "$DEVBOX_REMOTE" != "none" &&
+      " $DEVBOX_REMOTE_PROVIDERS " != *" $DEVBOX_REMOTE "* ]]; then
+
+  msg_error "Invalid DEVBOX_REMOTE: ${DEVBOX_REMOTE} (expected none or one of: ${DEVBOX_REMOTE_PROVIDERS})"
+  exit 1
+fi
 
 msg_ok "DevBox profile: ${DEVBOX_PROFILE} (optional features: ${devbox_selected_features:-none})"
 
@@ -534,13 +552,11 @@ create_developer_user
 install_codex_cli
 install_claude_cli
 
-if [[ "$DEVBOX_REMOTE" == "happy" ]]; then
-  install_happy
-  install_happy_daemon_service
-  install_agent_limit_notify
-elif [[ "$DEVBOX_REMOTE" == "kisuke" ]]; then
-  install_kisuke
-  enable_kisuke_user_linger
+# Each provider module (features/<name>.sh) defines remote_install_<name>;
+# see the DEVBOX_REMOTE_PROVIDERS comment above and devbox/README.md, "Neuen
+# Remote-Provider hinzufügen".
+if [[ "$DEVBOX_REMOTE" != "none" ]]; then
+  "remote_install_${DEVBOX_REMOTE}"
 fi
 
 install_mise
@@ -811,96 +827,10 @@ fi
 EOF
 fi
 
-if [[ "$DEVBOX_REMOTE" == "happy" ]] &&
-  ! grep \
-    -Fq \
-    '# DevBox Happy' \
-    "${DEV_HOME}/.bashrc" \
-    2>/dev/null; then
-
-  cat <<'EOF' >>"${DEV_HOME}/.bashrc"
-
-# DevBox Happy
-alias hclaude='happy claude'
-alias hcodex='happy codex'
-
-# Fallback for devbox-happy-daemon.service (which starts the daemon at
-# boot): starts it from an interactive shell if the service is unavailable
-# or did not bring it up. Only ever runs after Happy has been paired.
-if [[ $- == *i* ]] &&
-  [[ -z "${HAPPY_DAEMON_CHECKED:-}" ]] &&
-  command -v happy >/dev/null 2>&1; then
-
-  export HAPPY_DAEMON_CHECKED=1
-
-  (
-    if [[ -s "$HOME/.happy/access.key" &&
-          -s "$HOME/.happy/settings.json" ]] &&
-      jq \
-        -e \
-        '
-          (.machineId? | type == "string")
-          and
-          (.machineId | length > 0)
-        ' \
-        "$HOME/.happy/settings.json" \
-        >/dev/null 2>&1; then
-
-      state="$HOME/.happy/daemon.state.json"
-
-      pid="$(
-        jq \
-          -r \
-          '.pid // empty' \
-          "$state" \
-          2>/dev/null \
-          || true
-      )"
-
-      if [[ ! "$pid" =~ ^[0-9]+$ ]] ||
-        ! kill \
-          -0 \
-          "$pid" \
-          2>/dev/null; then
-
-        happy daemon start \
-          >/dev/null 2>&1 \
-          || true
-      fi
-    fi
-  ) >/dev/null 2>&1 &
-fi
-EOF
-fi
-
-if [[ "$DEVBOX_REMOTE" == "kisuke" ]] &&
-  ! grep \
-    -Fq \
-    '# DevBox Kisuke' \
-    "${DEV_HOME}/.bashrc" \
-    2>/dev/null; then
-
-  cat <<'EOF' >>"${DEV_HOME}/.bashrc"
-
-# DevBox Kisuke
-# Fallback for Kisuke's own "kisuke" systemd --user unit: nudges it awake
-# from an interactive shell if the lingering user session didn't bring it
-# up on its own (e.g. linger was only just enabled this boot). Only
-# meaningful once Kisuke has been authenticated (run: devbox auth login) -
-# `systemctl --user start` on an unauthenticated box is a harmless no-op
-# retry, not a failure.
-if [[ $- == *i* ]] &&
-  [[ -z "${KISUKE_DAEMON_CHECKED:-}" ]] &&
-  command -v kisuke >/dev/null 2>&1; then
-
-  export KISUKE_DAEMON_CHECKED=1
-
-  (
-    systemctl --user is-active --quiet kisuke 2>/dev/null ||
-      systemctl --user start kisuke >/dev/null 2>&1 || true
-  ) >/dev/null 2>&1 &
-fi
-EOF
+# Each provider module (features/<name>.sh) defines remote_bashrc_<name>,
+# which appends its own dev-shell fallback snippet to ~/.bashrc.
+if [[ "$DEVBOX_REMOTE" != "none" ]]; then
+  "remote_bashrc_${DEVBOX_REMOTE}"
 fi
 
 chown \
@@ -1223,34 +1153,10 @@ run_as_dev codex \
 run_as_dev claude \
   --version
 
-if [[ "$DEVBOX_REMOTE" == "happy" ]]; then
-  # Do not execute Happy during unattended validation.
-  run_as_dev npm list \
-    --global \
-    --depth=0 \
-    happy
-
-  # Remote access must survive a reboot without an interactive dev login.
-  systemctl is-enabled \
-    --quiet \
-    devbox-happy-daemon.service
-elif [[ "$DEVBOX_REMOTE" == "kisuke" ]]; then
-  # Do not execute Kisuke during unattended validation.
-  run_as_dev npm list \
-    --global \
-    --depth=0 \
-    @kisuke/cli
-
-  # Kisuke's own boot-time service needs a lingering user session to work
-  # headlessly (see features/kisuke.sh); the "kisuke" systemd --user unit
-  # itself is only installed later, by `devbox auth login`.
-  [[ "$(
-    loginctl show-user \
-      "$DEV_USER" \
-      --property=Linger \
-      --value \
-      2>/dev/null
-  )" == "yes" ]]
+# Each provider module (features/<name>.sh) defines remote_validate_<name>,
+# an unattended (no Happy/Kisuke CLI execution) post-install check.
+if [[ "$DEVBOX_REMOTE" != "none" ]]; then
+  "remote_validate_${DEVBOX_REMOTE}"
 fi
 
 if feature_enabled elixir; then
@@ -1335,17 +1241,10 @@ echo "The first interactive dev shell starts:"
 echo
 echo "  devbox onboard"
 echo
-if [[ "$DEVBOX_REMOTE" == "happy" ]]; then
-  echo -e "${YW}After onboarding, use Happy as the primary agent entry point:${CL}"
-  echo
-  echo "  happy"
-  echo "  happy codex"
-elif [[ "$DEVBOX_REMOTE" == "kisuke" ]]; then
-  echo -e "${YW}After onboarding, use Codex/Claude directly and reach this box from${CL}"
-  echo -e "${YW}the Kisuke app once 'devbox auth login' has authenticated Kisuke Connect:${CL}"
-  echo
-  echo "  codex"
-  echo "  claude"
+if [[ "$DEVBOX_REMOTE" != "none" ]]; then
+  # Each provider module (features/<name>.sh) defines remote_banner_<name>,
+  # the final "how to use it" lines for that provider.
+  "remote_banner_${DEVBOX_REMOTE}"
 else
   echo -e "${YW}No remote provider configured (DEVBOX_REMOTE=none). Use Codex/Claude${CL}"
   echo -e "${YW}directly, or reach this box over SSH:${CL}"

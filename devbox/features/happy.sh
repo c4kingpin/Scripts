@@ -194,3 +194,104 @@ EOF
 
   msg_ok "Configured Happy daemon service"
 }
+
+# Remote-provider hook (DEVBOX_REMOTE=happy), called generically by
+# install.sh - see devbox/README.md, "Neuen Remote-Provider hinzufügen".
+# install_agent_limit_notify (features/agent-notify.sh) is called from here
+# on purpose: Claude/Codex usage-limit push notifications go out over Happy,
+# so they belong to Happy's own module, not to a separate condition in
+# install.sh - a different provider only gets them if its own module also
+# calls it.
+remote_install_happy() {
+  install_happy
+  install_happy_daemon_service
+  install_agent_limit_notify
+}
+
+# Remote-provider hook: appends Happy's dev-shell fallback snippet to
+# ~/.bashrc (aliases plus a boot-service fallback starter).
+remote_bashrc_happy() {
+  grep \
+    -Fq \
+    '# DevBox Happy' \
+    "${DEV_HOME}/.bashrc" \
+    2>/dev/null &&
+    return 0
+
+  cat <<'EOF' >>"${DEV_HOME}/.bashrc"
+
+# DevBox Happy
+alias hclaude='happy claude'
+alias hcodex='happy codex'
+
+# Fallback for devbox-happy-daemon.service (which starts the daemon at
+# boot): starts it from an interactive shell if the service is unavailable
+# or did not bring it up. Only ever runs after Happy has been paired.
+if [[ $- == *i* ]] &&
+  [[ -z "${HAPPY_DAEMON_CHECKED:-}" ]] &&
+  command -v happy >/dev/null 2>&1; then
+
+  export HAPPY_DAEMON_CHECKED=1
+
+  (
+    if [[ -s "$HOME/.happy/access.key" &&
+          -s "$HOME/.happy/settings.json" ]] &&
+      jq \
+        -e \
+        '
+          (.machineId? | type == "string")
+          and
+          (.machineId | length > 0)
+        ' \
+        "$HOME/.happy/settings.json" \
+        >/dev/null 2>&1; then
+
+      state="$HOME/.happy/daemon.state.json"
+
+      pid="$(
+        jq \
+          -r \
+          '.pid // empty' \
+          "$state" \
+          2>/dev/null \
+          || true
+      )"
+
+      if [[ ! "$pid" =~ ^[0-9]+$ ]] ||
+        ! kill \
+          -0 \
+          "$pid" \
+          2>/dev/null; then
+
+        happy daemon start \
+          >/dev/null 2>&1 \
+          || true
+      fi
+    fi
+  ) >/dev/null 2>&1 &
+fi
+EOF
+}
+
+# Remote-provider hook: unattended (no `happy` execution) post-install
+# validation.
+remote_validate_happy() {
+  # Do not execute Happy during unattended validation.
+  run_as_dev npm list \
+    --global \
+    --depth=0 \
+    happy
+
+  # Remote access must survive a reboot without an interactive dev login.
+  systemctl is-enabled \
+    --quiet \
+    devbox-happy-daemon.service
+}
+
+# Remote-provider hook: final "how to use it" banner lines.
+remote_banner_happy() {
+  echo -e "${YW}After onboarding, use Happy as the primary agent entry point:${CL}"
+  echo
+  echo "  happy"
+  echo "  happy codex"
+}
