@@ -420,8 +420,9 @@ select_remote() {
 
 Which remote/session provider should this DevBox use?
 
-  1) Happy - happy / happy claude / happy codex remote session layer (recommended)
-  2) None  - host console/SSH only, no remote provider
+  1) Happy  - happy / happy claude / happy codex remote session layer (recommended)
+  2) Kisuke - Kisuke Connect (kisuke.dev), phone/tablet terminal+editor+chat
+  3) None   - host console/SSH only, no remote provider
 
 EOF
 
@@ -432,7 +433,8 @@ EOF
     choice
 
   case "${choice:-1}" in
-    2) DEVBOX_REMOTE="none" ;;
+    2) DEVBOX_REMOTE="kisuke" ;;
+    3) DEVBOX_REMOTE="none" ;;
     *) DEVBOX_REMOTE="happy" ;;
   esac
 }

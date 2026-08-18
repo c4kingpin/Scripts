@@ -219,7 +219,8 @@ das Skript die zugehörige Frage:
    [Feature-Auswahl](#feature-auswahl)) — Standard, Minimal oder
    Custom-Auswahl einzelner Features.
 2. **Remote-Provider** (`DEVBOX_REMOTE`, siehe
-   [Remote-Provider](#remote-provider)) — Happy oder kein Remote-Zugriff.
+   [Remote-Provider](#remote-provider)) — Happy, Kisuke Connect oder kein
+   Remote-Zugriff.
 3. **Agenten-Autonomie** (`DEVBOX_AUTONOMY`, siehe unten).
 
 Die Auswahl bei der Autonomie-Frage gilt für Codex und Claude gemeinsam —
