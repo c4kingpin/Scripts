@@ -48,10 +48,39 @@ install_kisuke() {
 # needs to work headlessly. This is the only Kisuke-specific boot-time setup
 # DevBox performs; everything else (installing/starting/updating the actual
 # "kisuke" unit) is Kisuke's own responsibility via `devbox auth login`.
+#
+# Observed in practice (issue report after #43 shipped): setting the linger
+# flag alone doesn't guarantee systemd-logind has actually finished starting
+# the user manager and its bus by the time this function returns - on some
+# LXC hosts that transition lags a few seconds behind the flag being set. A
+# `devbox onboard`/`devbox auth login` that runs immediately after install
+# could then lose the race and hit `kisuke connect`'s own `systemctl --user`
+# calls before there's a bus to talk to (`[K1002] ... Failed to connect to
+# bus: No medium found`), even though the session comes up fine moments
+# later on its own. Starting the unit explicitly and waiting for its bus
+# socket to exist closes that window instead of just hoping.
 enable_kisuke_user_linger() {
   msg_info "Enabling a persistent user session for Kisuke Connect"
 
   loginctl enable-linger "$DEV_USER"
 
-  msg_ok "Enabled persistent user session (loginctl enable-linger ${DEV_USER})"
+  local dev_uid
+  dev_uid="$(id -u "$DEV_USER")"
+
+  systemctl start "user@${dev_uid}.service" || true
+
+  local waited=0
+
+  while [[ ! -S "/run/user/${dev_uid}/bus" ]] &&
+    (( waited < 15 )); do
+
+    sleep 1
+    waited=$((waited + 1))
+  done
+
+  if [[ -S "/run/user/${dev_uid}/bus" ]]; then
+    msg_ok "Enabled persistent user session (loginctl enable-linger ${DEV_USER})"
+  else
+    msg_error "Kisuke's D-Bus user session did not come up within 15s; devbox auth login may need a retry"
+  fi
 }
