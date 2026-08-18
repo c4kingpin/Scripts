@@ -740,6 +740,89 @@ harden_happy_state() {
   done
 }
 
+# Remote-provider hook (DEVBOX_REMOTE=happy), dispatched generically by
+# agents_auth_status() - see devbox/README.md, "Neuen Remote-Provider
+# hinzufügen". Returns non-zero only for "not paired", matching the status
+# semantics agents_auth_status() folds into its own exit code; the daemon/
+# boot-service checks below are informational and never affect it.
+happy_auth_status() {
+  local status=0
+
+  if happy_is_authenticated; then
+    ok "Happy is authenticated and this DevBox is registered"
+  else
+    warn "Happy is not paired"
+    status=1
+  fi
+
+  if happy_is_authenticated; then
+    if happy_daemon_is_running; then
+      ok "Happy daemon is running"
+    else
+      warn "Happy daemon is not running"
+    fi
+  fi
+
+  if happy_daemon_service_is_installed &&
+    happy_daemon_service_is_enabled; then
+
+    ok "Happy daemon starts automatically at boot (${HAPPY_SERVICE})"
+  else
+    warn "Happy daemon does not start at boot; run 'devbox update' as root"
+  fi
+
+  return "$status"
+}
+
+# Remote-provider hook: pairs/starts Happy during `devbox auth login`.
+happy_auth_login() {
+  if happy_is_authenticated; then
+    ok "Happy is already paired"
+  else
+    info "Pairing this DevBox with Happy"
+    info "Happy asking you to connect/pair at this point is expected."
+
+    happy auth login
+  fi
+
+  harden_happy_state
+
+  if happy_is_authenticated; then
+    if happy_daemon_is_running; then
+      ok "Happy daemon is already running"
+    else
+      info "Starting Happy daemon"
+
+      if happy daemon start \
+        >/dev/null 2>&1; then
+
+        ok "Happy daemon started"
+      else
+        warn "Happy daemon could not be started; run: happy daemon start"
+      fi
+    fi
+  fi
+}
+
+# Remote-provider hook: signs Happy out during `devbox auth logout`.
+happy_auth_logout() {
+  if happy_daemon_is_running; then
+    happy daemon stop \
+      || warn "Happy daemon stop reported an error"
+  fi
+
+  if happy_is_authenticated; then
+    if [[ -t 0 && -t 1 ]]; then
+      happy auth logout \
+        || warn "Happy logout reported an error"
+    else
+      warn "Happy logout requires an interactive terminal and was skipped"
+    fi
+  else
+    ok "Happy is already signed out"
+  fi
+}
+
 # Kisuke's on-disk state (~/.kisuke: auth_token, kisuke.db, ...) isn't a
 # documented format the way Happy's access.key/settings.json are, so -
 # unlike happy_is_authenticated() - this shells out to the CLI itself
@@ -798,6 +881,86 @@ harden_kisuke_state() {
     "$KISUKE_HOME"
 }
 
+# Remote-provider hook (DEVBOX_REMOTE=kisuke), dispatched generically by
+# agents_auth_status() - see devbox/README.md, "Neuen Remote-Provider
+# hinzufügen". Returns non-zero only for "not authenticated", matching the
+# status semantics agents_auth_status() folds into its own exit code; the
+# daemon/boot-service checks below are informational and never affect it.
+kisuke_auth_status() {
+  local status=0
+
+  if kisuke_is_authenticated; then
+    ok "Kisuke is authenticated and this DevBox is registered"
+  else
+    warn "Kisuke is not authenticated"
+    status=1
+  fi
+
+  if kisuke_daemon_is_running; then
+    ok "Kisuke daemon is running"
+  else
+    warn "Kisuke daemon is not running"
+  fi
+
+  if kisuke_daemon_service_is_installed &&
+    kisuke_daemon_service_is_enabled; then
+
+    ok "Kisuke daemon starts automatically at boot (systemd --user, lingering session)"
+  else
+    warn "Kisuke daemon service is not installed yet; run: devbox auth login"
+  fi
+
+  return "$status"
+}
+
+# Remote-provider hook: authenticates Kisuke during `devbox auth login`.
+kisuke_auth_login() {
+  if kisuke_is_authenticated; then
+    ok "Kisuke is already authenticated"
+  else
+    info "Setting up Kisuke Connect"
+    info "Kisuke prints a URL to open on another device; no local browser is needed."
+
+    # `kisuke connect` is the guided setup path: it installs and starts
+    # Kisuke's own systemd --user service (which enable_kisuke_user_linger
+    # made reachable at install time) and completes login in one command -
+    # it also no-ops cleanly if already set up, so this is safe to run
+    # even when only some of that already happened.
+    kisuke connect \
+      --headless
+  fi
+
+  harden_kisuke_state
+}
+
+# Remote-provider hook: signs Kisuke out during `devbox auth logout`.
+kisuke_auth_logout() {
+  if kisuke_is_authenticated; then
+    kisuke logout \
+      || warn "Kisuke logout reported an error"
+  else
+    ok "Kisuke is already signed out"
+  fi
+
+  if kisuke_daemon_is_running; then
+    # shellcheck disable=SC2016 # single-quoted on purpose: expands inside the nested `bash -lc` shell, not here
+    run_as_dev \
+      bash \
+      -lc \
+      'systemctl --user stop "$1"' \
+      _ \
+      "${KISUKE_SERVICE}.service" \
+      || warn "Kisuke daemon stop reported an error"
+  fi
+}
+
+# Remote-provider hooks are dispatched by naming convention -
+# "${remote_provider}_auth_status"/"_auth_login"/"_auth_logout" - defined
+# next to happy_is_authenticated()/kisuke_is_authenticated() above. Adding a
+# provider means adding those three functions under its own name; nothing
+# here needs to change. See devbox/README.md, "Neuen Remote-Provider
+# hinzufügen".
+
 agents_auth_status() {
   require_dev
 
@@ -819,51 +982,8 @@ agents_auth_status() {
     status=1
   fi
 
-  if [[ "$remote_provider" == "happy" ]]; then
-    if happy_is_authenticated; then
-      ok "Happy is authenticated and this DevBox is registered"
-    else
-      warn "Happy is not paired"
-      status=1
-    fi
-
-    if happy_is_authenticated; then
-      if happy_daemon_is_running; then
-        ok "Happy daemon is running"
-      else
-        warn "Happy daemon is not running"
-      fi
-    fi
-
-    if happy_daemon_service_is_installed &&
-      happy_daemon_service_is_enabled; then
-
-      ok "Happy daemon starts automatically at boot (${HAPPY_SERVICE})"
-    else
-      warn "Happy daemon does not start at boot; run 'devbox update' as root"
-    fi
-
-  elif [[ "$remote_provider" == "kisuke" ]]; then
-    if kisuke_is_authenticated; then
-      ok "Kisuke is authenticated and this DevBox is registered"
-    else
-      warn "Kisuke is not authenticated"
-      status=1
-    fi
-
-    if kisuke_daemon_is_running; then
-      ok "Kisuke daemon is running"
-    else
-      warn "Kisuke daemon is not running"
-    fi
-
-    if kisuke_daemon_service_is_installed &&
-      kisuke_daemon_service_is_enabled; then
-
-      ok "Kisuke daemon starts automatically at boot (systemd --user, lingering session)"
-    else
-      warn "Kisuke daemon service is not installed yet; run: devbox auth login"
-    fi
+  if [[ "$remote_provider" != "none" ]]; then
+    "${remote_provider}_auth_status" || status=1
   fi
 
   return "$status"
@@ -904,51 +1024,8 @@ agents_auth_login() {
     fi
   fi
 
-  if [[ "$remote_provider" == "happy" ]]; then
-    if happy_is_authenticated; then
-      ok "Happy is already paired"
-    else
-      info "Pairing this DevBox with Happy"
-      info "Happy asking you to connect/pair at this point is expected."
-
-      happy auth login
-    fi
-
-    harden_happy_state
-
-    if happy_is_authenticated; then
-      if happy_daemon_is_running; then
-        ok "Happy daemon is already running"
-      else
-        info "Starting Happy daemon"
-
-        if happy daemon start \
-          >/dev/null 2>&1; then
-
-          ok "Happy daemon started"
-        else
-          warn "Happy daemon could not be started; run: happy daemon start"
-        fi
-      fi
-    fi
-
-  elif [[ "$remote_provider" == "kisuke" ]]; then
-    if kisuke_is_authenticated; then
-      ok "Kisuke is already authenticated"
-    else
-      info "Setting up Kisuke Connect"
-      info "Kisuke prints a URL to open on another device; no local browser is needed."
-
-      # `kisuke connect` is the guided setup path: it installs and starts
-      # Kisuke's own systemd --user service (which enable_kisuke_user_linger
-      # made reachable at install time) and completes login in one command -
-      # it also no-ops cleanly if already set up, so this is safe to run
-      # even when only some of that already happened.
-      kisuke connect \
-        --headless
-    fi
-
-    harden_kisuke_state
+  if [[ "$remote_provider" != "none" ]]; then
+    "${remote_provider}_auth_login"
   fi
 
   agents_auth_status
@@ -960,41 +1037,8 @@ agents_auth_logout() {
   local remote_provider
   remote_provider="$(configured_remote_provider)"
 
-  if [[ "$remote_provider" == "happy" ]]; then
-    if happy_daemon_is_running; then
-      happy daemon stop \
-        || warn "Happy daemon stop reported an error"
-    fi
-
-    if happy_is_authenticated; then
-      if [[ -t 0 && -t 1 ]]; then
-        happy auth logout \
-          || warn "Happy logout reported an error"
-      else
-        warn "Happy logout requires an interactive terminal and was skipped"
-      fi
-    else
-      ok "Happy is already signed out"
-    fi
-
-  elif [[ "$remote_provider" == "kisuke" ]]; then
-    if kisuke_is_authenticated; then
-      kisuke logout \
-        || warn "Kisuke logout reported an error"
-    else
-      ok "Kisuke is already signed out"
-    fi
-
-    if kisuke_daemon_is_running; then
-      # shellcheck disable=SC2016 # single-quoted on purpose: expands inside the nested `bash -lc` shell, not here
-      run_as_dev \
-        bash \
-        -lc \
-        'systemctl --user stop "$1"' \
-        _ \
-        "${KISUKE_SERVICE}.service" \
-        || warn "Kisuke daemon stop reported an error"
-    fi
+  if [[ "$remote_provider" != "none" ]]; then
+    "${remote_provider}_auth_logout"
   fi
 
   codex logout \
@@ -1419,12 +1463,11 @@ keys_upload_github() {
   ok "Uploaded identity key to GitHub"
 }
 
-remote_info() {
-  local remote_provider
-  remote_provider="$(configured_remote_provider)"
-
-  if [[ "$remote_provider" == "happy" ]]; then
-    cat <<'EOF'
+# Remote-provider hook (DEVBOX_REMOTE=happy), dispatched generically by
+# remote_info() below - see devbox/README.md, "Neuen Remote-Provider
+# hinzufügen".
+happy_remote_info() {
+  cat <<'EOF'
 Happy remote development
 
   Happy iOS / Android / Web
@@ -1483,9 +1526,13 @@ SSH:
 DevBox SSH configuration applies only to user "dev" and does not intentionally
 change root/admin SSH policy.
 EOF
+}
 
-  elif [[ "$remote_provider" == "kisuke" ]]; then
-    cat <<'EOF'
+# Remote-provider hook (DEVBOX_REMOTE=kisuke), dispatched generically by
+# remote_info() below - see devbox/README.md, "Neuen Remote-Provider
+# hinzufügen".
+kisuke_remote_info() {
+  cat <<'EOF'
 Kisuke Connect remote development
 
   Kisuke iOS / Android / Web
@@ -1540,9 +1587,18 @@ SSH:
 DevBox SSH configuration applies only to user "dev" and does not intentionally
 change root/admin SSH policy.
 EOF
+}
 
-  else
-    cat <<'EOF'
+remote_info() {
+  local remote_provider
+  remote_provider="$(configured_remote_provider)"
+
+  if [[ "$remote_provider" != "none" ]]; then
+    "${remote_provider}_remote_info"
+    return
+  fi
+
+  cat <<'EOF'
 No remote provider configured (DEVBOX_REMOTE=none)
 
 This DevBox has no Happy or Kisuke remote-access layer installed. Reach it
@@ -1568,7 +1624,6 @@ SSH:
 DevBox SSH configuration applies only to user "dev" and does not intentionally
 change root/admin SSH policy.
 EOF
-  fi
 }
 
 # P2.6: read-only helpers over the dev user's project workspace. DevBox

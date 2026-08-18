@@ -443,6 +443,44 @@ Details zum Boot-Verhalten): der Befehl druckt eine URL, die auf einem
 anderen Gerät geöffnet wird, ein lokaler Browser ist auf der DevBox nicht
 nötig (vgl. [Anmeldung der Agenten](#anmeldung-der-agenten) oben).
 
+### Neuen Remote-Provider hinzufügen
+
+Happy und Kisuke sind als Provider-Module implementiert, nicht als fest
+verdrahtete Sonderfälle. Welche Provider-Namen gültig sind, steht an einer
+einzigen Stelle: der Konstante `DEVBOX_REMOTE_PROVIDERS` (in `install.sh`,
+aktuell `"happy kisuke"`). Ein neuer Provider `<name>` braucht:
+
+1. Ein Eintrag in `DEVBOX_REMOTE_PROVIDERS` — das reicht, damit
+   `devbox/features/<name>.sh` beim Installieren automatisch heruntergeladen
+   und eingebunden wird (`install.sh` generiert die Modulliste daraus).
+2. In `devbox/features/<name>.sh` vier fest benannte Install-Hooks, die
+   `install.sh` generisch aufruft (kein `if`/`elif` pro Provider nötig):
+   - `remote_install_<name>()` — Paket-/Dienst-Installation. Push-
+     Notifications bei Nutzungs-/Rate-Limits (siehe unten) sind kein
+     DevBox-weiter Default — ein Provider bekommt sie nur, wenn dieser Hook
+     `install_agent_limit_notify` selbst aufruft, so wie es
+     `features/happy.sh` tut.
+   - `remote_bashrc_<name>()` — schreibt den Fallback-Block des Providers in
+     `~/.bashrc`.
+   - `remote_validate_<name>()` — unattended Post-Install-Validierung (ohne
+     den Provider-CLI tatsächlich auszuführen).
+   - `remote_banner_<name>()` — die Abschlusszeilen der Erfolgsmeldung.
+3. In `devbox/bin/devbox.sh` (der eigenständigen, per curl kopierten
+   Manager-Datei — sie lädt zur Laufzeit keine Module nach) vier
+   gleichnamige Laufzeit-Hooks nach derselben Konvention, direkt neben den
+   bereits vorhandenen `<name>_is_authenticated()`-artigen Funktionen:
+   `<name>_auth_status()`, `<name>_auth_login()`, `<name>_auth_logout()`,
+   `<name>_remote_info()`. `agents_auth_status/login/logout` und
+   `remote_info()` rufen diese generisch über
+   `"${remote_provider}_auth_status"` etc. auf.
+
+`devbox doctor` ist bewusst die eine Ausnahme von diesem generischen
+Dispatch: seine Prüfungen unterscheiden sich inhaltlich stark zwischen
+Providern (z. B. sind Happys Prüfungen fatal, Kisukes informativ, weil
+`kisuke connect` sein Setup selbst über mehrere Schritte verteilt) und sein
+JSON-Schema (`doctor --json`) hat pro Provider eigene, flache Feldnamen. Ein
+neuer Provider braucht dort weiterhin einen expliziten `if`/`elif`-Block.
+
 ## Happy-Daemon nach dem Booten
 
 Nur relevant, wenn Happy als Remote-Provider aktiv ist (Standard). Happy

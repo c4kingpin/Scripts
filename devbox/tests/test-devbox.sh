@@ -137,6 +137,11 @@ install_script_fetches_matching_manager_version() {
 # and sourced in a loop, and the bootstrap chain itself (root/OS/network
 # checks, curl_with_retry, fetch_devbox_module) must stay inline since it's
 # needed to fetch these files in the first place.
+# Remote-provider modules (features/happy.sh, features/kisuke.sh) are no
+# longer literal entries in this list - they're generated from
+# DEVBOX_REMOTE_PROVIDERS (see the "Neuen Remote-Provider hinzufügen" module
+# contract in devbox/README.md), so a new provider only needs an entry in
+# that registry to be fetched here.
 install_script_loads_all_modules_after_bootstrap() {
   local module
 
@@ -147,8 +152,6 @@ install_script_loads_all_modules_after_bootstrap() {
     features/node.sh \
     features/postgres.sh \
     features/agents.sh \
-    features/happy.sh \
-    features/kisuke.sh \
     features/agent-notify.sh \
     features/tooling.sh \
     features/elixir.sh; do
@@ -156,7 +159,10 @@ install_script_loads_all_modules_after_bootstrap() {
     grep -Fq "$module" "$NORM_INSTALL" || return 1
   done
 
-  grep -Fq 'fetch_devbox_module "$devbox_module" "$devbox_module_tmp"' "$INSTALL_SCRIPT" &&
+  grep -Fq 'readonly DEVBOX_REMOTE_PROVIDERS="happy kisuke"' "$INSTALL_SCRIPT" &&
+    grep -Fq 'devbox_modules+=("features/${devbox_remote_provider}.sh")' "$NORM_INSTALL" &&
+    grep -Fq 'for devbox_remote_provider in $DEVBOX_REMOTE_PROVIDERS; do' "$INSTALL_SCRIPT" &&
+    grep -Fq 'fetch_devbox_module "$devbox_module" "$devbox_module_tmp"' "$INSTALL_SCRIPT" &&
     grep -Fq 'source "$devbox_module_tmp"' "$INSTALL_SCRIPT" &&
     ! grep -Fq 'verify_checksum() {' "$INSTALL_SCRIPT" &&
     ! grep -Fq 'run_as_dev() (' "$INSTALL_SCRIPT" &&
@@ -173,8 +179,11 @@ install_script_loads_all_modules_after_bootstrap() {
 # install actually runs. Extract just that block and exercise it in
 # isolation under different env combinations, without running the rest of
 # install.sh.
+# Starts at DEVBOX_REMOTE_PROVIDERS (not DEVBOX_ALL_OPTIONAL_FEATURES) since
+# the DEVBOX_REMOTE validation later in this range now reads that registry
+# constant.
 extract_feature_resolution_block() {
-  sed -n '/^DEVBOX_ALL_OPTIONAL_FEATURES=/,/^msg_ok "DevBox profile:/p' "$INSTALL_SCRIPT"
+  sed -n '/^readonly DEVBOX_REMOTE_PROVIDERS=/,/^msg_ok "DevBox profile:/p' "$INSTALL_SCRIPT"
 }
 
 feature_resolution_selects_features_from_profile_and_override() {
@@ -796,14 +805,18 @@ remote_instructions_are_platform_agnostic() {
 # Kisuke's remote-info branch, exercised via the same sourced-functions
 # pattern as remote_provider_is_persisted_and_migrated_as_happy since
 # remote-info reads REMOTE_PROVIDER_FILE, which the compiled manager binary
-# cannot be pointed at from the outside.
+# cannot be pointed at from the outside. remote_info() dispatches generically
+# to "${remote_provider}_remote_info" (see devbox/README.md, "Neuen
+# Remote-Provider hinzufügen"), so kisuke_remote_info() has to be sourced
+# alongside it.
 remote_instructions_are_kisuke_aware() {
-  local remote_info_fn output
+  local remote_info_fn kisuke_remote_info_fn output
   remote_info_fn="$(sed -n '/^remote_info() {/,/^}/p' "$MANAGER")"
+  kisuke_remote_info_fn="$(sed -n '/^kisuke_remote_info() {/,/^}/p' "$MANAGER")"
   local configured_fn
   configured_fn="$(sed -n '/^configured_remote_provider() {/,/^}/p' "$MANAGER")"
 
-  [[ -n "$remote_info_fn" && -n "$configured_fn" ]] || return 1
+  [[ -n "$remote_info_fn" && -n "$kisuke_remote_info_fn" && -n "$configured_fn" ]] || return 1
 
   local provider_file="${TEST_TMP}/remote-info-kisuke-provider"
   printf 'kisuke\n' >"$provider_file"
@@ -811,6 +824,7 @@ remote_instructions_are_kisuke_aware() {
   output="$(bash -c '
     REMOTE_PROVIDER_FILE="'"$provider_file"'"
     '"$configured_fn"'
+    '"$kisuke_remote_info_fn"'
     '"$remote_info_fn"'
     remote_info
   ')"
@@ -1882,25 +1896,39 @@ redis_validation_and_doctor_are_feature_aware() {
 # #43: the remote-access layer is a swappable, optional provider - Happy
 # stays the default, Kisuke is an alternative, and DEVBOX_REMOTE=none must
 # produce a fully usable DevBox that never installs or configures either.
+# DEVBOX_REMOTE is validated against the single-source-of-truth
+# DEVBOX_REMOTE_PROVIDERS registry (plus the always-valid "none"), the same
+# pattern install.sh already used for DEVBOX_ALL_OPTIONAL_FEATURES.
 devbox_remote_defaults_to_happy_and_validates_input() {
   grep -Fq 'DEVBOX_REMOTE="${DEVBOX_REMOTE:-happy}"' "$INSTALL_SCRIPT" &&
-    grep -Fq 'happy | kisuke | none) ;;' "$NORM_INSTALL" &&
+    grep -Fq 'readonly DEVBOX_REMOTE_PROVIDERS="happy kisuke"' "$INSTALL_SCRIPT" &&
+    grep -Fq '" $DEVBOX_REMOTE_PROVIDERS " != *" $DEVBOX_REMOTE "*' "$NORM_INSTALL" &&
     grep -Fq 'Invalid DEVBOX_REMOTE' "$INSTALL_SCRIPT"
 }
 
+# Each remote provider is a module (features/<name>.sh) exposing four hooks
+# install.sh dispatches to generically - remote_install_<name>,
+# remote_bashrc_<name>, remote_validate_<name>, remote_banner_<name> (see
+# devbox/README.md, "Neuen Remote-Provider hinzufügen"). These tests check
+# both ends: install.sh's generic dispatch, and that each provider's own
+# module actually defines and wires the hook.
 install_gates_happy_installation_on_remote_provider() {
-  grep -Fq 'if [[ "$DEVBOX_REMOTE" == "happy" ]]; then' "$NORM_INSTALL" &&
-    grep -Fq 'install_happy' "$NORM_INSTALL" &&
-    grep -Fq 'install_happy_daemon_service' "$NORM_INSTALL" &&
+  grep -Fq 'if [[ "$DEVBOX_REMOTE" != "none" ]]; then' "$NORM_INSTALL" &&
+    grep -Fq '"remote_install_${DEVBOX_REMOTE}"' "$INSTALL_SCRIPT" &&
+    grep -Fq 'remote_install_happy() {' "$FEATURE_HAPPY" &&
+    grep -Fq 'install_happy' "$NORM_FEATURE_HAPPY" &&
+    grep -Fq 'install_happy_daemon_service' "$NORM_FEATURE_HAPPY" &&
     grep -Fq 'printf '\''%s\n'\'' "$DEVBOX_REMOTE" >"${ROOT_STATE_DIR}/remote-provider"' "$INSTALL_SCRIPT" &&
     grep -Fq '"remote": "${DEVBOX_REMOTE}"' "$INSTALL_SCRIPT" &&
     grep -Fq '"${ROOT_STATE_DIR}/remote-provider"' "$NORM_INSTALL"
 }
 
 install_gates_kisuke_installation_on_remote_provider() {
-  grep -Fq 'elif [[ "$DEVBOX_REMOTE" == "kisuke" ]]; then' "$NORM_INSTALL" &&
-    grep -Fq 'install_kisuke' "$NORM_INSTALL" &&
-    grep -Fq 'enable_kisuke_user_linger' "$NORM_INSTALL"
+  grep -Fq 'if [[ "$DEVBOX_REMOTE" != "none" ]]; then' "$NORM_INSTALL" &&
+    grep -Fq '"remote_install_${DEVBOX_REMOTE}"' "$INSTALL_SCRIPT" &&
+    grep -Fq 'remote_install_kisuke() {' "$FEATURE_KISUKE" &&
+    grep -Fq 'install_kisuke' "$NORM_FEATURE_KISUKE" &&
+    grep -Fq 'enable_kisuke_user_linger' "$NORM_FEATURE_KISUKE"
 }
 
 # No REMOTE_PROVIDER_FILE means the box predates #43, when Happy was
@@ -2051,7 +2079,8 @@ doctor_checks_root_state_version() {
 # user's .bashrc, i.e. after somebody had already logged in interactively.
 happy_daemon_starts_at_boot() {
   grep -Fq 'install_happy_daemon_service() {' "$FEATURE_HAPPY" &&
-    grep -Fq 'install_happy_daemon_service' "$NORM_INSTALL" &&
+    grep -Fq 'remote_install_happy() {' "$FEATURE_HAPPY" &&
+    grep -Fq 'install_happy_daemon_service' "$NORM_FEATURE_HAPPY" &&
     grep -Fq 'HAPPY_SERVICE="devbox-happy-daemon.service"' "$FEATURE_HAPPY" &&
     grep -Fq 'HAPPY_SERVICE_UNIT="/etc/systemd/system/${HAPPY_SERVICE}"' "$FEATURE_HAPPY" &&
     # Runs as dev with a dev-shaped HOME, only once the network is up.
@@ -2064,15 +2093,20 @@ happy_daemon_starts_at_boot() {
     grep -Fxq 'Restart=no' "$FEATURE_HAPPY" &&
     grep -Fq 'systemctl daemon-reload' "$FEATURE_HAPPY" &&
     grep -Fq 'systemctl enable --now "$HAPPY_SERVICE"' "$NORM_FEATURE_HAPPY" &&
-    grep -Fq 'systemctl is-enabled --quiet devbox-happy-daemon.service' "$NORM_INSTALL"
+    grep -Fq 'remote_validate_happy() {' "$FEATURE_HAPPY" &&
+    grep -Fq 'systemctl is-enabled --quiet devbox-happy-daemon.service' "$NORM_FEATURE_HAPPY"
 }
 
 # The .bashrc logic stays as a fallback for boxes whose service is missing
-# or disabled (issue #19 explicitly asks for it to be kept).
+# or disabled (issue #19 explicitly asks for it to be kept). It now lives in
+# features/happy.sh's remote_bashrc_happy() hook, dispatched generically by
+# install.sh - see devbox/README.md, "Neuen Remote-Provider hinzufügen".
 happy_bashrc_start_remains_as_fallback() {
-  grep -Fq '# DevBox Happy' "$INSTALL_SCRIPT" &&
-    grep -Fq 'HAPPY_DAEMON_CHECKED' "$INSTALL_SCRIPT" &&
-    grep -Fq 'happy daemon start' "$INSTALL_SCRIPT"
+  grep -Fq 'remote_bashrc_happy() {' "$FEATURE_HAPPY" &&
+    grep -Fq '# DevBox Happy' "$FEATURE_HAPPY" &&
+    grep -Fq 'HAPPY_DAEMON_CHECKED' "$FEATURE_HAPPY" &&
+    grep -Fq 'happy daemon start' "$FEATURE_HAPPY" &&
+    grep -Fq '"remote_bashrc_${DEVBOX_REMOTE}"' "$INSTALL_SCRIPT"
 }
 
 extract_happy_daemon_start_script() {
@@ -2193,8 +2227,10 @@ doctor_checks_happy_daemon_service() {
 kisuke_gets_a_lingering_user_session_for_its_own_service_management() {
   grep -Fq 'enable_kisuke_user_linger() {' "$FEATURE_KISUKE" &&
     grep -Fq 'loginctl enable-linger "$DEV_USER"' "$FEATURE_KISUKE" &&
-    grep -Fq 'enable_kisuke_user_linger' "$NORM_INSTALL" &&
-    grep -Fq 'loginctl show-user "$DEV_USER" --property=Linger --value' "$NORM_INSTALL" &&
+    grep -Fq 'remote_install_kisuke() {' "$FEATURE_KISUKE" &&
+    grep -Fq 'enable_kisuke_user_linger' "$NORM_FEATURE_KISUKE" &&
+    grep -Fq 'remote_validate_kisuke() {' "$FEATURE_KISUKE" &&
+    grep -Fq 'loginctl show-user "$DEV_USER" --property=Linger --value' "$NORM_FEATURE_KISUKE" &&
     # Setting the linger flag alone doesn't guarantee systemd-logind has
     # already finished starting the user manager/bus by the time this
     # function returns (observed in practice - see the header comment
@@ -2229,9 +2265,11 @@ devbox_profile_sets_xdg_runtime_dir_for_sudo_iu_shells() {
 # fallback - just against `systemctl --user`, since Kisuke (unlike Happy)
 # manages its own unit rather than one DevBox writes.
 kisuke_bashrc_start_remains_as_fallback() {
-  grep -Fq '# DevBox Kisuke' "$INSTALL_SCRIPT" &&
-    grep -Fq 'KISUKE_DAEMON_CHECKED' "$INSTALL_SCRIPT" &&
-    grep -Fq 'systemctl --user start kisuke' "$INSTALL_SCRIPT"
+  grep -Fq 'remote_bashrc_kisuke() {' "$FEATURE_KISUKE" &&
+    grep -Fq '# DevBox Kisuke' "$FEATURE_KISUKE" &&
+    grep -Fq 'KISUKE_DAEMON_CHECKED' "$FEATURE_KISUKE" &&
+    grep -Fq 'systemctl --user start kisuke' "$FEATURE_KISUKE" &&
+    grep -Fq '"remote_bashrc_${DEVBOX_REMOTE}"' "$INSTALL_SCRIPT"
 }
 
 # devbox auth login's Kisuke branch has to run `kisuke connect`, not
@@ -2408,16 +2446,13 @@ doctor_json_kisuke_not_yet_configured_is_still_healthy() {
 # silent. install_agent_limit_notify has to run after Happy (it shells out
 # to `happy notify`) and wire both agents up: a Claude StopFailure hook
 # (matcher: rate_limit|billing_error) and a Codex `notify` command.
-# install_agent_limit_notify has to live in the same DEVBOX_REMOTE=happy
-# gate as install_happy/install_happy_daemon_service: the notify scripts
-# shell out to `happy notify`, so they're pointless (and shouldn't be
-# installed) on a box configured with no remote provider.
+# install_agent_limit_notify has to live inside remote_install_happy()
+# (features/happy.sh) - the notify scripts shell out to `happy notify`, so
+# they're pointless (and shouldn't be installed) on a box configured with a
+# different remote provider or none at all. See devbox/README.md, "Neuen
+# Remote-Provider hinzufügen".
 extract_first_happy_remote_gate() {
-  awk '
-    /^if \[\[ "\$DEVBOX_REMOTE" == "happy" \]\]; then$/ { flag=1 }
-    flag { print }
-    flag && /^fi$/ { exit }
-  ' "$INSTALL_SCRIPT"
+  sed -n '/^remote_install_happy() {/,/^}/p' "$FEATURE_HAPPY"
 }
 
 agent_limit_notify_is_installed_and_wired() {
@@ -2430,6 +2465,10 @@ agent_limit_notify_is_installed_and_wired() {
     grep -Fq 'install_agent_limit_notify' <<<"$happy_gate" &&
     (($(grep -Fn 'install_happy_daemon_service' <<<"$happy_gate" | head -1 | cut -d: -f1) \
       < $(grep -Fn 'install_agent_limit_notify' <<<"$happy_gate" | head -1 | cut -d: -f1))) &&
+    # Only Happy's module wires up limit notifications - Kisuke (and any
+    # future provider) has to opt in explicitly, it's not a DevBox-wide
+    # default.
+    ! grep -Fq 'install_agent_limit_notify' "$FEATURE_KISUKE" &&
     grep -Fq '"${DEV_HOME}/.local/bin/devbox-agent-limit-notify"' "$FEATURE_AGENT_NOTIFY" &&
     grep -Fq '"${DEV_HOME}/.local/bin/devbox-claude-limit-detect"' "$FEATURE_AGENT_NOTIFY" &&
     grep -Fq '"${DEV_HOME}/.local/bin/devbox-codex-limit-detect"' "$FEATURE_AGENT_NOTIFY" &&
