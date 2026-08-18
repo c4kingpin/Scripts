@@ -15,6 +15,7 @@ readonly FEATURE_POSTGRES="${PROJECT_ROOT}/features/postgres.sh"
 readonly FEATURE_REDIS="${PROJECT_ROOT}/features/redis.sh"
 readonly FEATURE_AGENTS="${PROJECT_ROOT}/features/agents.sh"
 readonly FEATURE_HAPPY="${PROJECT_ROOT}/features/happy.sh"
+readonly FEATURE_KISUKE="${PROJECT_ROOT}/features/kisuke.sh"
 readonly FEATURE_AGENT_NOTIFY="${PROJECT_ROOT}/features/agent-notify.sh"
 readonly FEATURE_TOOLING="${PROJECT_ROOT}/features/tooling.sh"
 readonly FEATURE_ELIXIR="${PROJECT_ROOT}/features/elixir.sh"
@@ -78,6 +79,7 @@ readonly NORM_LIB_USER="${TEST_TMP}/lib_user.normalized"
 readonly NORM_FEATURE_BASE="${TEST_TMP}/feature_base.normalized"
 readonly NORM_FEATURE_POSTGRES="${TEST_TMP}/feature_postgres.normalized"
 readonly NORM_FEATURE_HAPPY="${TEST_TMP}/feature_happy.normalized"
+readonly NORM_FEATURE_KISUKE="${TEST_TMP}/feature_kisuke.normalized"
 readonly NORM_FEATURE_AGENT_NOTIFY="${TEST_TMP}/feature_agent_notify.normalized"
 readonly NORM_FEATURE_TOOLING="${TEST_TMP}/feature_tooling.normalized"
 readonly NORM_FEATURE_ELIXIR="${TEST_TMP}/feature_elixir.normalized"
@@ -93,6 +95,7 @@ scripts_have_valid_syntax() {
     "$FEATURE_POSTGRES" \
     "$FEATURE_AGENTS" \
     "$FEATURE_HAPPY" \
+    "$FEATURE_KISUKE" \
     "$FEATURE_AGENT_NOTIFY" \
     "$FEATURE_TOOLING" \
     "$FEATURE_ELIXIR"
@@ -145,6 +148,7 @@ install_script_loads_all_modules_after_bootstrap() {
     features/postgres.sh \
     features/agents.sh \
     features/happy.sh \
+    features/kisuke.sh \
     features/agent-notify.sh \
     features/tooling.sh \
     features/elixir.sh; do
@@ -789,6 +793,36 @@ remote_instructions_are_platform_agnostic() {
     grep -Fq 'devbox-happy-daemon.service' <<<"$output"
 }
 
+# Kisuke's remote-info branch, exercised via the same sourced-functions
+# pattern as remote_provider_is_persisted_and_migrated_as_happy since
+# remote-info reads REMOTE_PROVIDER_FILE, which the compiled manager binary
+# cannot be pointed at from the outside.
+remote_instructions_are_kisuke_aware() {
+  local remote_info_fn output
+  remote_info_fn="$(sed -n '/^remote_info() {/,/^}/p' "$MANAGER")"
+  local configured_fn
+  configured_fn="$(sed -n '/^configured_remote_provider() {/,/^}/p' "$MANAGER")"
+
+  [[ -n "$remote_info_fn" && -n "$configured_fn" ]] || return 1
+
+  local provider_file="${TEST_TMP}/remote-info-kisuke-provider"
+  printf 'kisuke\n' >"$provider_file"
+
+  output="$(bash -c '
+    REMOTE_PROVIDER_FILE="'"$provider_file"'"
+    '"$configured_fn"'
+    '"$remote_info_fn"'
+    remote_info
+  ')"
+
+  grep -Fq 'Kisuke Connect remote development' <<<"$output" &&
+    grep -Fq 'kisuke connect --headless' <<<"$output" &&
+    grep -Fq 'devbox auth login' <<<"$output" &&
+    grep -Fq 'devbox ssh setup' <<<"$output" &&
+    grep -Fq 'systemctl --user status kisuke' <<<"$output" &&
+    grep -Fq 'loginctl enable-linger dev' <<<"$output"
+}
+
 manager_exposes_expected_commands() {
   local output
 
@@ -885,11 +919,12 @@ update_preserves_user_state() {
 
 # P0.2: no actively managed npm component may float on @latest.
 managed_agent_clis_are_pinned_not_latest() {
-  ! grep -Eq '(@openai/codex|@anthropic-ai/claude-code|[[:space:]]happy)@latest' \
-    "$INSTALL_SCRIPT" "$FEATURE_AGENTS" "$FEATURE_HAPPY" &&
+  ! grep -Eq '(@openai/codex|@anthropic-ai/claude-code|@kisuke/cli|[[:space:]]happy)@latest' \
+    "$INSTALL_SCRIPT" "$FEATURE_AGENTS" "$FEATURE_HAPPY" "$FEATURE_KISUKE" &&
     grep -Fq '"@openai/codex@${CODEX_VERSION}"' "$FEATURE_AGENTS" &&
     grep -Fq '"@anthropic-ai/claude-code@${CLAUDE_VERSION}"' "$FEATURE_AGENTS" &&
-    grep -Fq '"happy@${HAPPY_VERSION}"' "$FEATURE_HAPPY"
+    grep -Fq '"happy@${HAPPY_VERSION}"' "$FEATURE_HAPPY" &&
+    grep -Fq '"@kisuke/cli@${KISUKE_VERSION}"' "$FEATURE_KISUKE"
 }
 
 # install.sh must stay a single, standalone, curl-pipeable file, so it embeds
@@ -932,6 +967,7 @@ manager_expected = {
     "CODEX_VERSION": manifest["CODEX_VERSION"],
     "CLAUDE_VERSION": manifest["CLAUDE_VERSION"],
     "HAPPY_VERSION": manifest["HAPPY_VERSION"],
+    "KISUKE_VERSION": manifest["KISUKE_VERSION"],
 }
 
 for key, value in manager_expected.items():
@@ -949,6 +985,7 @@ devbox_version_command_reports_the_manifest() {
     grep -Fq 'Codex CLI:' <<<"$output" &&
     grep -Fq 'Claude Code:' <<<"$output" &&
     grep -Fq 'Happy:' <<<"$output" &&
+    grep -Fq 'Kisuke:' <<<"$output" &&
     grep -Fq 'version:)' "$MANAGER" &&
     grep -Fq 'show_version' "$NORM_MANAGER"
 }
@@ -962,7 +999,7 @@ devbox_version_json_reports_the_manifest() {
   json_output="$("$MANAGER" version --json)"
   expected_devbox_version="$(awk -F': +' '/^DevBox:/ { print $2 }' <<<"$text_output")"
 
-  jq -e '.devbox and .node and .erlang and .elixir and .phoenix and .codex_cli and .claude_code and .happy' \
+  jq -e '.devbox and .node and .erlang and .elixir and .phoenix and .codex_cli and .claude_code and .happy and .kisuke' \
     <<<"$json_output" >/dev/null &&
     [[ "$(jq -r '.devbox' <<<"$json_output")" == "$expected_devbox_version" ]] &&
     grep -Fq 'version:--json)' "$MANAGER" &&
@@ -1843,11 +1880,11 @@ redis_validation_and_doctor_are_feature_aware() {
 }
 
 # #43: the remote-access layer is a swappable, optional provider - Happy
-# stays the default, but DEVBOX_REMOTE=none must produce a fully usable
-# DevBox that never installs or configures Happy at all.
+# stays the default, Kisuke is an alternative, and DEVBOX_REMOTE=none must
+# produce a fully usable DevBox that never installs or configures either.
 devbox_remote_defaults_to_happy_and_validates_input() {
   grep -Fq 'DEVBOX_REMOTE="${DEVBOX_REMOTE:-happy}"' "$INSTALL_SCRIPT" &&
-    grep -Fq 'happy | none) ;;' "$NORM_INSTALL" &&
+    grep -Fq 'happy | kisuke | none) ;;' "$NORM_INSTALL" &&
     grep -Fq 'Invalid DEVBOX_REMOTE' "$INSTALL_SCRIPT"
 }
 
@@ -1860,6 +1897,12 @@ install_gates_happy_installation_on_remote_provider() {
     grep -Fq '"${ROOT_STATE_DIR}/remote-provider"' "$NORM_INSTALL"
 }
 
+install_gates_kisuke_installation_on_remote_provider() {
+  grep -Fq 'elif [[ "$DEVBOX_REMOTE" == "kisuke" ]]; then' "$NORM_INSTALL" &&
+    grep -Fq 'install_kisuke' "$NORM_INSTALL" &&
+    grep -Fq 'enable_kisuke_user_linger' "$NORM_INSTALL"
+}
+
 # No REMOTE_PROVIDER_FILE means the box predates #43, when Happy was
 # unconditionally installed - migrating it as "happy" (not "unknown" or
 # erroring) is the whole backward-compatibility point.
@@ -1870,10 +1913,13 @@ remote_provider_is_persisted_and_migrated_as_happy() {
   [[ -n "$configured_fn" ]] || return 1
 
   local provider_file="${TEST_TMP}/remote-provider-migration-test"
-  local happy_result none_result missing_result
+  local happy_result kisuke_result none_result missing_result
 
   printf 'happy\n' >"$provider_file"
   happy_result="$(bash -c 'REMOTE_PROVIDER_FILE="'"$provider_file"'"; '"$configured_fn"'; configured_remote_provider')"
+
+  printf 'kisuke\n' >"$provider_file"
+  kisuke_result="$(bash -c 'REMOTE_PROVIDER_FILE="'"$provider_file"'"; '"$configured_fn"'; configured_remote_provider')"
 
   printf 'none\n' >"$provider_file"
   none_result="$(bash -c 'REMOTE_PROVIDER_FILE="'"$provider_file"'"; '"$configured_fn"'; configured_remote_provider')"
@@ -1881,20 +1927,23 @@ remote_provider_is_persisted_and_migrated_as_happy() {
   missing_result="$(bash -c 'REMOTE_PROVIDER_FILE="'"${TEST_TMP}/does-not-exist"'"; '"$configured_fn"'; configured_remote_provider')"
 
   [[ "$happy_result" == "happy" ]] &&
+    [[ "$kisuke_result" == "kisuke" ]] &&
     [[ "$none_result" == "none" ]] &&
     [[ "$missing_result" == "happy" ]]
 }
 
 # devbox status/doctor must reflect and respect the configured provider:
-# status shows it, doctor --json reports it, and doctor's Happy-specific
-# checks (pairing, daemon, boot service, credential permissions) are
-# skipped entirely - not just reported as failing - when it's "none".
+# status shows it, doctor --json reports it, and doctor's Happy/Kisuke-
+# specific checks (pairing, daemon, boot service, credential permissions)
+# are skipped entirely - not just reported as failing - when it's "none".
 status_and_doctor_are_remote_provider_aware() {
   grep -Fq 'configured_remote_provider' "$MANAGER" &&
     grep -Fq 'Remote provider:' "$NORM_MANAGER" &&
     grep -Fq 'remote_provider: $remote_provider' "$NORM_MANAGER" &&
     grep -Fq 'if [[ "$remote_provider" == "happy" ]]; then' "$NORM_MANAGER" &&
-    grep -Fq 'Happy is paired' "$MANAGER"
+    grep -Fq 'elif [[ "$remote_provider" == "kisuke" ]]; then' "$NORM_MANAGER" &&
+    grep -Fq 'Happy is paired' "$MANAGER" &&
+    grep -Fq 'Kisuke is authenticated' "$MANAGER"
 }
 
 # update_devbox() must thread the box's existing provider selection back
@@ -2127,6 +2176,133 @@ doctor_checks_happy_daemon_service() {
     grep -Fq 'is not installed; Happy only starts from an interactive dev shell' "$MANAGER"
 }
 
+# Kisuke Connect (#43 alternative remote provider): `kisuke run` blocks in
+# the foreground (unlike `happy daemon start`, which forks and returns), so
+# devbox's own unit is a plain Type=simple + Restart=on-failure supervisor
+# rather than Happy's oneshot+PID-file wrapper - see features/kisuke.sh's
+# header comment for why kisuke's own `--service-level system` isn't used
+# instead.
+# Unlike Happy (which forks a background daemon directly, no systemd
+# involved), Kisuke's own guided setup (`kisuke connect`) manages its own
+# systemd --user unit and needs `systemctl --user` reachable the first time
+# it runs - impossible in a fresh LXC container, which has no D-Bus user
+# session until someone logs in interactively. `loginctl enable-linger`
+# is the standard fix: a persistent user session (and its bus) starts at
+# boot regardless of login. See features/kisuke.sh's header comment for the
+# full chicken-and-egg problem this avoids.
+kisuke_gets_a_lingering_user_session_for_its_own_service_management() {
+  grep -Fq 'enable_kisuke_user_linger() {' "$FEATURE_KISUKE" &&
+    grep -Fq 'loginctl enable-linger "$DEV_USER"' "$FEATURE_KISUKE" &&
+    grep -Fq 'enable_kisuke_user_linger' "$NORM_INSTALL" &&
+    grep -Fq 'loginctl show-user "$DEV_USER" --property=Linger --value' "$NORM_INSTALL"
+}
+
+# The .bashrc logic stays as a fallback for boxes whose systemd --user unit
+# is installed but didn't come up this boot, mirroring Happy's issue #19
+# fallback - just against `systemctl --user`, since Kisuke (unlike Happy)
+# manages its own unit rather than one DevBox writes.
+kisuke_bashrc_start_remains_as_fallback() {
+  grep -Fq '# DevBox Kisuke' "$INSTALL_SCRIPT" &&
+    grep -Fq 'KISUKE_DAEMON_CHECKED' "$INSTALL_SCRIPT" &&
+    grep -Fq 'systemctl --user start kisuke' "$INSTALL_SCRIPT"
+}
+
+# devbox auth login's Kisuke branch has to run `kisuke connect`, not
+# `kisuke login`: `kisuke run`/`kisuke login` alone deadlock in a headless
+# container (see features/kisuke.sh) - only the guided `connect` path
+# installs+starts Kisuke's own service and completes login in one step.
+auth_login_uses_kisuke_connect_not_bare_login() {
+  grep -Fq 'kisuke connect' "$NORM_MANAGER" &&
+    ! grep -Fq 'kisuke login --headless' "$NORM_MANAGER" &&
+    ! grep -Fq 'kisuke run' "$NORM_MANAGER"
+}
+
+doctor_checks_kisuke_daemon_service() {
+  grep -Fq 'readonly KISUKE_SERVICE="kisuke"' "$MANAGER" &&
+    grep -Fq 'kisuke_daemon_service_is_installed() {' "$MANAGER" &&
+    grep -Fq 'kisuke_daemon_service_is_enabled() {' "$MANAGER" &&
+    grep -Fq 'systemctl --user cat "$1"' "$NORM_MANAGER" &&
+    grep -Fq 'systemctl --user is-enabled --quiet "$1"' "$NORM_MANAGER" &&
+    grep -Fq 'systemctl --user is-active --quiet "$1"' "$NORM_MANAGER" &&
+    grep -Fq 'is not installed yet; run: devbox auth login' "$MANAGER" &&
+    # doctor shells out to `kisuke whoami`, not a file-based guess, since
+    # Kisuke's on-disk format isn't documented the way Happy's is.
+    grep -Fq 'run_as_dev kisuke whoami' "$NORM_MANAGER"
+}
+
+# doctor --json's Kisuke fields, exercised against a real fixture (auth
+# token + pid file + service unit) the same way
+# doctor_json_reports_a_valid_summary_matching_the_exit_code exercises
+# Happy's.
+# doctor --json's Kisuke fields, exercised the same way
+# doctor_json_reports_a_valid_summary_matching_the_exit_code exercises
+# Happy's - but Kisuke's checks shell out to `kisuke whoami` and
+# `systemctl --user`, not raw state files (its on-disk format isn't
+# documented the way Happy's access.key/settings.json are), so the fixture
+# is just stubbed commands rather than a fake ~/.kisuke layout.
+doctor_json_reports_kisuke_fields() {
+  local bin_dir="${TEST_TMP}/doctor-json-kisuke-bin"
+  local root_state="${TEST_TMP}/doctor-json-kisuke-root-state"
+  local home_dir="${TEST_TMP}/doctor-json-kisuke-home"
+  local ssh_config="${TEST_TMP}/doctor-json-kisuke-sshd.conf"
+  local provider_file="${TEST_TMP}/doctor-json-kisuke-remote-provider"
+  local manager_functions="${TEST_TMP}/manager-functions-doctor-json-kisuke.sh"
+  local devbox_version
+  local tool
+
+  devbox_version="$(grep -oP 'readonly DEVBOX_VERSION="\K[^"]+' "$MANAGER")"
+
+  mkdir -p "$bin_dir" "$root_state" "${home_dir}/.kisuke"
+  chmod 0700 "${home_dir}/.kisuke"
+
+  printf '%s\n' "$devbox_version" >"${root_state}/version"
+  printf '\n' >"${root_state}/installed-features"
+  printf 'kisuke\n' >"$provider_file"
+
+  for tool in claude codex kisuke fd gh git python3 rg; do
+    printf '#!/usr/bin/env bash\nexit 0\n' >"${bin_dir}/${tool}"
+    chmod 0755 "${bin_dir}/${tool}"
+  done
+
+  # `systemctl --user cat/is-enabled/is-active kisuke[.service]` and
+  # `kisuke whoami` all succeed - a fully authenticated, running box.
+  printf '#!/usr/bin/env bash\ncase "$*" in\n  *is-failed*) exit 1 ;;\n  *) exit 0 ;;\nesac\n' >"${bin_dir}/systemctl"
+  chmod 0755 "${bin_dir}/systemctl"
+
+  printf '#!/usr/bin/env bash\n[[ "$1" == "--version" ]] && echo "v24.0.0"\nexit 0\n' >"${bin_dir}/node"
+  chmod 0755 "${bin_dir}/node"
+
+  printf '#!/usr/bin/env bash\necho "|-- @kisuke/cli@1.2.20"\nexit 0\n' >"${bin_dir}/npm"
+  chmod 0755 "${bin_dir}/npm"
+
+  sed 's/^readonly //' "$MANAGER" | head -n -1 >"$manager_functions"
+
+  local output status=0
+  output="$(
+    PATH="${bin_dir}:/usr/bin:/bin" \
+    HOME="$home_dir" \
+    bash -c '
+      # shellcheck source=/dev/null
+      source "'"$manager_functions"'"
+      ROOT_STATE_DIR="'"$root_state"'"
+      ROOT_VERSION_FILE="'"${root_state}/version"'"
+      FEATURES_FILE="'"${root_state}/installed-features"'"
+      INSTALL_STATE_FILE="'"${root_state}/install-state.json"'"
+      REMOTE_PROVIDER_FILE="'"$provider_file"'"
+      KISUKE_HOME="'"${home_dir}/.kisuke"'"
+      SSH_CONFIG="'"$ssh_config"'"
+      doctor json
+    '
+  )" || status=$?
+
+  jq -e '.healthy == true' <<<"$output" >/dev/null &&
+    [[ "$status" -eq 0 ]] &&
+    [[ "$(jq -r '.remote_provider' <<<"$output")" == "kisuke" ]] &&
+    [[ "$(jq -r '.services.kisuke_daemon' <<<"$output")" == "running" ]] &&
+    [[ "$(jq -r '.authentication.kisuke' <<<"$output")" == "true" ]] &&
+    [[ "$(jq -r '.security.kisuke_dir_permissions' <<<"$output")" == "true" ]]
+}
+
 # Issue #59: a Claude/Codex session that can't proceed because of a
 # usage/rate limit must push a Happy notification instead of just going
 # silent. install_agent_limit_notify has to run after Happy (it shells out
@@ -2207,7 +2383,7 @@ EOF
 
   # Existing hooks (PreToolUse) and the deny merge stay untouched.
   [[ "$(jq '.hooks.PreToolUse | length' "$once")" == "1" ]] &&
-    [[ "$(jq '.permissions.deny | length' "$once")" == "2" ]] &&
+    [[ "$(jq '.permissions.deny | length' "$once")" == "3" ]] &&
     # Exactly one StopFailure entry, not duplicated on a second run.
     [[ "$(jq '.hooks.StopFailure | length' "$once")" == "1" ]] &&
     [[ "$(jq '.hooks.StopFailure | length' "$twice")" == "1" ]] &&
@@ -2317,6 +2493,7 @@ normalize_continuations "$LIB_USER" >"$NORM_LIB_USER"
 normalize_continuations "$FEATURE_BASE" >"$NORM_FEATURE_BASE"
 normalize_continuations "$FEATURE_POSTGRES" >"$NORM_FEATURE_POSTGRES"
 normalize_continuations "$FEATURE_HAPPY" >"$NORM_FEATURE_HAPPY"
+normalize_continuations "$FEATURE_KISUKE" >"$NORM_FEATURE_KISUKE"
 normalize_continuations "$FEATURE_AGENT_NOTIFY" >"$NORM_FEATURE_AGENT_NOTIFY"
 normalize_continuations "$FEATURE_TOOLING" >"$NORM_FEATURE_TOOLING"
 normalize_continuations "$FEATURE_ELIXIR" >"$NORM_FEATURE_ELIXIR"
@@ -2357,6 +2534,7 @@ run_test "rerunning the installer is idempotent" rerunning_installer_is_idempote
 run_test "SSH key directions" ssh_onboarding_distinguishes_key_directions
 run_test "unsupported CLI Remote service removed" unsupported_cli_remote_service_is_absent
 run_test "platform-agnostic remote instructions" remote_instructions_are_platform_agnostic
+run_test "Kisuke-aware remote instructions" remote_instructions_are_kisuke_aware
 run_test "manager command surface" manager_exposes_expected_commands
 run_test "manager rejects unknown commands" manager_rejects_unknown_commands
 run_test "no hardcoded default credentials" no_hardcoded_default_credentials
@@ -2401,6 +2579,7 @@ run_test "redis is a separate optional feature, disabled by default" redis_is_a_
 run_test "redis validation and doctor are feature-aware" redis_validation_and_doctor_are_feature_aware
 run_test "DEVBOX_REMOTE defaults to happy and validates input" devbox_remote_defaults_to_happy_and_validates_input
 run_test "install gates Happy installation on remote provider" install_gates_happy_installation_on_remote_provider
+run_test "install gates Kisuke installation on remote provider" install_gates_kisuke_installation_on_remote_provider
 run_test "remote provider is persisted and migrated as happy" remote_provider_is_persisted_and_migrated_as_happy
 run_test "status/doctor are remote-provider aware" status_and_doctor_are_remote_provider_aware
 run_test "update passes through the persisted remote provider" update_devbox_passes_through_the_persisted_remote_provider
@@ -2409,6 +2588,11 @@ run_test "Happy daemon starts at boot" happy_daemon_starts_at_boot
 run_test "Happy .bashrc start remains a fallback" happy_bashrc_start_remains_as_fallback
 run_test "Happy boot guard only starts a paired, idle daemon" happy_daemon_guard_starts_only_a_paired_idle_daemon
 run_test "doctor checks the Happy daemon service" doctor_checks_happy_daemon_service
+run_test "Kisuke gets a lingering user session" kisuke_gets_a_lingering_user_session_for_its_own_service_management
+run_test "Kisuke .bashrc start remains a fallback" kisuke_bashrc_start_remains_as_fallback
+run_test "auth login uses kisuke connect, not bare login" auth_login_uses_kisuke_connect_not_bare_login
+run_test "doctor checks the Kisuke daemon service" doctor_checks_kisuke_daemon_service
+run_test "doctor --json reports Kisuke fields" doctor_json_reports_kisuke_fields
 run_test "agent limit-notify is installed and wired" agent_limit_notify_is_installed_and_wired
 run_test "Claude settings hook merge is idempotent" claude_settings_hook_merge_is_idempotent
 run_test "agent limit-notify scripts behave correctly" agent_limit_notify_scripts_behave_correctly
