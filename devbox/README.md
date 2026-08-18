@@ -517,6 +517,19 @@ aus, meldet der Installer das deutlich — ein erneuter `devbox auth login`
 kurz danach funktioniert dann in aller Regel, da die Session zu diesem
 Zeitpunkt inzwischen oben ist.
 
+Eine zweite, unabhängige Falle betrifft den dokumentierten Einstiegsweg
+`sudo -iu dev` (siehe [Erster Login](#erster-login-und-onboarding)): der
+simuliert zwar ein Login, meldet aber **keine** systemd-logind-Session an
+und setzt deshalb nie `XDG_RUNTIME_DIR` — selbst wenn die lingernde
+Session und ihr Bus-Socket, wie oben beschrieben, längst laufen. Jeder
+`systemctl --user`-Aufruf (auch Kisukes eigener) scheitert dann trotzdem
+mit `Failed to connect to bus: No medium found`. `/etc/profile.d/devbox.sh`
+setzt `XDG_RUNTIME_DIR` deshalb explizit für jede Login-Shell; anders als
+die durch einen Marker geschützten `~/.bashrc`-Blöcke wird diese Datei bei
+jedem Install/Update komplett neu geschrieben, der Fix erreicht also auch
+Boxen, die vor diesem Fix installiert wurden, sobald sie aktualisiert
+werden.
+
 `devbox auth login` ruft dafür `kisuke connect --headless` auf: der Befehl
 installiert und startet den `kisuke`-Dienst und schließt die Anmeldung in
 einem Schritt ab (URL öffnen, kein lokaler Browser nötig). Ein

@@ -2205,6 +2205,25 @@ kisuke_gets_a_lingering_user_session_for_its_own_service_management() {
     grep -Fq 'did not come up within 15s' "$FEATURE_KISUKE"
 }
 
+# `sudo -iu dev` (the documented way to enter this box, see install.sh's own
+# final instructions) simulates a login shell but does not register a
+# systemd-logind session, so it never sets XDG_RUNTIME_DIR - reported in
+# practice as `systemctl --user` (including Kisuke's own) failing with
+# "Failed to connect to bus: No medium found" even though
+# enable_kisuke_user_linger()'s lingering session and its bus socket were
+# confirmed up and healthy. /etc/profile.d/devbox.sh is rewritten on every
+# install/update (unlike marker-guarded ~/.bashrc blocks), so fixing it
+# there also reaches boxes that installed before this fix once they update.
+devbox_profile_sets_xdg_runtime_dir_for_sudo_iu_shells() {
+  local profile_block
+  profile_block="$(sed -n "/^cat <<'EOF' >\/etc\/profile.d\/devbox.sh\$/,/^EOF\$/p" "$INSTALL_SCRIPT")"
+
+  [[ -n "$profile_block" ]] || return 1
+
+  grep -Fq 'export XDG_RUNTIME_DIR="/run/user/$(id -u)"' <<<"$profile_block" &&
+    grep -Fq '[[ -z "${XDG_RUNTIME_DIR:-}" ]]' <<<"$profile_block"
+}
+
 # The .bashrc logic stays as a fallback for boxes whose systemd --user unit
 # is installed but didn't come up this boot, mirroring Happy's issue #19
 # fallback - just against `systemctl --user`, since Kisuke (unlike Happy)
@@ -2597,6 +2616,7 @@ run_test "Happy .bashrc start remains a fallback" happy_bashrc_start_remains_as_
 run_test "Happy boot guard only starts a paired, idle daemon" happy_daemon_guard_starts_only_a_paired_idle_daemon
 run_test "doctor checks the Happy daemon service" doctor_checks_happy_daemon_service
 run_test "Kisuke gets a lingering user session" kisuke_gets_a_lingering_user_session_for_its_own_service_management
+run_test "profile.d sets XDG_RUNTIME_DIR for sudo -iu shells" devbox_profile_sets_xdg_runtime_dir_for_sudo_iu_shells
 run_test "Kisuke .bashrc start remains a fallback" kisuke_bashrc_start_remains_as_fallback
 run_test "auth login uses kisuke connect, not bare login" auth_login_uses_kisuke_connect_not_bare_login
 run_test "doctor checks the Kisuke daemon service" doctor_checks_kisuke_daemon_service
