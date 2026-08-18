@@ -590,6 +590,20 @@ cat <<'EOF' >/etc/profile.d/devbox.sh
 export PATH="$HOME/.local/bin:/usr/local/bin:$PATH"
 export LANG="C.UTF-8"
 export LC_ALL="C.UTF-8"
+
+# `sudo -iu dev` (the documented way to enter this box) simulates a login
+# shell but does not register a systemd-logind session, so it never sets
+# XDG_RUNTIME_DIR - even though a lingering `dev` user session (enabled for
+# Kisuke Connect, see features/kisuke.sh) is genuinely running and has a
+# real bus socket at /run/user/<uid>/bus. Without this, every
+# `systemctl --user` call (including Kisuke's own) fails with "Failed to
+# connect to bus: No medium found" despite the session being fine. This
+# file is rewritten on every install/update, unlike the marker-guarded
+# ~/.bashrc blocks, so it also reaches boxes that installed before this
+# fix once they update.
+if [[ -z "${XDG_RUNTIME_DIR:-}" ]]; then
+  export XDG_RUNTIME_DIR="/run/user/$(id -u)"
+fi
 EOF
 
 chmod \
