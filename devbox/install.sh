@@ -206,7 +206,7 @@ readonly DEV_HOME="/home/${DEV_USER}"
 readonly ROOT_STATE_DIR="/var/lib/devbox"
 
 # Central version manifest (mirrors devbox/versions.env; see header comment).
-readonly DEVBOX_VERSION="${DEVBOX_VERSION:-1.2.3}"
+readonly DEVBOX_VERSION="${DEVBOX_VERSION:-1.3.0-RC1}"
 NODE_VERSION="${NODE_VERSION:-24}"
 readonly NODE_VERSION
 ERLANG_VERSION="${ERLANG_VERSION:-29.0.5}"
