@@ -503,6 +503,20 @@ funktioniert Kisukes eigener, für Server/Headless-Umgebungen vorgesehener
 Einrichtungspfad zuverlässig, ohne dass DevBox einen eigenen
 Daemon-Wrapper nachbauen muss.
 
+Das Setzen des Linger-Flags allein garantiert aber nicht, dass
+systemd-logind die User-Session inklusive Bus schon vollständig gestartet
+hat, bevor der Installer weiterläuft — auf manchen LXC-Hosts hinkt dieser
+Übergang dem Flag um ein paar Sekunden hinterher. Ein `devbox onboard`
+direkt im Anschluss an die Installation könnte dieses Rennen sonst verlieren
+und `kisuke connect`s eigene `systemctl --user`-Aufrufe treffen, bevor ein
+Bus zum Reden da ist (`[K1002] ... Failed to connect to bus: No medium
+found`). Der Installer startet die Session deshalb zusätzlich explizit und
+wartet bis zu 15 Sekunden auf den Bus-Socket unter `/run/user/<uid>/bus`,
+statt sich auf den automatischen Start zu verlassen. Bleibt der Bus dennoch
+aus, meldet der Installer das deutlich — ein erneuter `devbox auth login`
+kurz danach funktioniert dann in aller Regel, da die Session zu diesem
+Zeitpunkt inzwischen oben ist.
+
 `devbox auth login` ruft dafür `kisuke connect --headless` auf: der Befehl
 installiert und startet den `kisuke`-Dienst und schließt die Anmeldung in
 einem Schritt ab (URL öffnen, kein lokaler Browser nötig). Ein

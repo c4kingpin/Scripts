@@ -2194,7 +2194,15 @@ kisuke_gets_a_lingering_user_session_for_its_own_service_management() {
   grep -Fq 'enable_kisuke_user_linger() {' "$FEATURE_KISUKE" &&
     grep -Fq 'loginctl enable-linger "$DEV_USER"' "$FEATURE_KISUKE" &&
     grep -Fq 'enable_kisuke_user_linger' "$NORM_INSTALL" &&
-    grep -Fq 'loginctl show-user "$DEV_USER" --property=Linger --value' "$NORM_INSTALL"
+    grep -Fq 'loginctl show-user "$DEV_USER" --property=Linger --value' "$NORM_INSTALL" &&
+    # Setting the linger flag alone doesn't guarantee systemd-logind has
+    # already finished starting the user manager/bus by the time this
+    # function returns (observed in practice - see the header comment
+    # above) - start it explicitly and wait for its bus socket instead of
+    # just hoping the flag took effect immediately.
+    grep -Fq 'systemctl start "user@${dev_uid}.service"' "$NORM_FEATURE_KISUKE" &&
+    grep -Fq '[[ ! -S "/run/user/${dev_uid}/bus" ]]' "$NORM_FEATURE_KISUKE" &&
+    grep -Fq 'did not come up within 15s' "$FEATURE_KISUKE"
 }
 
 # The .bashrc logic stays as a fallback for boxes whose systemd --user unit
