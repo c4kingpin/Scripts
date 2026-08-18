@@ -73,6 +73,12 @@ Die beiden schweren, projektspezifischen Laufzeiten lassen sich abwählen,
 | `postgres` | PostgreSQL-Paket, -Dienst, Dev-Rolle/-Datenbank | im `default`-Profil |
 | `redis` | Redis-Server, systemd-Dienst | nie — nur per `DEVBOX_FEATURES` |
 
+In einem echten Terminal (nicht `curl | bash`) fragt der Installer diese
+Auswahl interaktiv ab, sofern weder `DEVBOX_PROFILE` noch `DEVBOX_FEATURES`
+gesetzt sind — siehe den Hinweis zu den interaktiven Dialogen im Abschnitt
+[Installation](#installation). Für nicht interaktive Installationen (oder um
+die Frage zu überspringen) per Umgebungsvariable vorgeben:
+
 Standardmäßig (`DEVBOX_PROFILE=default`, oder gar nicht gesetzt) sind `elixir`
 und `postgres` aktiv, `redis` nicht. Ein schlankeres Profil ohne `elixir` und
 `postgres`:
@@ -191,11 +197,12 @@ curl -fsSL https://raw.githubusercontent.com/c4kingpin/Scripts/master/devbox/ins
 Auf LXD/Incus entsprechend über `lxc exec <name> -- bash` bzw.
 `incus exec <name> -- bash`.
 
-> **Hinweis zum Autonomie-Dialog:** Bei `curl | bash` ist die Standardeingabe
-> mit der Pipe belegt, daher kann das Skript in diesem Fall **nicht**
-> interaktiv nachfragen und verwendet automatisch `balanced`. Für den
-> interaktiven Dialog das Skript zuerst herunterladen und dann als Datei
-> ausführen:
+> **Hinweis zu den interaktiven Dialogen:** Bei `curl | bash` ist die
+> Standardeingabe mit der Pipe belegt, daher kann das Skript in diesem Fall
+> **nicht** interaktiv nachfragen und verwendet für jeden Parameter, der
+> nicht explizit per Umgebungsvariable vorgegeben wurde, den jeweiligen
+> Standardwert. Für die interaktiven Dialoge das Skript zuerst
+> herunterladen und dann als Datei ausführen:
 >
 > ```bash
 > curl -fsSL -o install.sh \
@@ -203,9 +210,20 @@ Auf LXD/Incus entsprechend über `lxc exec <name> -- bash` bzw.
 > bash install.sh
 > ```
 
-Ausgeführt in einem echten Terminal fragt das Skript dann vor der eigentlichen
-Installation, wie autonom die Agenten arbeiten dürfen. **Die Auswahl gilt für
-Codex und Claude gemeinsam** — ein Profil, beide Agenten verhalten sich gleich:
+Ausgeführt in einem echten Terminal fragt das Skript vor der eigentlichen
+Installation alle Konfigurationsparameter nacheinander ab — sofern der
+jeweilige Wert nicht schon per Umgebungsvariable gesetzt wurde, überspringt
+das Skript die zugehörige Frage:
+
+1. **Optionale Laufzeiten** (`DEVBOX_PROFILE`/`DEVBOX_FEATURES`, siehe
+   [Feature-Auswahl](#feature-auswahl)) — Standard, Minimal oder
+   Custom-Auswahl einzelner Features.
+2. **Remote-Provider** (`DEVBOX_REMOTE`, siehe
+   [Remote-Provider](#remote-provider)) — Happy oder kein Remote-Zugriff.
+3. **Agenten-Autonomie** (`DEVBOX_AUTONOMY`, siehe unten).
+
+Die Auswahl bei der Autonomie-Frage gilt für Codex und Claude gemeinsam —
+ein Profil, beide Agenten verhalten sich gleich:
 
 | Profil | Verhalten | Codex | Claude |
 | --- | --- | --- | --- |
@@ -374,7 +392,10 @@ Autonomie-Konfiguration halten die Agenten zusätzlich davon ab, sie zu lesen.
 Codex und Claude bilden zusammen mit der lokalen Entwicklungsumgebung den
 Kern der DevBox. Remote-Zugriff ist optional und wird über einen
 konfigurierbaren Remote-Provider bereitgestellt. Standardmäßig wird Happy
-verwendet:
+verwendet. In einem echten Terminal fragt der Installer diese Auswahl
+interaktiv ab, sofern `DEVBOX_REMOTE` nicht gesetzt ist — siehe den Hinweis
+zu den interaktiven Dialogen im Abschnitt [Installation](#installation). Per
+Umgebungsvariable vorgegeben:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/c4kingpin/Scripts/master/devbox/install.sh |

@@ -206,7 +206,7 @@ readonly DEV_HOME="/home/${DEV_USER}"
 readonly ROOT_STATE_DIR="/var/lib/devbox"
 
 # Central version manifest (mirrors devbox/versions.env; see header comment).
-readonly DEVBOX_VERSION="${DEVBOX_VERSION:-1.2.2}"
+readonly DEVBOX_VERSION="${DEVBOX_VERSION:-1.2.3}"
 NODE_VERSION="${NODE_VERSION:-24}"
 readonly NODE_VERSION
 ERLANG_VERSION="${ERLANG_VERSION:-29.0.5}"
@@ -317,6 +317,59 @@ msg_ok "Loaded DevBox modules"
 # either built-in profile - opt in explicitly via DEVBOX_FEATURES.
 DEVBOX_ALL_OPTIONAL_FEATURES="elixir postgres redis"
 
+# Only prompt when the caller left both knobs untouched - a genuinely fresh
+# interactive install. Any explicit DEVBOX_PROFILE/DEVBOX_FEATURES (manual
+# override, or update_devbox() re-running this script with the box's
+# persisted selection) is respected as-is and never second-guessed with a
+# prompt.
+select_features() {
+  if [[ -n "${DEVBOX_PROFILE+set}" || -n "${DEVBOX_FEATURES+set}" ]]; then
+    return
+  fi
+
+  [[ -t 0 && -t 1 ]] || return
+
+  cat <<'EOF'
+
+Which optional runtimes should this DevBox install?
+
+  1) Default - Elixir/Erlang/Phoenix + PostgreSQL (recommended)
+  2) Minimal - core only (Node.js, Codex CLI, Claude CLI)
+  3) Custom  - choose each optional runtime individually
+
+EOF
+
+  local choice=""
+
+  read -r \
+    -p "Choice [1]: " \
+    choice
+
+  case "${choice:-1}" in
+    2) DEVBOX_PROFILE="minimal" ;;
+    3)
+      local reply=""
+      DEVBOX_PROFILE="minimal"
+      DEVBOX_FEATURES=""
+
+      read -r -p "Install Elixir/Erlang/Phoenix? [Y/n] " reply
+      [[ -z "$reply" || "${reply,,}" =~ ^(y|yes)$ ]] &&
+        DEVBOX_FEATURES="${DEVBOX_FEATURES:+$DEVBOX_FEATURES,}elixir"
+
+      read -r -p "Install PostgreSQL? [Y/n] " reply
+      [[ -z "$reply" || "${reply,,}" =~ ^(y|yes)$ ]] &&
+        DEVBOX_FEATURES="${DEVBOX_FEATURES:+$DEVBOX_FEATURES,}postgres"
+
+      read -r -p "Install Redis? [y/N] " reply
+      [[ "${reply,,}" =~ ^(y|yes)$ ]] &&
+        DEVBOX_FEATURES="${DEVBOX_FEATURES:+$DEVBOX_FEATURES,}redis"
+      ;;
+    *) DEVBOX_PROFILE="default" ;;
+  esac
+}
+
+select_features
+
 DEVBOX_PROFILE="${DEVBOX_PROFILE:-default}"
 
 case "$DEVBOX_PROFILE" in
@@ -356,6 +409,36 @@ feature_enabled() {
 # passes the box's persisted provider through, so a plain re-run of this
 # script (no DEVBOX_REMOTE set) only happens on a genuinely fresh install,
 # where "happy" is the correct default.
+select_remote() {
+  if [[ -n "${DEVBOX_REMOTE+set}" ]]; then
+    return
+  fi
+
+  [[ -t 0 && -t 1 ]] || return
+
+  cat <<'EOF'
+
+Which remote/session provider should this DevBox use?
+
+  1) Happy - happy / happy claude / happy codex remote session layer (recommended)
+  2) None  - host console/SSH only, no remote provider
+
+EOF
+
+  local choice=""
+
+  read -r \
+    -p "Choice [1]: " \
+    choice
+
+  case "${choice:-1}" in
+    2) DEVBOX_REMOTE="none" ;;
+    *) DEVBOX_REMOTE="happy" ;;
+  esac
+}
+
+select_remote
+
 DEVBOX_REMOTE="${DEVBOX_REMOTE:-happy}"
 
 case "$DEVBOX_REMOTE" in
