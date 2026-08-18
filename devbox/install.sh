@@ -47,6 +47,15 @@ msg_info() { printf '%b\n' "${YW}➜ $*${CL}"; }
 msg_ok() { printf '%b\n' "${GN}✓ $*${CL}"; }
 msg_error() { printf '%b\n' "${RD}✗ $*${CL}" >&2; }
 
+# Read and shown before anything else runs (even the root/OS checks below),
+# so a failure report from the very first line always names the exact
+# installer version that produced it. The rest of the version manifest
+# (Node.js, Erlang, agent CLIs, ...) is defined further down, where it's
+# actually used.
+readonly DEVBOX_VERSION="${DEVBOX_VERSION:-1.3.0-RC1}"
+
+msg_info "DevBox installer v${DEVBOX_VERSION}"
+
 error_handler() {
   local exit_code=$?
   local line="${1:-${LINENO}}"
@@ -205,8 +214,9 @@ readonly DEV_HOME="/home/${DEV_USER}"
 # ${DEV_HOME}/.config/devbox (onboarding marker, OpenRouter config, etc.).
 readonly ROOT_STATE_DIR="/var/lib/devbox"
 
-# Central version manifest (mirrors devbox/versions.env; see header comment).
-readonly DEVBOX_VERSION="${DEVBOX_VERSION:-1.3.0-RC1}"
+# Central version manifest (mirrors devbox/versions.env; see header
+# comment). DEVBOX_VERSION itself is defined and shown at the very top of
+# this file, before the root/OS checks.
 NODE_VERSION="${NODE_VERSION:-24}"
 readonly NODE_VERSION
 ERLANG_VERSION="${ERLANG_VERSION:-29.0.5}"

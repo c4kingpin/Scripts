@@ -2393,6 +2393,8 @@ record_previous_update_state() {
 }
 
 update_devbox() {
+  info "Current DevBox version: v${DEVBOX_VERSION}"
+
   require_root
 
   local repo_url="${DEVBOX_REPO_URL:-$DEFAULT_REPO_URL}"
