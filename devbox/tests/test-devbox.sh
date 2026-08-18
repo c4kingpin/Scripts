@@ -2330,6 +2330,79 @@ doctor_json_reports_kisuke_fields() {
     [[ "$(jq -r '.security.kisuke_dir_permissions' <<<"$output")" == "true" ]]
 }
 
+# Reported in practice: a box that hasn't completed `devbox auth login` yet
+# (or hit one of #69/#70's transient D-Bus races partway through
+# `kisuke connect`) can have the "kisuke" systemd --user unit installed but
+# not enabled, and not be authenticated - install.sh/devbox update both run
+# `devbox doctor` as a hard validation step at the end, so a doctor that
+# treated this expected, self-resolving state as fatal (status=1) aborted
+# the entire install/update over it. None of this is fatal: `devbox auth
+# login` is what's expected to resolve it.
+doctor_json_kisuke_not_yet_configured_is_still_healthy() {
+  local bin_dir="${TEST_TMP}/doctor-json-kisuke-partial-bin"
+  local root_state="${TEST_TMP}/doctor-json-kisuke-partial-root-state"
+  local home_dir="${TEST_TMP}/doctor-json-kisuke-partial-home"
+  local ssh_config="${TEST_TMP}/doctor-json-kisuke-partial-sshd.conf"
+  local provider_file="${TEST_TMP}/doctor-json-kisuke-partial-remote-provider"
+  local manager_functions="${TEST_TMP}/manager-functions-doctor-json-kisuke-partial.sh"
+  local devbox_version
+  local tool
+
+  devbox_version="$(grep -oP 'readonly DEVBOX_VERSION="\K[^"]+' "$MANAGER")"
+
+  mkdir -p "$bin_dir" "$root_state" "${home_dir}/.kisuke"
+  chmod 0700 "${home_dir}/.kisuke"
+
+  printf '%s\n' "$devbox_version" >"${root_state}/version"
+  printf '\n' >"${root_state}/installed-features"
+  printf 'kisuke\n' >"$provider_file"
+
+  for tool in claude codex fd gh git python3 rg; do
+    printf '#!/usr/bin/env bash\nexit 0\n' >"${bin_dir}/${tool}"
+    chmod 0755 "${bin_dir}/${tool}"
+  done
+
+  # Not authenticated: `kisuke whoami` fails.
+  printf '#!/usr/bin/env bash\nexit 1\n' >"${bin_dir}/kisuke"
+  chmod 0755 "${bin_dir}/kisuke"
+
+  # Unit installed (`cat` succeeds) but neither enabled nor active/running -
+  # the exact partial state reported in practice.
+  printf '#!/usr/bin/env bash\ncase "$*" in\n  *cat*) exit 0 ;;\n  *) exit 1 ;;\nesac\n' >"${bin_dir}/systemctl"
+  chmod 0755 "${bin_dir}/systemctl"
+
+  printf '#!/usr/bin/env bash\n[[ "$1" == "--version" ]] && echo "v24.0.0"\nexit 0\n' >"${bin_dir}/node"
+  chmod 0755 "${bin_dir}/node"
+
+  printf '#!/usr/bin/env bash\necho "|-- @kisuke/cli@1.2.20"\nexit 0\n' >"${bin_dir}/npm"
+  chmod 0755 "${bin_dir}/npm"
+
+  sed 's/^readonly //' "$MANAGER" | head -n -1 >"$manager_functions"
+
+  local output status=0
+  output="$(
+    PATH="${bin_dir}:/usr/bin:/bin" \
+    HOME="$home_dir" \
+    bash -c '
+      # shellcheck source=/dev/null
+      source "'"$manager_functions"'"
+      ROOT_STATE_DIR="'"$root_state"'"
+      ROOT_VERSION_FILE="'"${root_state}/version"'"
+      FEATURES_FILE="'"${root_state}/installed-features"'"
+      INSTALL_STATE_FILE="'"${root_state}/install-state.json"'"
+      REMOTE_PROVIDER_FILE="'"$provider_file"'"
+      KISUKE_HOME="'"${home_dir}/.kisuke"'"
+      SSH_CONFIG="'"$ssh_config"'"
+      doctor json
+    '
+  )" || status=$?
+
+  jq -e '.healthy == true' <<<"$output" >/dev/null &&
+    [[ "$status" -eq 0 ]] &&
+    [[ "$(jq -r '.authentication.kisuke' <<<"$output")" == "false" ]] &&
+    [[ "$(jq -r '.services.kisuke_daemon' <<<"$output")" == "not running" ]]
+}
+
 # Issue #59: a Claude/Codex session that can't proceed because of a
 # usage/rate limit must push a Happy notification instead of just going
 # silent. install_agent_limit_notify has to run after Happy (it shells out
@@ -2621,6 +2694,7 @@ run_test "Kisuke .bashrc start remains a fallback" kisuke_bashrc_start_remains_a
 run_test "auth login uses kisuke connect, not bare login" auth_login_uses_kisuke_connect_not_bare_login
 run_test "doctor checks the Kisuke daemon service" doctor_checks_kisuke_daemon_service
 run_test "doctor --json reports Kisuke fields" doctor_json_reports_kisuke_fields
+run_test "doctor stays healthy for a not-yet-configured Kisuke box" doctor_json_kisuke_not_yet_configured_is_still_healthy
 run_test "agent limit-notify is installed and wired" agent_limit_notify_is_installed_and_wired
 run_test "Claude settings hook merge is idempotent" claude_settings_hook_merge_is_idempotent
 run_test "agent limit-notify scripts behave correctly" agent_limit_notify_scripts_behave_correctly
