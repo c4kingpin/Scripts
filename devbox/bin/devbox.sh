@@ -2113,17 +2113,23 @@ doctor() {
       service_kisuke_daemon="not running"
     fi
 
-    # Unlike Happy's devbox-happy-daemon.service (installed unconditionally
-    # by install.sh), the "kisuke" systemd --user unit is installed lazily
-    # by `kisuke connect` itself, during `devbox auth login` - a box that
-    # hasn't been through that yet correctly has no unit at all, so its
-    # absence here is expected, not a failure.
+    # Unlike Happy's devbox-happy-daemon.service (installed AND enabled
+    # atomically, in one step, unconditionally by install.sh), Kisuke's own
+    # "kisuke" systemd --user unit is written and enabled across several
+    # steps of `kisuke connect`'s own guided setup - a box that hasn't
+    # completed that yet (or hit a transient failure partway through, e.g.
+    # #69/#70's D-Bus races) can legitimately have the unit installed but
+    # not enabled, or not installed at all. Both are informational here,
+    # like the authentication/daemon-running checks above: none of this is
+    # something DevBox itself owns or can fix by re-running the installer,
+    # and treating it as fatal would abort `install.sh`/`devbox update`'s
+    # own doctor validation step over a state `devbox auth login` is
+    # expected to resolve.
     if kisuke_daemon_service_is_installed; then
       if kisuke_daemon_service_is_enabled; then
         ok "Kisuke daemon service (${KISUKE_SERVICE})"
       else
-        warn "${KISUKE_SERVICE} service is installed but not enabled"
-        status=1
+        warn "${KISUKE_SERVICE} service is installed but not enabled (run: devbox auth login)"
       fi
     else
       warn "${KISUKE_SERVICE} service is not installed yet; run: devbox auth login"
