@@ -356,7 +356,9 @@ select_features() {
     return
   fi
 
-  [[ -t 0 && -t 1 ]] || return
+  if [[ ! -t 0 || ! -t 1 ]]; then
+    return
+  fi
 
   cat <<'EOF'
 
@@ -443,7 +445,9 @@ select_remote() {
     return
   fi
 
-  [[ -t 0 && -t 1 ]] || return
+  if [[ ! -t 0 || ! -t 1 ]]; then
+    return
+  fi
 
   cat <<'EOF'
 
