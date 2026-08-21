@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Theater-PC installer for Ubuntu 24.04 LTS
-# Installs Linux Show Player, Scarlett control software, and operating aids.
+# Installs Linux Show Player, Spotify, Scarlett control software, and operating aids.
 
 set -Eeuo pipefail
 umask 022
@@ -23,6 +23,7 @@ Optionen:
   --project NAME          Projektname (Standard: Stueck_2026)
   --upgrade-system        Vor der Installation ein vollständiges System-Upgrade ausführen
   --skip-scarlett-gui     alsa-scarlett-gui nicht aus dem Quellcode bauen
+  --skip-spotify          Spotify nicht als Snap installieren
   -h, --help              Diese Hilfe anzeigen
 
 Beispiel:
@@ -63,6 +64,25 @@ install_scarlett_gui() {
   run_as_target make -C "${source_dir}/src" -j"$(nproc)"
   sudo make -C "${source_dir}/src" install
   success "alsa-scarlett-gui installiert"
+}
+
+install_spotify() {
+  info "Installiere Spotify als Snap"
+  if sudo snap list spotify >/dev/null 2>&1; then
+    success "Spotify ist bereits installiert"
+  else
+    sudo snap install spotify
+    success "Spotify installiert"
+  fi
+}
+
+show_audio_outputs() {
+  info "Prüfe Audioausgänge für Scarlett und Spotify"
+  printf '%s\n' "ALSA-Geräte:"
+  run_as_target aplay -l || info "Noch kein ALSA-Audiogerät erkannt; Scarlett bitte anschließen."
+  printf '%s\n' "PulseAudio/PipeWire-Ausgänge:"
+  run_as_target pactl list short sinks || \
+    info "Kein laufender Audio-Server erkannt; nach der Desktop-Anmeldung erneut prüfen."
 }
 
 create_project_tree() {
@@ -116,6 +136,7 @@ TARGET_USER=""
 PROJECT_NAME="Stueck_2026"
 UPGRADE_SYSTEM=false
 INSTALL_SCARLETT_GUI=true
+INSTALL_SPOTIFY=true
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -131,6 +152,7 @@ while [[ $# -gt 0 ]]; do
       ;;
     --upgrade-system) UPGRADE_SYSTEM=true; shift ;;
     --skip-scarlett-gui) INSTALL_SCARLETT_GUI=false; shift ;;
+    --skip-spotify) INSTALL_SPOTIFY=false; shift ;;
     -h|--help) usage; exit 0 ;;
     *) die "Unbekannte Option: $1" ;;
   esac
@@ -159,12 +181,17 @@ fi
 
 info "Installiere Grundwerkzeuge"
 sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
-  flatpak alsa-utils pavucontrol git make gcc libgtk-4-dev libasound2-dev libssl-dev
+  flatpak snapd alsa-utils pulseaudio-utils pavucontrol git make gcc libgtk-4-dev libasound2-dev libssl-dev
 
 info "Installiere Linux Show Player für ${TARGET_USER}"
 run_as_target flatpak remote-add --user --if-not-exists flathub \
   https://flathub.org/repo/flathub.flatpakrepo
 run_as_target flatpak install --user -y flathub "$APP_ID"
+
+if [[ "$INSTALL_SPOTIFY" == true ]]; then
+  install_spotify
+  show_audio_outputs
+fi
 
 if [[ "$INSTALL_SCARLETT_GUI" == true ]]; then
   install_scarlett_gui
