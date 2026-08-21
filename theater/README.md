@@ -31,13 +31,18 @@ manuell testen und durchführen.
 
 ## Was das Skript einrichtet
 
-- Ubuntu-Tools: Flatpak, Snap, ALSA-Werkzeuge, pavucontrol und Build-Abhängigkeiten
+- Ubuntu-Tools: Flatpak, Snap, ALSA-Werkzeuge, pulseaudio-utils, pavucontrol und Build-Abhängigkeiten
 - Linux Show Player (`org.linuxshowplayer.LinuxShowPlayer`) über Flathub
 - Spotify als offizielles Snap-Paket
 - `alsa-scarlett-gui` aus dem offiziellen Quellrepository
 - Projektbaum `~/Theater/<Projekt>/{Show,Audio,Dokumentation,Backup}`
 - GNOME-Einstellungen gegen Bildschirm-Leerlauf, Suspend und
   Benachrichtigungsbanner
+
+Zusätzlich werden `pulseaudio-utils` und eine Audioausgabe-Prüfung installiert.
+Nach der Spotify-Installation zeigt der Installer ALSA- und
+PulseAudio/PipeWire-Ausgänge an. Die Scarlett sollte dort als Ausgabegerät
+erscheinen.
 
 Es richtet kein automatisches Login ein und schaltet WLAN/Bluetooth nicht ab:
 beides sind betriebsspezifische Sicherheits- bzw. Verwaltungsentscheidungen.
@@ -53,17 +58,20 @@ vorhersehbar als lokal gespeicherte WAV-Dateien in Linux Show Player. Mit
 
 1. Scarlett 18i20 direkt per USB verbinden und `aplay -l` sowie `aconnect -l`
    ausführen.
-2. `alsa-scarlett-gui` starten, dann Playback 1 auf Line Output 1 und Playback
+2. Mit `pactl list short sinks` prüfen, ob die Scarlett als Audioausgang
+   vorhanden ist. In `pavucontrol` Spotify bei laufender Wiedergabe auf diesen
+   Ausgang umstellen.
+3. `alsa-scarlett-gui` starten, dann Playback 1 auf Line Output 1 und Playback
    2 auf Line Output 2 routen.
-3. Scarlett Line Out 1/2 mit dem Tonmischpult verbinden, Scarlett MIDI OUT mit
+4. Scarlett Line Out 1/2 mit dem Tonmischpult verbinden, Scarlett MIDI OUT mit
    MA Lightcommander MIDI IN.
-4. Linux Show Player mit `flatpak run org.linuxshowplayer.LinuxShowPlayer`
+5. Linux Show Player mit `flatpak run org.linuxshowplayer.LinuxShowPlayer`
    öffnen, das Scarlett explizit als Audio- und MIDI-Ausgabe auswählen und
    List Layout mit automatischer Auswahl des nächsten Cues konfigurieren.
-5. Für jeden Licht-Cue die gewünschte Lightcommander-Memory gezielt per
+6. Für jeden Licht-Cue die gewünschte Lightcommander-Memory gezielt per
    MIDI-Control-Change ansteuern. Die Controller-Nummer, der MIDI-Kanal und
    die Werte stammen aus der MIDI-Tabelle des konkreten Lightcommanders.
-6. Vor jeder Vorstellung Audio links/rechts, MIDI, die wichtigen Memories,
+7. Vor jeder Vorstellung Audio links/rechts, MIDI, die wichtigen Memories,
    Blackout, Applauslicht und die GO-Taste testen.
 
 Für das Projekt einheitlich WAV mit 48 kHz und 24 Bit verwenden. Den gesamten

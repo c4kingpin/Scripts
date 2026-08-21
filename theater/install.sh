@@ -76,6 +76,15 @@ install_spotify() {
   fi
 }
 
+show_audio_outputs() {
+  info "Prüfe Audioausgänge für Scarlett und Spotify"
+  printf '%s\n' "ALSA-Geräte:"
+  run_as_target aplay -l || info "Noch kein ALSA-Audiogerät erkannt; Scarlett bitte anschließen."
+  printf '%s\n' "PulseAudio/PipeWire-Ausgänge:"
+  run_as_target pactl list short sinks || \
+    info "Kein laufender Audio-Server erkannt; nach der Desktop-Anmeldung erneut prüfen."
+}
+
 create_project_tree() {
   local project_root="${TARGET_HOME}/Theater/${PROJECT_NAME}"
 
@@ -172,7 +181,7 @@ fi
 
 info "Installiere Grundwerkzeuge"
 sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
-  flatpak snapd alsa-utils pavucontrol git make gcc libgtk-4-dev libasound2-dev libssl-dev
+  flatpak snapd alsa-utils pulseaudio-utils pavucontrol git make gcc libgtk-4-dev libasound2-dev libssl-dev
 
 info "Installiere Linux Show Player für ${TARGET_USER}"
 run_as_target flatpak remote-add --user --if-not-exists flathub \
@@ -181,6 +190,7 @@ run_as_target flatpak install --user -y flathub "$APP_ID"
 
 if [[ "$INSTALL_SPOTIFY" == true ]]; then
   install_spotify
+  show_audio_outputs
 fi
 
 if [[ "$INSTALL_SCARLETT_GUI" == true ]]; then
