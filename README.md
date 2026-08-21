@@ -7,6 +7,7 @@ Tests.
 | Projekt | Beschreibung |
 | --- | --- |
 | [`devbox/`](devbox/) | Isolierte Entwicklungsumgebung für Codex und Claude in einem Ubuntu-LXC-Container: Agenten-CLIs, Node.js, Erlang/Elixir/Phoenix, PostgreSQL, GitHub CLI. |
+| [`theater/`](theater/) | Ubuntu-24.04-Grundinstallation für Linux Show Player, Focusrite Scarlett 18i20 (1st Gen) und MIDI-Ansteuerung eines MA Lightcommander. |
 
 ## Aufbau
 
