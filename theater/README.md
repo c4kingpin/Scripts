@@ -1,7 +1,7 @@
 # Theater-PC auf Ubuntu 24.04
 
 Dieses Verzeichnis enthält eine reproduzierbare Grundinstallation für einen
-Theater-PC mit Linux Show Player, Focusrite Scarlett 18i20 der ersten
+Theater-PC mit Linux Show Player, Spotify, Focusrite Scarlett 18i20 der ersten
 Generation und einem per MIDI angesteuerten MA Lightcommander 12/2.
 
 Der Rechner erzeugt **kein DMX**. Das Scarlett überträgt Audio und MIDI; der
@@ -31,8 +31,9 @@ manuell testen und durchführen.
 
 ## Was das Skript einrichtet
 
-- Ubuntu-Tools: Flatpak, ALSA-Werkzeuge, pavucontrol und Build-Abhängigkeiten
+- Ubuntu-Tools: Flatpak, Snap, ALSA-Werkzeuge, pavucontrol und Build-Abhängigkeiten
 - Linux Show Player (`org.linuxshowplayer.LinuxShowPlayer`) über Flathub
+- Spotify als offizielles Snap-Paket
 - `alsa-scarlett-gui` aus dem offiziellen Quellrepository
 - Projektbaum `~/Theater/<Projekt>/{Show,Audio,Dokumentation,Backup}`
 - GNOME-Einstellungen gegen Bildschirm-Leerlauf, Suspend und
@@ -40,6 +41,13 @@ manuell testen und durchführen.
 
 Es richtet kein automatisches Login ein und schaltet WLAN/Bluetooth nicht ab:
 beides sind betriebsspezifische Sicherheits- bzw. Verwaltungsentscheidungen.
+
+Spotify kann mit `spotify` gestartet und anschließend mit einem persönlichen
+Spotify-Konto angemeldet werden. Es ist für Pausen- und Hintergrundmusik
+geeignet, aber nicht für ausfallsichere Aufführungs-Cues: Streaming,
+Kontozugang, Werbung (Free-Konto) und mögliche App-Updates machen es weniger
+vorhersehbar als lokal gespeicherte WAV-Dateien in Linux Show Player. Mit
+`--skip-spotify` lässt sich die Installation auslassen.
 
 ## Nach der Installation
 
@@ -65,4 +73,5 @@ mindestens einen USB-Stick sichern.
 ## Quellen
 
 - [Linux Show Player auf Flathub](https://flathub.org/en/apps/org.linuxshowplayer.LinuxShowPlayer)
+- [Spotify für Linux](https://www.spotify.com/bf-en/download/linux/)
 - [alsa-scarlett-gui Installationshinweise](https://github.com/geoffreybennett/alsa-scarlett-gui/blob/master/docs/INSTALL.md)
