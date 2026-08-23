@@ -1035,6 +1035,9 @@ multica_external_reverse_proxy_is_restricted_and_uses_token_login() {
     grep -Fq 'DEVBOX_MULTICA_SERVER_URL' "$FEATURE_MULTICA" &&
     grep -Fq 'DEVBOX_MULTICA_PROXY_CIDR' "$FEATURE_MULTICA" &&
     grep -Fq 'MULTICA_TRUSTED_PROXIES=${proxy_cidr}' "$FEATURE_MULTICA" &&
+    grep -Fq 'COOKIE_DOMAIN=${cookie_domain}' "$FEATURE_MULTICA" &&
+    grep -Fq 'NEXT_PUBLIC_API_URL=${server_url}' "$FEATURE_MULTICA" &&
+    grep -Fq 'NEXT_PUBLIC_WS_URL=${public_ws_url}' "$FEATURE_MULTICA" &&
     grep -Fq 'DEVBOX_MULTICA' "$FEATURE_MULTICA" &&
     grep -Fq 'multica login --token' "$MANAGER" &&
     grep -Fq 'reverse-proxied Multica web UI' "$MANAGER" &&
