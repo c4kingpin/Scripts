@@ -49,6 +49,8 @@ readonly KISUKE_SERVICE="kisuke"
 readonly MULTICA_HOME="${DEV_HOME}/.multica"
 readonly MULTICA_SERVICE="devbox-multica-daemon.service"
 readonly MULTICA_SERVICE_UNIT="/etc/systemd/system/${MULTICA_SERVICE}"
+readonly MULTICA_SELF_HOST_URL="http://127.0.0.1:3000"
+readonly MULTICA_SELF_HOST_HEALTH_URL="http://127.0.0.1:8080/healthz"
 
 readonly OPENROUTER_ENV="${STATE_DIR}/openrouter.env"
 readonly OPENROUTER_PROFILE="${DEV_HOME}/.codex/openrouter.config.toml"
@@ -979,6 +981,10 @@ multica_daemon_is_running() {
   multica daemon status >/dev/null 2>&1
 }
 
+multica_self_host_is_running() {
+  curl -fsS "$MULTICA_SELF_HOST_HEALTH_URL" >/dev/null 2>&1
+}
+
 harden_multica_state() {
   [[ -d "$MULTICA_HOME" ]] || return 0
   chmod 0700 "$MULTICA_HOME"
@@ -1000,6 +1006,12 @@ multica_auth_status() {
     warn "Multica daemon is not running"
   fi
 
+  if multica_self_host_is_running; then
+    ok "Multica self-hosted server is running (${MULTICA_SELF_HOST_URL})"
+  else
+    warn "Multica self-hosted server is not running"
+  fi
+
   if multica_daemon_service_is_installed && multica_daemon_service_is_enabled; then
     ok "Multica daemon starts automatically at boot (${MULTICA_SERVICE})"
   else
@@ -1013,9 +1025,9 @@ multica_auth_login() {
   if multica_is_authenticated; then
     ok "Multica is already authenticated"
   else
-    info "Signing in to Multica"
-    info "For this headless DevBox, paste a token when prompted (create one at multica.ai/settings?tab=tokens)."
-    multica login --token=
+    info "Configuring the self-hosted Multica server"
+    info "Use an SSH tunnel to open ${MULTICA_SELF_HOST_URL} locally if this DevBox has no browser."
+    multica setup self-host
   fi
 
   harden_multica_state
@@ -1696,7 +1708,8 @@ Multica agent workspace
 
 
 Multica assigns issues to the installed agent CLIs and runs them on this
-DevBox. Create agents and assign work from Multica after authentication.
+DevBox. Its server is self-hosted and bound to 127.0.0.1:3000; use an SSH
+tunnel or a reverse proxy to open the web interface from another machine.
 
 Authentication:
 
@@ -1704,8 +1717,8 @@ Authentication:
   devbox auth login
   devbox auth logout
 
-For a headless DevBox, `devbox auth login` prompts for a Multica API token.
-Create it at https://multica.ai/settings?tab=tokens.
+`devbox auth login` runs `multica setup self-host`, which configures the CLI
+for this local server, authenticates, and starts the agent daemon.
 
 
 Boot behaviour:
@@ -2341,6 +2354,13 @@ doctor() {
       ok "Multica is authenticated"
     else
       warn "Multica is not authenticated (run: devbox auth login)"
+    fi
+
+    if multica_self_host_is_running; then
+      ok "Multica self-hosted server"
+    else
+      warn "Multica self-hosted server is not running"
+      status=1
     fi
 
     if multica_daemon_is_running; then

@@ -421,16 +421,34 @@ curl -fsSL https://raw.githubusercontent.com/c4kingpin/Scripts/master/devbox/ins
   env DEVBOX_REMOTE=none bash
 ```
 
-[Multica](https://github.com/multica-ai/multica) ist ebenfalls als
-Remote-Provider verfügbar. Es installiert den Multica-CLI-Daemon, der die
-bereits von DevBox installierten Codex- und Claude-CLIs als Agent-Runtimes
-ausführt. Die Anmeldung erfolgt anschließend mit `devbox auth login`; in der
-headless LXC-Umgebung wird dabei ein Multica-API-Token abgefragt.
+[Multica](https://github.com/multica-ai/multica) läuft als Remote-Provider
+vollständig self-hosted: DevBox installiert Docker, startet den offiziellen
+Compose-Stack (PostgreSQL, Backend und Web-UI) und bindet dessen Ports nur an
+`127.0.0.1:3000` und `127.0.0.1:8080`. Die Images sind auf die in
+`devbox version` angezeigte Multica-Version gepinnt. Der LXC-Container muss
+Docker ausführen dürfen (bei Proxmox typischerweise mit aktivierter
+`nesting`-Option); der Installer prüft das mit `docker info`.
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/c4kingpin/Scripts/master/devbox/install.sh |
   env DEVBOX_REMOTE=multica bash
 ```
+
+Nach der Installation die Web-UI über einen SSH-Tunnel öffnen und die lokale
+Multica-Instanz anmelden:
+
+```bash
+ssh -L 3000:127.0.0.1:3000 -L 8080:127.0.0.1:8080 dev@<devbox-host>
+# Danach lokal im Browser: http://localhost:3000
+# Auf der DevBox:
+devbox auth login
+```
+
+`devbox auth login` führt `multica setup self-host` aus. Die selbst gehostete
+Serverkonfiguration liegt root-geschützt unter
+`/opt/devbox/multica-self-host/`; für die E-Mail-Anmeldung kann dort später
+ein `RESEND_API_KEY` ergänzt werden. Ohne Mail-Anbieter schreibt Multica den
+einmaligen Bestätigungscode in die Backend-Logs.
 
 Die getroffene Auswahl landet in `/var/lib/devbox/remote-provider`,
 erscheint in `devbox status` und `devbox doctor --json`
