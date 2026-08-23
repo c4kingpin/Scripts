@@ -428,6 +428,9 @@ Compose-Stack (PostgreSQL, Backend und Web-UI) und bindet dessen Ports nur an
 `devbox version` angezeigte Multica-Version gepinnt. Der LXC-Container muss
 Docker ausführen dürfen (bei Proxmox typischerweise mit aktivierter
 `nesting`-Option); der Installer prüft das mit `docker info`.
+Zusätzlich zieht er vor dem Compose-Stack das angepinnte Backend-Image als
+OverlayFS-Test. Bei einer LXC-Sperre nennt die Fehlermeldung direkt die nötige
+Proxmox-Einstellung (`nesting=1,keyctl=1`).
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/c4kingpin/Scripts/master/devbox/install.sh |

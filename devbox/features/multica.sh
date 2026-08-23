@@ -50,6 +50,37 @@ install_multica() {
   msg_ok "Installed Multica CLI"
 }
 
+# `docker info` only proves that the daemon is reachable. In an LXC
+# container it can still fail later, while extracting the first image layer,
+# because OverlayFS mounts are denied by the host. Pull the exact backend
+# image needed below before downloading the whole Compose stack so that case
+# gets a useful, actionable error.
+validate_multica_docker_storage() {
+  local image="ghcr.io/multica-ai/multica-backend:v${MULTICA_VERSION}"
+  local log_file
+
+  log_file="$(mktemp)"
+
+  msg_info "Checking Docker storage support for Multica"
+
+  if docker pull --quiet "$image" >"$log_file" 2>&1; then
+    rm -f "$log_file"
+    msg_ok "Docker can extract Multica images"
+    return
+  fi
+
+  if grep -Eqi 'failed to mount.*overlay|operation not permitted.*overlay|overlay.*operation not permitted' "$log_file"; then
+    rm -f "$log_file"
+    msg_error "Docker OverlayFS is blocked by this LXC host. On Proxmox, enable nesting and keyctl for this CT: pct set <CTID> -features nesting=1,keyctl=1; then reboot the CT and re-run the installer."
+    exit 1
+  fi
+
+  msg_error "Docker could not pull the required Multica backend image (${image})."
+  tail -n 20 "$log_file" >&2
+  rm -f "$log_file"
+  exit 1
+}
+
 install_multica_self_host() {
   msg_info "Installing Multica self-host dependencies"
 
@@ -64,6 +95,8 @@ install_multica_self_host() {
     msg_error "Docker cannot run in this LXC container. Enable nesting for the container, then re-run the installer."
     exit 1
   fi
+
+  validate_multica_docker_storage
 
   install -d -o root -g root -m 0700 "$MULTICA_SELF_HOST_DIR"
   curl_with_retry "$MULTICA_COMPOSE_URL" "$MULTICA_COMPOSE_FILE"
