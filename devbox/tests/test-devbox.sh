@@ -1035,6 +1035,9 @@ multica_external_reverse_proxy_is_restricted_and_uses_token_login() {
     grep -Fq 'DEVBOX_MULTICA_SERVER_URL' "$FEATURE_MULTICA" &&
     grep -Fq 'DEVBOX_MULTICA_PROXY_CIDR' "$FEATURE_MULTICA" &&
     grep -Fq 'MULTICA_TRUSTED_PROXIES=${proxy_cidr}' "$FEATURE_MULTICA" &&
+    grep -Fq 'COOKIE_DOMAIN=${cookie_domain}' "$FEATURE_MULTICA" &&
+    grep -Fq 'NEXT_PUBLIC_API_URL=${server_url}' "$FEATURE_MULTICA" &&
+    grep -Fq 'NEXT_PUBLIC_WS_URL=${public_ws_url}' "$FEATURE_MULTICA" &&
     grep -Fq 'DEVBOX_MULTICA' "$FEATURE_MULTICA" &&
     grep -Fq 'multica login --token' "$MANAGER" &&
     grep -Fq 'reverse-proxied Multica web UI' "$MANAGER" &&
@@ -1928,6 +1931,16 @@ devbox_remote_defaults_to_happy_and_validates_input() {
     grep -Fq 'Invalid DEVBOX_REMOTE' "$INSTALL_SCRIPT"
 }
 
+interactive_multica_setup_can_collect_reverse_proxy_configuration() {
+  grep -Fq 'DEVBOX_REMOTE_INTERACTIVE_SELECTION=0' "$INSTALL_SCRIPT" &&
+    grep -Fq 'select_multica_reverse_proxy() {' "$INSTALL_SCRIPT" &&
+    grep -Fq 'Use an external reverse proxy on another host?' "$INSTALL_SCRIPT" &&
+    grep -Fq 'DEVBOX_MULTICA_APP_URL' "$INSTALL_SCRIPT" &&
+    grep -Fq 'DEVBOX_MULTICA_SERVER_URL' "$INSTALL_SCRIPT" &&
+    grep -Fq 'DEVBOX_MULTICA_PROXY_CIDR' "$INSTALL_SCRIPT" &&
+    grep -Fq 'select_multica_reverse_proxy' "$INSTALL_SCRIPT"
+}
+
 # Each remote provider is a module (features/<name>.sh) exposing four hooks
 # install.sh dispatches to generically - remote_install_<name>,
 # remote_bashrc_<name>, remote_validate_<name>, remote_banner_<name> (see
@@ -2740,6 +2753,7 @@ run_test "shellcheck exceptions are not globally disabled" shellcheck_exceptions
 run_test "redis is a separate optional feature, disabled by default" redis_is_a_separate_optional_feature_disabled_by_default
 run_test "redis validation and doctor are feature-aware" redis_validation_and_doctor_are_feature_aware
 run_test "DEVBOX_REMOTE defaults to happy and validates input" devbox_remote_defaults_to_happy_and_validates_input
+run_test "interactive Multica setup can collect reverse-proxy configuration" interactive_multica_setup_can_collect_reverse_proxy_configuration
 run_test "install gates Happy installation on remote provider" install_gates_happy_installation_on_remote_provider
 run_test "install gates Kisuke installation on remote provider" install_gates_kisuke_installation_on_remote_provider
 run_test "remote provider is persisted and migrated as happy" remote_provider_is_persisted_and_migrated_as_happy

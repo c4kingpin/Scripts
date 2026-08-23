@@ -455,6 +455,9 @@ einmaligen Bestätigungscode in die Backend-Logs.
 Läuft der Reverse Proxy auf einem anderen Host, die öffentlichen HTTPS-URLs
 und ausschließlich dessen IP/CIDR beim Installieren übergeben:
 
+Bei einer interaktiven Neuinstallation (`DEVBOX_REMOTE` nicht gesetzt) fragt
+die Auswahl von **Multica** dieselben drei Werte optional ab.
+
 ```bash
 curl -fsSL https://raw.githubusercontent.com/c4kingpin/Scripts/master/devbox/install.sh |
   env DEVBOX_REMOTE=multica \
@@ -472,6 +475,11 @@ Proxy routet die App-URL nach `http://<devbox-ip>:3000` und die API-URL nach
 in der Web-App einen persönlichen
 Multica-Token erzeugen; `devbox auth login` fragt diesen Token ab und benötigt
 keinen Browser-Callback auf der DevBox.
+
+Bei unterschiedlichen App- und API-Hosts leitet DevBox automatisch die
+gemeinsame Cookie-Domain ab (etwa `.example.com` für `app.example.com` und
+`api.example.com`) und setzt CORS, API- sowie WebSocket-URLs. Beide Hosts
+müssen daher unter derselben registrierten Domain liegen.
 
 Die getroffene Auswahl landet in `/var/lib/devbox/remote-provider`,
 erscheint in `devbox status` und `devbox doctor --json`
