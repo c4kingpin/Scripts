@@ -236,6 +236,7 @@ MULTICA_VERSION="${MULTICA_VERSION:-0.4.32}"
 # valid DEVBOX_REMOTE value but deliberately not listed here - it has no
 # module and no hooks to call.
 readonly DEVBOX_REMOTE_PROVIDERS="happy kisuke multica"
+DEVBOX_REMOTE_INTERACTIVE_SELECTION=0
 
 DEVBOX_REPO_URL="${DEVBOX_REPO_URL:-https://raw.githubusercontent.com/c4kingpin/Scripts}"
 DEVBOX_GITHUB_REPO="${DEVBOX_GITHUB_REPO:-c4kingpin/Scripts}"
@@ -475,6 +476,8 @@ EOF
     4) DEVBOX_REMOTE="none" ;;
     *) DEVBOX_REMOTE="happy" ;;
   esac
+
+  DEVBOX_REMOTE_INTERACTIVE_SELECTION=1
 }
 
 select_remote
@@ -487,6 +490,42 @@ if [[ "$DEVBOX_REMOTE" != "none" &&
   msg_error "Invalid DEVBOX_REMOTE: ${DEVBOX_REMOTE} (expected none or one of: ${DEVBOX_REMOTE_PROVIDERS})"
   exit 1
 fi
+
+select_multica_reverse_proxy() {
+  local choice=""
+
+  # Environment variables are the non-interactive interface. Ask only during
+  # a fresh, interactive provider selection, never while devbox update reruns
+  # the installer for an already configured Multica box.
+  [[ "$DEVBOX_REMOTE" == "multica" && "$DEVBOX_REMOTE_INTERACTIVE_SELECTION" -eq 1 ]] || return 0
+
+  cat <<'EOF'
+
+Multica runs locally by default (127.0.0.1 only).
+EOF
+  read -r -p "Use an external reverse proxy on another host? [y/N]: " choice
+
+  case "${choice,,}" in
+    y | yes)
+      read -r -p "Public Multica app URL (e.g. https://multica.example.com): " DEVBOX_MULTICA_APP_URL
+      read -r -p "Public Multica API URL (e.g. https://api.multica.example.com): " DEVBOX_MULTICA_SERVER_URL
+      read -r -p "Reverse-proxy IPv4 CIDR (e.g. 203.0.113.10/32): " DEVBOX_MULTICA_PROXY_CIDR
+
+      [[ -n "$DEVBOX_MULTICA_APP_URL" && -n "$DEVBOX_MULTICA_SERVER_URL" && -n "$DEVBOX_MULTICA_PROXY_CIDR" ]] || {
+        msg_error "All reverse-proxy values are required when external access is enabled."
+        exit 1
+      }
+      ;;
+    "" | n | no)
+      ;;
+    *)
+      msg_error "Please answer y or n."
+      exit 1
+      ;;
+  esac
+}
+
+select_multica_reverse_proxy
 
 msg_ok "DevBox profile: ${DEVBOX_PROFILE} (optional features: ${devbox_selected_features:-none})"
 
