@@ -368,19 +368,52 @@ install_multica_daemon_service() {
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-# An unconfigured DevBox is valid: wait for `devbox auth login` rather than
-# making boot fail until the owner has configured the local self-host server.
-if ! curl -fsS http://127.0.0.1:8080/healthz >/dev/null 2>&1; then
-  echo "Multica self-hosted server is not healthy; nothing to start."
-  exit 0
+multica_is_authenticated() {
+  local auth_status
+
+  # Multica 0.4.x returns success after a server URL was configured, even
+  # without a token. Its status text is the reliable authentication signal.
+  auth_status="$(multica auth status 2>&1)" || return 1
+  [[ "$auth_status" != *"Not authenticated"* && "$auth_status" == *"Authenticated"* ]]
+}
+
+multica_daemon_is_running() {
+  local daemon_status
+
+  # Likewise, a stopped daemon returns success. Inspect the documented JSON
+  # state instead of treating the process exit status as authoritative.
+  daemon_status="$(multica daemon status --output json 2>/dev/null)" || return 1
+  [[ "$daemon_status" == *'"status": "running"'* ]]
+}
+
+wait_for_multica_server() {
+  local waited=0
+
+  until curl -fsS http://127.0.0.1:8080/healthz >/dev/null 2>&1; do
+    if (( waited >= 300 )); then
+      echo "Multica self-hosted server did not become healthy within five minutes."
+      return 1
+    fi
+    sleep 3
+    waited=$((waited + 3))
+  done
+}
+
+# Docker starts the Compose containers asynchronously after a reboot. Wait for
+# the backend instead of treating the first early health-check failure as a
+# successful, permanent service start.
+if ! wait_for_multica_server; then
+  exit 1
 fi
 
-if ! multica auth status >/dev/null 2>&1; then
+# An unconfigured DevBox is valid: wait for `devbox auth login` rather than
+# making boot fail until the owner has configured the local self-host server.
+if ! multica_is_authenticated; then
   echo "Multica is not authenticated; nothing to start."
   exit 0
 fi
 
-if multica daemon status >/dev/null 2>&1; then
+if multica_daemon_is_running; then
   echo "Multica daemon is already running."
   exit 0
 fi
@@ -400,8 +433,9 @@ EOF
   cat <<EOF >"$MULTICA_SERVICE_UNIT"
 [Unit]
 Description=DevBox Multica agent daemon (user ${DEV_USER})
-After=network-online.target
-Wants=network-online.target
+After=network-online.target docker.service
+Wants=network-online.target docker.service
+Requires=docker.service
 
 [Service]
 Type=oneshot
@@ -412,6 +446,9 @@ Environment=PATH=${DEV_HOME}/.local/bin:/usr/local/bin:/usr/bin:/bin
 ExecStart=${MULTICA_DAEMON_START_SCRIPT}
 ExecStop=${MULTICA_DAEMON_STOP_SCRIPT}
 RemainAfterExit=yes
+Restart=on-failure
+RestartSec=15
+TimeoutStartSec=6min
 
 [Install]
 WantedBy=multi-user.target

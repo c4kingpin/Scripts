@@ -1056,6 +1056,23 @@ multica_external_reverse_proxy_is_restricted_and_uses_token_login() {
     [[ "$configure_line" -lt "$authenticated_line" ]]
 }
 
+multica_daemon_waits_for_backend_at_boot() {
+  local start_script unit
+
+  start_script="$(sed -n "/^[[:space:]]*cat <<'EOF' >\"\$MULTICA_DAEMON_START_SCRIPT\"/,/^EOF$/p" "$FEATURE_MULTICA")"
+  unit="$(sed -n '/^  cat <<EOF >"\$MULTICA_SERVICE_UNIT"/,/^EOF$/p' "$FEATURE_MULTICA")"
+
+  grep -Fq 'wait_for_multica_server() {' <<<"$start_script" &&
+    grep -Fq 'waited >= 300' <<<"$start_script" &&
+    grep -Fq 'multica auth status 2>&1' <<<"$start_script" &&
+    grep -Fq 'daemon status --output json' <<<"$start_script" &&
+    grep -Fq '"status": "running"' <<<"$start_script" &&
+    grep -Fq 'After=network-online.target docker.service' <<<"$unit" &&
+    grep -Fq 'Requires=docker.service' <<<"$unit" &&
+    grep -Fq 'Restart=on-failure' <<<"$unit" &&
+    grep -Fq 'TimeoutStartSec=6min' <<<"$unit"
+}
+
 # P0.3: versioned binary artifacts are verified against a known checksum
 # before being unpacked; a missing or wrong checksum aborts the install.
 downloaded_toolchain_artifacts_are_checksum_verified() {
@@ -2737,6 +2754,7 @@ run_test "versions.env matches embedded defaults" versions_env_matches_embedded_
 run_test "devbox version reports the manifest" devbox_version_command_reports_the_manifest
 run_test "devbox version --json reports the manifest" devbox_version_json_reports_the_manifest
 run_test "Multica external reverse proxy is restricted and uses token login" multica_external_reverse_proxy_is_restricted_and_uses_token_login
+run_test "Multica daemon waits for the backend at boot" multica_daemon_waits_for_backend_at_boot
 run_test "toolchain artifacts are checksum-verified" downloaded_toolchain_artifacts_are_checksum_verified
 run_test "checksums.env matches embedded checksums" checksums_env_matches_embedded_checksums
 run_test "complete stack validation" installer_validates_complete_stack
