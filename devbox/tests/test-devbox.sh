@@ -1036,6 +1036,8 @@ multica_external_reverse_proxy_is_restricted_and_uses_token_login() {
     grep -Fq 'DEVBOX_MULTICA_PROXY_CIDR' "$FEATURE_MULTICA" &&
     grep -Fq 'DEVBOX_MULTICA_PROXY_HOST_IP' "$FEATURE_MULTICA" &&
     grep -Fq 'configure_multica_proxy_hosts' "$FEATURE_MULTICA" &&
+    grep -Fq 'configure_multica_smtp' "$FEATURE_MULTICA" &&
+    grep -Fq 'DEVBOX_MULTICA_SMTP_PASSWORD' "$FEATURE_MULTICA" &&
     grep -Fq 'MULTICA_TRUSTED_PROXIES=${proxy_cidr}' "$FEATURE_MULTICA" &&
     grep -Fq 'COOKIE_DOMAIN=${cookie_domain}' "$FEATURE_MULTICA" &&
     grep -Fq 'NEXT_PUBLIC_API_URL=${server_url}' "$FEATURE_MULTICA" &&
@@ -1944,6 +1946,8 @@ interactive_multica_setup_can_collect_reverse_proxy_configuration() {
     grep -Fq 'DEVBOX_MULTICA_APP_URL' "$INSTALL_SCRIPT" &&
     grep -Fq 'DEVBOX_MULTICA_SERVER_URL' "$INSTALL_SCRIPT" &&
     grep -Fq 'DEVBOX_MULTICA_PROXY_CIDR' "$INSTALL_SCRIPT" &&
+    grep -Fq 'select_multica_smtp() {' "$INSTALL_SCRIPT" &&
+    grep -Fq 'SMTP password:' "$INSTALL_SCRIPT" &&
     grep -Fq 'select_multica_reverse_proxy' "$INSTALL_SCRIPT"
 }
 

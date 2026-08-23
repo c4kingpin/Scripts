@@ -486,6 +486,22 @@ DevBox trägt App- und API-Hostname außerdem in `/etc/hosts` auf die
 `DEVBOX_MULTICA_PROXY_HOST_IP` ein. Bei einem `/32`-CIDR kann diese Variable
 weggelassen werden; die IP wird dann aus dem CIDR übernommen.
 
+SMTP für Login-Codes lässt sich bei einer interaktiven Multica-Installation
+passwortgeschützt eingeben. Für automatisierte Installationen alle Werte
+zusammen setzen, beispielsweise für SMTPS:
+
+```bash
+DEVBOX_MULTICA_SMTP_HOST=smtp.example.com \
+DEVBOX_MULTICA_SMTP_PORT=465 \
+DEVBOX_MULTICA_SMTP_USERNAME=multica@example.com \
+DEVBOX_MULTICA_SMTP_PASSWORD='<SMTP-PASSWORT>' \
+DEVBOX_MULTICA_SMTP_FROM_EMAIL=multica@example.com \
+DEVBOX_MULTICA_SMTP_TLS=implicit
+```
+
+Das Passwort nicht in ein Repository oder die Shell-Historie übernehmen;
+für interaktive Installationen ist die Passwortabfrage vorzuziehen.
+
 Die getroffene Auswahl landet in `/var/lib/devbox/remote-provider`,
 erscheint in `devbox status` und `devbox doctor --json`
 (`remote_provider`), und `devbox update` übernimmt sie automatisch —

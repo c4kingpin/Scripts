@@ -194,6 +194,51 @@ configure_multica_proxy_hosts() {
   msg_ok "Mapped Multica app and API hosts to reverse proxy ${proxy_host_ip}"
 }
 
+configure_multica_smtp() {
+  local smtp_host="${DEVBOX_MULTICA_SMTP_HOST:-}"
+  local smtp_port="${DEVBOX_MULTICA_SMTP_PORT:-}"
+  local smtp_username="${DEVBOX_MULTICA_SMTP_USERNAME:-}"
+  local smtp_password="${DEVBOX_MULTICA_SMTP_PASSWORD:-}"
+  local smtp_from_email="${DEVBOX_MULTICA_SMTP_FROM_EMAIL:-}"
+  local smtp_tls="${DEVBOX_MULTICA_SMTP_TLS:-implicit}"
+
+  if [[ -z "$smtp_host" && -z "$smtp_port" && -z "$smtp_username" && -z "$smtp_password" && -z "$smtp_from_email" ]]; then
+    return 0
+  fi
+
+  [[ -n "$smtp_host" && -n "$smtp_port" && -n "$smtp_username" && -n "$smtp_password" && -n "$smtp_from_email" ]] || {
+    msg_error "Set all DEVBOX_MULTICA_SMTP_* values together."
+    exit 1
+  }
+  if ! [[ "$smtp_port" =~ ^[1-9][0-9]{0,4}$ ]] || (( smtp_port > 65535 )); then
+    msg_error "DEVBOX_MULTICA_SMTP_PORT must be a valid TCP port."
+    exit 1
+  fi
+  [[ "$smtp_tls" == "implicit" || "$smtp_tls" == "starttls" ]] || {
+    msg_error "DEVBOX_MULTICA_SMTP_TLS must be implicit or starttls."
+    exit 1
+  }
+  [[ "$smtp_host$smtp_username$smtp_password$smtp_from_email" != *$'\n'* && "$smtp_host$smtp_username$smtp_password$smtp_from_email" != *$'\r'* ]] || {
+    msg_error "Multica SMTP values must not contain line breaks."
+    exit 1
+  }
+
+  sed -i -e '/^SMTP_HOST=/d' -e '/^SMTP_PORT=/d' -e '/^SMTP_USERNAME=/d' -e '/^SMTP_PASSWORD=/d' -e '/^SMTP_FROM_EMAIL=/d' -e '/^SMTP_TLS=/d' "$MULTICA_ENV_FILE"
+  cat <<EOF >>"$MULTICA_ENV_FILE"
+SMTP_HOST=${smtp_host}
+SMTP_PORT=${smtp_port}
+SMTP_USERNAME=${smtp_username}
+SMTP_PASSWORD='${smtp_password//\'/\\\'}'
+SMTP_FROM_EMAIL=${smtp_from_email}
+SMTP_TLS=${smtp_tls}
+EOF
+  chmod 0600 "$MULTICA_ENV_FILE"
+
+  # Do not retain the installer secret in the process environment any longer.
+  unset DEVBOX_MULTICA_SMTP_PASSWORD smtp_password
+  msg_ok "Configured Multica SMTP delivery (${smtp_host}:${smtp_port})"
+}
+
 install_multica_self_host() {
   msg_info "Installing Multica self-host dependencies"
 
@@ -233,6 +278,7 @@ EOF
   fi
 
   configure_multica_reverse_proxy
+  configure_multica_smtp
 
   msg_info "Starting self-hosted Multica ${MULTICA_VERSION}"
   docker compose \
