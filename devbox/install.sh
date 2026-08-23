@@ -52,7 +52,7 @@ msg_error() { printf '%b\n' "${RD}✗ $*${CL}" >&2; }
 # installer version that produced it. The rest of the version manifest
 # (Node.js, Erlang, agent CLIs, ...) is defined further down, where it's
 # actually used.
-readonly DEVBOX_VERSION="${DEVBOX_VERSION:-1.5.0-RC6}"
+readonly DEVBOX_VERSION="${DEVBOX_VERSION:-1.5.0-RC7}"
 
 msg_info "DevBox installer v${DEVBOX_VERSION}"
 
@@ -527,6 +527,40 @@ EOF
 }
 
 select_multica_reverse_proxy
+
+select_multica_smtp() {
+  local choice=""
+
+  [[ "$DEVBOX_REMOTE" == "multica" && "$DEVBOX_REMOTE_INTERACTIVE_SELECTION" -eq 1 ]] || return 0
+
+  read -r -p "Configure SMTP delivery for Multica login codes? [y/N]: " choice
+  case "${choice,,}" in
+    y | yes)
+      read -r -p "SMTP host: " DEVBOX_MULTICA_SMTP_HOST
+      read -r -p "SMTP port [465]: " DEVBOX_MULTICA_SMTP_PORT
+      DEVBOX_MULTICA_SMTP_PORT="${DEVBOX_MULTICA_SMTP_PORT:-465}"
+      read -r -p "SMTP username: " DEVBOX_MULTICA_SMTP_USERNAME
+      read -r -s -p "SMTP password: " DEVBOX_MULTICA_SMTP_PASSWORD
+      echo
+      read -r -p "SMTP sender address: " DEVBOX_MULTICA_SMTP_FROM_EMAIL
+      # shellcheck disable=SC2034 # consumed by features/multica.sh after source.
+      DEVBOX_MULTICA_SMTP_TLS="implicit"
+
+      [[ -n "$DEVBOX_MULTICA_SMTP_HOST" && -n "$DEVBOX_MULTICA_SMTP_USERNAME" && -n "$DEVBOX_MULTICA_SMTP_PASSWORD" && -n "$DEVBOX_MULTICA_SMTP_FROM_EMAIL" ]] || {
+        msg_error "All SMTP values are required when SMTP delivery is enabled."
+        exit 1
+      }
+      ;;
+    "" | n | no)
+      ;;
+    *)
+      msg_error "Please answer y or n."
+      exit 1
+      ;;
+  esac
+}
+
+select_multica_smtp
 
 msg_ok "DevBox profile: ${DEVBOX_PROFILE} (optional features: ${devbox_selected_features:-none})"
 
