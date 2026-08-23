@@ -476,6 +476,11 @@ in der Web-App einen persönlichen
 Multica-Token erzeugen; `devbox auth login` fragt diesen Token ab und benötigt
 keinen Browser-Callback auf der DevBox.
 
+Bei unterschiedlichen App- und API-Hosts leitet DevBox automatisch die
+gemeinsame Cookie-Domain ab (etwa `.example.com` für `app.example.com` und
+`api.example.com`) und setzt CORS, API- sowie WebSocket-URLs. Beide Hosts
+müssen daher unter derselben registrierten Domain liegen.
+
 Die getroffene Auswahl landet in `/var/lib/devbox/remote-provider`,
 erscheint in `devbox status` und `devbox doctor --json`
 (`remote_provider`), und `devbox update` übernimmt sie automatisch —

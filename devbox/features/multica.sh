@@ -59,6 +59,9 @@ configure_multica_reverse_proxy() {
   local app_url="${DEVBOX_MULTICA_APP_URL:-}"
   local server_url="${DEVBOX_MULTICA_SERVER_URL:-}"
   local proxy_cidr="${DEVBOX_MULTICA_PROXY_CIDR:-}"
+  local app_host server_host cookie_domain="" public_ws_url
+  local -a app_labels server_labels common_labels
+  local app_index server_index
 
   if [[ -z "$app_url" && -z "$server_url" && -z "$proxy_cidr" ]]; then
     return 0
@@ -79,13 +82,48 @@ if network.version != 4:
     raise ValueError("only IPv4 is currently supported")
 PY
 
-  sed -i -e '/^MULTICA_BIND_ADDRESS=/d' -e '/^FRONTEND_ORIGIN=/d' -e '/^MULTICA_APP_URL=/d' -e '/^MULTICA_PUBLIC_URL=/d' -e '/^MULTICA_TRUSTED_PROXIES=/d' "$MULTICA_ENV_FILE"
+  app_host="${app_url#https://}"
+  app_host="${app_host%%:*}"
+  server_host="${server_url#https://}"
+  server_host="${server_host%%:*}"
+  public_ws_url="wss://${server_url#https://}/ws"
+
+  # Split app/API domains need a shared session cookie. Derive the narrowest
+  # common parent so app.example.com and api.example.com use .example.com.
+  if [[ "$app_host" != "$server_host" ]]; then
+    IFS='.' read -r -a app_labels <<<"$app_host"
+    IFS='.' read -r -a server_labels <<<"$server_host"
+    app_index=$((${#app_labels[@]} - 1))
+    server_index=$((${#server_labels[@]} - 1))
+
+    while (( app_index >= 0 && server_index >= 0 )) &&
+      [[ "${app_labels[$app_index]}" == "${server_labels[$server_index]}" ]]; do
+
+      common_labels=("${app_labels[$app_index]}" "${common_labels[@]}")
+      app_index=$((app_index - 1))
+      server_index=$((server_index - 1))
+    done
+
+    if (( ${#common_labels[@]} < 2 )); then
+      msg_error "Multica app and API URLs must share a parent domain for cookie authentication."
+      exit 1
+    fi
+
+    cookie_domain=".$(IFS='.'; printf '%s' "${common_labels[*]}")"
+  fi
+
+  sed -i -e '/^MULTICA_BIND_ADDRESS=/d' -e '/^FRONTEND_ORIGIN=/d' -e '/^CORS_ALLOWED_ORIGINS=/d' -e '/^COOKIE_DOMAIN=/d' -e '/^MULTICA_APP_URL=/d' -e '/^MULTICA_PUBLIC_URL=/d' -e '/^MULTICA_TRUSTED_PROXIES=/d' -e '/^REMOTE_API_URL=/d' -e '/^NEXT_PUBLIC_API_URL=/d' -e '/^NEXT_PUBLIC_WS_URL=/d' "$MULTICA_ENV_FILE"
   cat <<EOF >>"$MULTICA_ENV_FILE"
 MULTICA_BIND_ADDRESS=0.0.0.0
 FRONTEND_ORIGIN=${app_url}
+CORS_ALLOWED_ORIGINS=${app_url}
+COOKIE_DOMAIN=${cookie_domain}
 MULTICA_APP_URL=${app_url}
 MULTICA_PUBLIC_URL=${server_url}
 MULTICA_TRUSTED_PROXIES=${proxy_cidr}
+REMOTE_API_URL=${server_url}
+NEXT_PUBLIC_API_URL=${server_url}
+NEXT_PUBLIC_WS_URL=${public_ws_url}
 EOF
   cat <<EOF >"$MULTICA_PUBLIC_CONFIG_FILE"
 MULTICA_APP_URL=${app_url}
