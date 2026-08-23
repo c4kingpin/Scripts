@@ -377,6 +377,16 @@ multica_is_authenticated() {
   [[ "$auth_status" != *"Not authenticated"* && "$auth_status" == *"Authenticated"* ]]
 }
 
+multica_has_configured_token() {
+  local config_status
+
+  # `config show` masks the token, so this does not expose credentials. It
+  # distinguishes a genuinely unconfigured DevBox from a boot-time API/DNS
+  # race where `auth status` temporarily cannot validate an existing token.
+  config_status="$(multica config show 2>&1)" || return 1
+  [[ "$config_status" == *"Token:"* && "$config_status" != *"Token: (not set)"* ]]
+}
+
 multica_daemon_is_running() {
   local daemon_status
 
@@ -406,11 +416,17 @@ if ! wait_for_multica_server; then
   exit 1
 fi
 
-# An unconfigured DevBox is valid: wait for `devbox auth login` rather than
-# making boot fail until the owner has configured the local self-host server.
+# A just-booted reverse proxy/API can make `auth status` report false before
+# it becomes reachable. Retry when a token is already configured; only an
+# actually unconfigured DevBox remains inactive without being marked failed.
 if ! multica_is_authenticated; then
-  echo "Multica is not authenticated; nothing to start."
-  exit 0
+  if multica_has_configured_token; then
+    echo "Multica authentication is not ready yet; retrying after the API becomes reachable."
+    exit 1
+  else
+    echo "Multica is not authenticated; nothing to start."
+    exit 0
+  fi
 fi
 
 if multica_daemon_is_running; then

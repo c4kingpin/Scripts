@@ -1065,6 +1065,9 @@ multica_daemon_waits_for_backend_at_boot() {
   grep -Fq 'wait_for_multica_server() {' <<<"$start_script" &&
     grep -Fq 'waited >= 300' <<<"$start_script" &&
     grep -Fq 'multica auth status 2>&1' <<<"$start_script" &&
+    grep -Fq 'multica config show 2>&1' <<<"$start_script" &&
+    grep -Fq 'multica_has_configured_token' <<<"$start_script" &&
+    grep -Fq 'retrying after the API becomes reachable' <<<"$start_script" &&
     grep -Fq 'daemon status --output json' <<<"$start_script" &&
     grep -Fq '"status": "running"' <<<"$start_script" &&
     grep -Fq 'After=network-online.target docker.service' <<<"$unit" &&
