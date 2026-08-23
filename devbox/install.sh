@@ -562,6 +562,48 @@ select_multica_smtp() {
 
 select_multica_smtp
 
+select_multica_github() {
+  local choice=""
+  local line=""
+
+  [[ "$DEVBOX_REMOTE" == "multica" && "$DEVBOX_REMOTE_INTERACTIVE_SELECTION" -eq 1 ]] || return 0
+
+  cat <<'EOF'
+
+GitHub integration links pull requests and can display CI status in Multica.
+It requires a public HTTPS API URL and a GitHub App.
+EOF
+  read -r -p "Configure GitHub App integration for Multica? [y/N]: " choice
+
+  case "${choice,,}" in
+    y | yes)
+      read -r -p "GitHub App slug: " DEVBOX_MULTICA_GITHUB_APP_SLUG
+      read -r -p "GitHub App ID: " DEVBOX_MULTICA_GITHUB_APP_ID
+      read -r -s -p "GitHub webhook secret: " DEVBOX_MULTICA_GITHUB_WEBHOOK_SECRET
+      echo
+      echo "Paste the GitHub App private-key PEM. Finish with a line containing only END."
+      DEVBOX_MULTICA_GITHUB_APP_PRIVATE_KEY=""
+      while IFS= read -r line; do
+        [[ "$line" == "END" ]] && break
+        DEVBOX_MULTICA_GITHUB_APP_PRIVATE_KEY+="${line}"$'\n'
+      done
+
+      [[ -n "$DEVBOX_MULTICA_GITHUB_APP_SLUG" && -n "$DEVBOX_MULTICA_GITHUB_APP_ID" && -n "$DEVBOX_MULTICA_GITHUB_WEBHOOK_SECRET" && -n "$DEVBOX_MULTICA_GITHUB_APP_PRIVATE_KEY" ]] || {
+        msg_error "All GitHub App values are required when GitHub integration is enabled."
+        exit 1
+      }
+      ;;
+    "" | n | no)
+      ;;
+    *)
+      msg_error "Please answer y or n."
+      exit 1
+      ;;
+  esac
+}
+
+select_multica_github
+
 msg_ok "DevBox profile: ${DEVBOX_PROFILE} (optional features: ${devbox_selected_features:-none})"
 
 select_autonomy() {

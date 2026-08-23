@@ -239,6 +239,61 @@ EOF
   msg_ok "Configured Multica SMTP delivery (${smtp_host}:${smtp_port})"
 }
 
+configure_multica_github() {
+  local app_slug="${DEVBOX_MULTICA_GITHUB_APP_SLUG:-}"
+  local app_id="${DEVBOX_MULTICA_GITHUB_APP_ID:-}"
+  local webhook_secret="${DEVBOX_MULTICA_GITHUB_WEBHOOK_SECRET:-}"
+  local private_key="${DEVBOX_MULTICA_GITHUB_APP_PRIVATE_KEY:-}"
+  local escaped_private_key
+
+  if [[ -z "$app_slug" && -z "$app_id" && -z "$webhook_secret" && -z "$private_key" ]]; then
+    return 0
+  fi
+
+  [[ -n "$app_slug" && -n "$app_id" && -n "$webhook_secret" && -n "$private_key" ]] || {
+    msg_error "Set all DEVBOX_MULTICA_GITHUB_APP_* values and DEVBOX_MULTICA_GITHUB_WEBHOOK_SECRET together."
+    exit 1
+  }
+  [[ -f "$MULTICA_PUBLIC_CONFIG_FILE" ]] || {
+    msg_error "GitHub integration requires a public HTTPS Multica app and API URL behind a reverse proxy."
+    exit 1
+  }
+  [[ "$app_slug" =~ ^[A-Za-z0-9][A-Za-z0-9-]{0,99}$ ]] || {
+    msg_error "DEVBOX_MULTICA_GITHUB_APP_SLUG must be a valid GitHub App slug."
+    exit 1
+  }
+  [[ "$app_id" =~ ^[1-9][0-9]*$ ]] || {
+    msg_error "DEVBOX_MULTICA_GITHUB_APP_ID must be a positive integer."
+    exit 1
+  }
+  [[ "$webhook_secret" != *$'\n'* && "$webhook_secret" != *$'\r'* ]] || {
+    msg_error "DEVBOX_MULTICA_GITHUB_WEBHOOK_SECRET must not contain line breaks."
+    exit 1
+  }
+  [[ "$private_key" == *'-----BEGIN '*'PRIVATE KEY-----'* && "$private_key" == *'-----END '*'PRIVATE KEY-----'* ]] || {
+    msg_error "DEVBOX_MULTICA_GITHUB_APP_PRIVATE_KEY must contain a PEM private key."
+    exit 1
+  }
+
+  # Docker Compose parses quoted .env values. Escape the PEM so its newlines
+  # arrive intact in the backend container without exposing the key in logs.
+  escaped_private_key="${private_key//\\/\\\\}"
+  escaped_private_key="${escaped_private_key//\"/\\\"}"
+  escaped_private_key="${escaped_private_key//$'\n'/\\n}"
+
+  sed -i -e '/^GITHUB_APP_SLUG=/d' -e '/^GITHUB_APP_ID=/d' -e '/^GITHUB_WEBHOOK_SECRET=/d' -e '/^GITHUB_APP_PRIVATE_KEY=/d' "$MULTICA_ENV_FILE"
+  cat <<EOF >>"$MULTICA_ENV_FILE"
+GITHUB_APP_SLUG=${app_slug}
+GITHUB_APP_ID=${app_id}
+GITHUB_WEBHOOK_SECRET='${webhook_secret//\'/\\\'}'
+GITHUB_APP_PRIVATE_KEY="${escaped_private_key}"
+EOF
+  chmod 0600 "$MULTICA_ENV_FILE"
+
+  unset DEVBOX_MULTICA_GITHUB_WEBHOOK_SECRET DEVBOX_MULTICA_GITHUB_APP_PRIVATE_KEY webhook_secret private_key escaped_private_key
+  msg_ok "Configured Multica GitHub App integration (${app_slug})"
+}
+
 install_multica_self_host() {
   msg_info "Installing Multica self-host dependencies"
 
@@ -279,6 +334,7 @@ EOF
 
   configure_multica_reverse_proxy
   configure_multica_smtp
+  configure_multica_github
 
   msg_info "Starting self-hosted Multica ${MULTICA_VERSION}"
   docker compose \

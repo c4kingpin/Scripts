@@ -502,6 +502,28 @@ DEVBOX_MULTICA_SMTP_TLS=implicit
 Das Passwort nicht in ein Repository oder die Shell-Historie übernehmen;
 für interaktive Installationen ist die Passwortabfrage vorzuziehen.
 
+### GitHub-App-Integration
+
+Die optionale GitHub-Integration verknüpft Pull Requests mit Multica-Issues
+und kann CI- sowie Merge-Status anzeigen. Sie benötigt einen öffentlich
+erreichbaren HTTPS-Reverse-Proxy für die App- und API-URL. Im interaktiven
+Multica-Installer werden App-Slug, App-ID, Webhook-Secret und der PEM-Schlüssel
+abgefragt. Den PEM-Schlüssel mit einer eigenen Zeile `END` abschließen; er wird
+nur in der root-geschützten Multica-`.env` gespeichert.
+
+Die GitHub App wird mit folgenden URLs angelegt:
+
+- Homepage: die öffentliche Multica-App-URL
+- Setup URL: `https://<api-host>/api/github/setup` ("Redirect on update" aktivieren)
+- Webhook URL: `https://<api-host>/api/webhooks/github`
+
+Erforderliche Repository-Berechtigungen sind **Metadata**, **Pull requests**,
+**Checks** und **Commit statuses**, jeweils schreibgeschützt. Die Events sind
+**Pull request**, **Check suite**, **Check run** und **Status**. Das
+Webhook-Secret der GitHub App muss mit dem im Installer eingegebenen Wert
+übereinstimmen. Die Runtime-CLI wird unabhängig davon über `devbox github setup`
+angemeldet.
+
 Die getroffene Auswahl landet in `/var/lib/devbox/remote-provider`,
 erscheint in `devbox status` und `devbox doctor --json`
 (`remote_provider`), und `devbox update` übernimmt sie automatisch —
