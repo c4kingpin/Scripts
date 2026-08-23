@@ -51,6 +51,7 @@ readonly MULTICA_SERVICE="devbox-multica-daemon.service"
 readonly MULTICA_SERVICE_UNIT="/etc/systemd/system/${MULTICA_SERVICE}"
 readonly MULTICA_SELF_HOST_URL="http://127.0.0.1:3000"
 readonly MULTICA_SELF_HOST_HEALTH_URL="http://127.0.0.1:8080/healthz"
+readonly MULTICA_PUBLIC_CONFIG_FILE="${ROOT_STATE_DIR}/multica-public.env"
 
 readonly OPENROUTER_ENV="${STATE_DIR}/openrouter.env"
 readonly OPENROUTER_PROFILE="${DEV_HOME}/.codex/openrouter.config.toml"
@@ -60,7 +61,7 @@ readonly LEGACY_OPENROUTER_WRAPPER="${DEV_HOME}/.local/bin/codex"
 readonly NODE_MAJOR="24"
 
 # Mirrors the version manifest embedded in install.sh / devbox/versions.env.
-readonly DEVBOX_VERSION="1.4.1"
+readonly DEVBOX_VERSION="1.5.0-RC1"
 readonly ERLANG_VERSION="29.0.5"
 readonly ELIXIR_VERSION="1.20.3"
 readonly PHOENIX_VERSION="1.8.9"
@@ -990,6 +991,19 @@ harden_multica_state() {
   chmod 0700 "$MULTICA_HOME"
 }
 
+multica_configure_public_urls() {
+  local app_url=""
+  local server_url=""
+
+  [[ -r "$MULTICA_PUBLIC_CONFIG_FILE" ]] || return 1
+  app_url="$(awk -F= '$1 == "MULTICA_APP_URL" { print substr($0, index($0, "=") + 1) }' "$MULTICA_PUBLIC_CONFIG_FILE")"
+  server_url="$(awk -F= '$1 == "MULTICA_SERVER_URL" { print substr($0, index($0, "=") + 1) }' "$MULTICA_PUBLIC_CONFIG_FILE")"
+  [[ -n "$app_url" && -n "$server_url" ]] || return 1
+
+  multica config set server_url "$server_url"
+  multica config set app_url "$app_url"
+}
+
 multica_auth_status() {
   local status=0
 
@@ -1025,9 +1039,14 @@ multica_auth_login() {
   if multica_is_authenticated; then
     ok "Multica is already authenticated"
   else
-    info "Configuring the self-hosted Multica server"
-    info "Use an SSH tunnel to open ${MULTICA_SELF_HOST_URL} locally if this DevBox has no browser."
-    multica setup self-host
+    if multica_configure_public_urls; then
+      info "Open the reverse-proxied Multica web UI, create a personal API token, then paste it here."
+      multica login --token
+    else
+      info "Configuring the self-hosted Multica server"
+      info "Use an SSH tunnel to open ${MULTICA_SELF_HOST_URL} locally if this DevBox has no browser."
+      multica setup self-host
+    fi
   fi
 
   harden_multica_state

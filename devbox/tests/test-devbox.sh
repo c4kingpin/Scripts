@@ -1024,6 +1024,17 @@ devbox_version_json_reports_the_manifest() {
     grep -Fq 'show_version_json' "$NORM_MANAGER"
 }
 
+multica_external_reverse_proxy_is_restricted_and_uses_token_login() {
+  grep -Fq 'DEVBOX_MULTICA_APP_URL' "$FEATURE_MULTICA" &&
+    grep -Fq 'DEVBOX_MULTICA_SERVER_URL' "$FEATURE_MULTICA" &&
+    grep -Fq 'DEVBOX_MULTICA_PROXY_CIDR' "$FEATURE_MULTICA" &&
+    grep -Fq 'MULTICA_TRUSTED_PROXIES=${proxy_cidr}' "$FEATURE_MULTICA" &&
+    grep -Fq 'DEVBOX_MULTICA' "$FEATURE_MULTICA" &&
+    grep -Fq 'multica login --token' "$MANAGER" &&
+    grep -Fq 'reverse-proxied Multica web UI' "$MANAGER" &&
+    grep -Fq 'Externer Reverse Proxy' "${PROJECT_ROOT}/README.md"
+}
+
 # P0.3: versioned binary artifacts are verified against a known checksum
 # before being unpacked; a missing or wrong checksum aborts the install.
 downloaded_toolchain_artifacts_are_checksum_verified() {
@@ -2690,6 +2701,7 @@ run_test "managed agent CLIs are pinned, not @latest" managed_agent_clis_are_pin
 run_test "versions.env matches embedded defaults" versions_env_matches_embedded_defaults
 run_test "devbox version reports the manifest" devbox_version_command_reports_the_manifest
 run_test "devbox version --json reports the manifest" devbox_version_json_reports_the_manifest
+run_test "Multica external reverse proxy is restricted and uses token login" multica_external_reverse_proxy_is_restricted_and_uses_token_login
 run_test "toolchain artifacts are checksum-verified" downloaded_toolchain_artifacts_are_checksum_verified
 run_test "checksums.env matches embedded checksums" checksums_env_matches_embedded_checksums
 run_test "complete stack validation" installer_validates_complete_stack

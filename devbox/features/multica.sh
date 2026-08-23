@@ -4,7 +4,9 @@
 # Multica drives the Codex and Claude CLIs installed by DevBox. The pinned
 # release archive is verified against install.sh's checksum manifest before
 # its binary is installed system-wide. Its self-hosted server runs as a
-# root-managed Docker Compose stack, bound only to loopback.
+# root-managed Docker Compose stack. It is bound to loopback by default; an
+# explicitly configured external reverse proxy is allowed through a dedicated
+# Docker firewall chain.
 
 set -Eeuo pipefail
 
@@ -17,6 +19,9 @@ MULTICA_SELF_HOST_DIR="/opt/devbox/multica-self-host"
 MULTICA_COMPOSE_FILE="${MULTICA_SELF_HOST_DIR}/docker-compose.yml"
 MULTICA_ENV_FILE="${MULTICA_SELF_HOST_DIR}/.env"
 MULTICA_COMPOSE_URL="https://raw.githubusercontent.com/multica-ai/multica/v${MULTICA_VERSION}/docker-compose.selfhost.yml"
+MULTICA_PUBLIC_CONFIG_FILE="${ROOT_STATE_DIR}/multica-public.env"
+MULTICA_FIREWALL_SERVICE="devbox-multica-firewall.service"
+MULTICA_FIREWALL_SERVICE_UNIT="/etc/systemd/system/${MULTICA_FIREWALL_SERVICE}"
 
 install_multica() {
   local arch archive checksum url tmp_dir
@@ -50,6 +55,66 @@ install_multica() {
   msg_ok "Installed Multica CLI"
 }
 
+configure_multica_reverse_proxy() {
+  local app_url="${DEVBOX_MULTICA_APP_URL:-}"
+  local server_url="${DEVBOX_MULTICA_SERVER_URL:-}"
+  local proxy_cidr="${DEVBOX_MULTICA_PROXY_CIDR:-}"
+
+  if [[ -z "$app_url" && -z "$server_url" && -z "$proxy_cidr" ]]; then
+    return 0
+  fi
+
+  [[ -n "$app_url" && -n "$server_url" && -n "$proxy_cidr" ]] || {
+    msg_error "Set DEVBOX_MULTICA_APP_URL, DEVBOX_MULTICA_SERVER_URL and DEVBOX_MULTICA_PROXY_CIDR together."
+    exit 1
+  }
+  [[ "$app_url" =~ ^https://[^[:space:]/]+(:[0-9]+)?$ && "$server_url" =~ ^https://[^[:space:]/]+(:[0-9]+)?$ ]] || {
+    msg_error "Multica reverse-proxy URLs must be HTTPS origins without a path."
+    exit 1
+  }
+  python3 - "$proxy_cidr" <<'PY' || { msg_error "DEVBOX_MULTICA_PROXY_CIDR must be a valid IPv4 CIDR."; exit 1; }
+import ipaddress, sys
+network = ipaddress.ip_network(sys.argv[1], strict=False)
+if network.version != 4:
+    raise ValueError("only IPv4 is currently supported")
+PY
+
+  sed -i -e '/^MULTICA_BIND_ADDRESS=/d' -e '/^FRONTEND_ORIGIN=/d' -e '/^MULTICA_APP_URL=/d' -e '/^MULTICA_PUBLIC_URL=/d' -e '/^MULTICA_TRUSTED_PROXIES=/d' "$MULTICA_ENV_FILE"
+  cat <<EOF >>"$MULTICA_ENV_FILE"
+MULTICA_BIND_ADDRESS=0.0.0.0
+FRONTEND_ORIGIN=${app_url}
+MULTICA_APP_URL=${app_url}
+MULTICA_PUBLIC_URL=${server_url}
+MULTICA_TRUSTED_PROXIES=${proxy_cidr}
+EOF
+  cat <<EOF >"$MULTICA_PUBLIC_CONFIG_FILE"
+MULTICA_APP_URL=${app_url}
+MULTICA_SERVER_URL=${server_url}
+EOF
+  chmod 0600 "$MULTICA_ENV_FILE"
+  chown root:root "$MULTICA_PUBLIC_CONFIG_FILE"
+  chmod 0644 "$MULTICA_PUBLIC_CONFIG_FILE"
+
+  cat <<EOF >"$MULTICA_FIREWALL_SERVICE_UNIT"
+[Unit]
+Description=Restrict Multica ports to the reverse proxy
+After=docker.service
+Requires=docker.service
+[Service]
+Type=oneshot
+ExecStart=/bin/bash -c 'iptables -N DEVBOX_MULTICA 2>/dev/null || true; iptables -F DEVBOX_MULTICA; iptables -A DEVBOX_MULTICA -s "${proxy_cidr}" -j ACCEPT; iptables -A DEVBOX_MULTICA -j DROP; iptables -C DOCKER-USER -p tcp -m multiport --dports 3000,8080 -j DEVBOX_MULTICA 2>/dev/null || iptables -I DOCKER-USER 1 -p tcp -m multiport --dports 3000,8080 -j DEVBOX_MULTICA'
+RemainAfterExit=yes
+[Install]
+WantedBy=multi-user.target
+EOF
+  chown root:root "$MULTICA_FIREWALL_SERVICE_UNIT"
+  chmod 0644 "$MULTICA_FIREWALL_SERVICE_UNIT"
+  systemctl daemon-reload
+  systemctl enable "$MULTICA_FIREWALL_SERVICE"
+  systemctl restart "$MULTICA_FIREWALL_SERVICE"
+  msg_ok "Restricted Multica ports to reverse proxy ${proxy_cidr}"
+}
+
 install_multica_self_host() {
   msg_info "Installing Multica self-host dependencies"
 
@@ -67,6 +132,8 @@ install_multica_self_host() {
 
   install -d -o root -g root -m 0700 "$MULTICA_SELF_HOST_DIR"
   curl_with_retry "$MULTICA_COMPOSE_URL" "$MULTICA_COMPOSE_FILE"
+  # shellcheck disable=SC2016 # Compose must expand this value from .env later.
+  sed -i 's/127\.0\.0\.1:/${MULTICA_BIND_ADDRESS:-127.0.0.1}:/g' "$MULTICA_COMPOSE_FILE"
   chown root:root "$MULTICA_COMPOSE_FILE"
   chmod 0644 "$MULTICA_COMPOSE_FILE"
 
@@ -85,6 +152,8 @@ EOF
     chown root:root "$MULTICA_ENV_FILE"
     chmod 0600 "$MULTICA_ENV_FILE"
   fi
+
+  configure_multica_reverse_proxy
 
   msg_info "Starting self-hosted Multica ${MULTICA_VERSION}"
   docker compose \
