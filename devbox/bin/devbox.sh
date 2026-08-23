@@ -61,7 +61,7 @@ readonly LEGACY_OPENROUTER_WRAPPER="${DEV_HOME}/.local/bin/codex"
 readonly NODE_MAJOR="24"
 
 # Mirrors the version manifest embedded in install.sh / devbox/versions.env.
-readonly DEVBOX_VERSION="1.5.0-RC3"
+readonly DEVBOX_VERSION="1.5.0-RC4"
 readonly ERLANG_VERSION="29.0.5"
 readonly ELIXIR_VERSION="1.20.3"
 readonly PHOENIX_VERSION="1.8.9"
@@ -967,7 +967,13 @@ kisuke_auth_logout() {
 # Remote-provider hooks for Multica. Its documented CLI is the authority for
 # authentication and daemon state; DevBox never reads its token files.
 multica_is_authenticated() {
-  multica auth status >/dev/null 2>&1
+  local auth_status
+
+  # Multica 0.4.x returns success for `auth status` once a server URL is
+  # configured, even when no token exists. Inspect its documented status text
+  # so `devbox auth login` still enters the headless token flow.
+  auth_status="$(multica auth status 2>&1)" || return 1
+  [[ "$auth_status" != *"Not authenticated"* && "$auth_status" == *"Authenticated"* ]]
 }
 
 multica_daemon_service_is_installed() {
