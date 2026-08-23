@@ -60,7 +60,7 @@ readonly LEGACY_OPENROUTER_WRAPPER="${DEV_HOME}/.local/bin/codex"
 readonly NODE_MAJOR="24"
 
 # Mirrors the version manifest embedded in install.sh / devbox/versions.env.
-readonly DEVBOX_VERSION="1.4.0"
+readonly DEVBOX_VERSION="1.4.1"
 readonly ERLANG_VERSION="29.0.5"
 readonly ELIXIR_VERSION="1.20.3"
 readonly PHOENIX_VERSION="1.8.9"
