@@ -61,7 +61,7 @@ readonly LEGACY_OPENROUTER_WRAPPER="${DEV_HOME}/.local/bin/codex"
 readonly NODE_MAJOR="24"
 
 # Mirrors the version manifest embedded in install.sh / devbox/versions.env.
-readonly DEVBOX_VERSION="1.5.0-RC1"
+readonly DEVBOX_VERSION="1.5.0-RC2"
 readonly ERLANG_VERSION="29.0.5"
 readonly ELIXIR_VERSION="1.20.3"
 readonly PHOENIX_VERSION="1.8.9"
@@ -1004,8 +1004,15 @@ multica_configure_public_urls() {
   multica config set app_url "$app_url"
 }
 
+multica_public_app_url() {
+  [[ -r "$MULTICA_PUBLIC_CONFIG_FILE" ]] || return 1
+  awk -F= '$1 == "MULTICA_APP_URL" { print substr($0, index($0, "=") + 1) }' "$MULTICA_PUBLIC_CONFIG_FILE"
+}
+
 multica_auth_status() {
-  local status=0
+  local status=0 self_host_url="$MULTICA_SELF_HOST_URL"
+
+  self_host_url="$(multica_public_app_url || printf '%s' "$MULTICA_SELF_HOST_URL")"
 
   if multica_is_authenticated; then
     ok "Multica is authenticated and this DevBox is registered"
@@ -1021,7 +1028,7 @@ multica_auth_status() {
   fi
 
   if multica_self_host_is_running; then
-    ok "Multica self-hosted server is running (${MULTICA_SELF_HOST_URL})"
+    ok "Multica self-hosted server is running (${self_host_url})"
   else
     warn "Multica self-hosted server is not running"
   fi
@@ -1036,10 +1043,18 @@ multica_auth_status() {
 }
 
 multica_auth_login() {
+  local public_urls_configured=0
+
+  # Reapply public endpoints even when a local session already exists. A
+  # reverse-proxy migration must not require deleting a valid token first.
+  if multica_configure_public_urls; then
+    public_urls_configured=1
+  fi
+
   if multica_is_authenticated; then
     ok "Multica is already authenticated"
   else
-    if multica_configure_public_urls; then
+    if (( public_urls_configured )); then
       info "Open the reverse-proxied Multica web UI, create a personal API token, then paste it here."
       multica login --token
     else

@@ -1025,6 +1025,12 @@ devbox_version_json_reports_the_manifest() {
 }
 
 multica_external_reverse_proxy_is_restricted_and_uses_token_login() {
+  local login_fn configure_line authenticated_line
+
+  login_fn="$(sed -n '/^multica_auth_login() {/,/^}/p' "$MANAGER")"
+  configure_line="$(grep -n 'multica_configure_public_urls' <<<"$login_fn" | head -n1 | cut -d: -f1)"
+  authenticated_line="$(grep -n 'multica_is_authenticated' <<<"$login_fn" | head -n1 | cut -d: -f1)"
+
   grep -Fq 'DEVBOX_MULTICA_APP_URL' "$FEATURE_MULTICA" &&
     grep -Fq 'DEVBOX_MULTICA_SERVER_URL' "$FEATURE_MULTICA" &&
     grep -Fq 'DEVBOX_MULTICA_PROXY_CIDR' "$FEATURE_MULTICA" &&
@@ -1032,7 +1038,8 @@ multica_external_reverse_proxy_is_restricted_and_uses_token_login() {
     grep -Fq 'DEVBOX_MULTICA' "$FEATURE_MULTICA" &&
     grep -Fq 'multica login --token' "$MANAGER" &&
     grep -Fq 'reverse-proxied Multica web UI' "$MANAGER" &&
-    grep -Fq 'Externer Reverse Proxy' "${PROJECT_ROOT}/README.md"
+    grep -Fq 'Externer Reverse Proxy' "${PROJECT_ROOT}/README.md" &&
+    [[ "$configure_line" -lt "$authenticated_line" ]]
 }
 
 # P0.3: versioned binary artifacts are verified against a known checksum
