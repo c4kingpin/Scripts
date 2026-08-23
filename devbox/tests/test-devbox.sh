@@ -1043,6 +1043,8 @@ multica_external_reverse_proxy_is_restricted_and_uses_token_login() {
     grep -Fq 'DEVBOX_MULTICA' "$FEATURE_MULTICA" &&
     grep -Fq '"Not authenticated"' "$MANAGER" &&
     grep -Fq '"Authenticated"' "$MANAGER" &&
+    grep -Fq 'daemon status --output json' "$MANAGER" &&
+    grep -Fq '"status": "running"' "$MANAGER" &&
     grep -Fq 'multica login --token' "$MANAGER" &&
     grep -Fq 'reverse-proxied Multica web UI' "$MANAGER" &&
     grep -Fq 'Externer Reverse Proxy' "${PROJECT_ROOT}/README.md" &&

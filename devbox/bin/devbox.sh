@@ -61,7 +61,7 @@ readonly LEGACY_OPENROUTER_WRAPPER="${DEV_HOME}/.local/bin/codex"
 readonly NODE_MAJOR="24"
 
 # Mirrors the version manifest embedded in install.sh / devbox/versions.env.
-readonly DEVBOX_VERSION="1.5.0-RC5"
+readonly DEVBOX_VERSION="1.5.0-RC6"
 readonly ERLANG_VERSION="29.0.5"
 readonly ELIXIR_VERSION="1.20.3"
 readonly PHOENIX_VERSION="1.8.9"
@@ -985,7 +985,12 @@ multica_daemon_service_is_enabled() {
 }
 
 multica_daemon_is_running() {
-  multica daemon status >/dev/null 2>&1
+  local daemon_status
+
+  # Like `auth status`, Multica 0.4.x exits successfully for a stopped
+  # daemon. Use its JSON state instead of the process exit code.
+  daemon_status="$(multica daemon status --output json 2>/dev/null)" || return 1
+  [[ "$daemon_status" == *'"status": "running"'* ]]
 }
 
 multica_self_host_is_running() {
