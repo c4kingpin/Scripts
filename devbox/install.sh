@@ -52,7 +52,7 @@ msg_error() { printf '%b\n' "${RD}✗ $*${CL}" >&2; }
 # installer version that produced it. The rest of the version manifest
 # (Node.js, Erlang, agent CLIs, ...) is defined further down, where it's
 # actually used.
-readonly DEVBOX_VERSION="${DEVBOX_VERSION:-1.5.0-RC4}"
+readonly DEVBOX_VERSION="${DEVBOX_VERSION:-1.5.0-RC5}"
 
 msg_info "DevBox installer v${DEVBOX_VERSION}"
 
@@ -510,8 +510,9 @@ EOF
       read -r -p "Public Multica app URL (e.g. https://multica.example.com): " DEVBOX_MULTICA_APP_URL
       read -r -p "Public Multica API URL (e.g. https://api.multica.example.com): " DEVBOX_MULTICA_SERVER_URL
       read -r -p "Reverse-proxy IPv4 CIDR (e.g. 203.0.113.10/32): " DEVBOX_MULTICA_PROXY_CIDR
+      read -r -p "Reverse-proxy IPv4 address for /etc/hosts: " DEVBOX_MULTICA_PROXY_HOST_IP
 
-      [[ -n "$DEVBOX_MULTICA_APP_URL" && -n "$DEVBOX_MULTICA_SERVER_URL" && -n "$DEVBOX_MULTICA_PROXY_CIDR" ]] || {
+      [[ -n "$DEVBOX_MULTICA_APP_URL" && -n "$DEVBOX_MULTICA_SERVER_URL" && -n "$DEVBOX_MULTICA_PROXY_CIDR" && -n "$DEVBOX_MULTICA_PROXY_HOST_IP" ]] || {
         msg_error "All reverse-proxy values are required when external access is enabled."
         exit 1
       }
