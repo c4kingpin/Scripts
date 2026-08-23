@@ -46,6 +46,9 @@ readonly HAPPY_SERVICE_UNIT="/etc/systemd/system/${HAPPY_SERVICE}"
 # to talk to before anyone has ever logged in interactively.
 readonly KISUKE_HOME="${DEV_HOME}/.kisuke"
 readonly KISUKE_SERVICE="kisuke"
+readonly MULTICA_HOME="${DEV_HOME}/.multica"
+readonly MULTICA_SERVICE="devbox-multica-daemon.service"
+readonly MULTICA_SERVICE_UNIT="/etc/systemd/system/${MULTICA_SERVICE}"
 
 readonly OPENROUTER_ENV="${STATE_DIR}/openrouter.env"
 readonly OPENROUTER_PROFILE="${DEV_HOME}/.codex/openrouter.config.toml"
@@ -63,6 +66,7 @@ readonly CODEX_VERSION="0.147.0"
 readonly CLAUDE_VERSION="2.1.233"
 readonly HAPPY_VERSION="1.2.0"
 readonly KISUKE_VERSION="1.2.20"
+readonly MULTICA_VERSION="0.4.32"
 
 readonly PACKAGE_NAME_PATTERN='^[a-z0-9][a-z0-9+.-]*$'
 
@@ -122,12 +126,12 @@ Commands:
       Same as version, as a JSON object.
 
   auth status
-      Show Codex, Claude and remote-provider (Happy/Kisuke) authentication
+      Show Codex, Claude and remote-provider (Happy/Kisuke/Multica) authentication
       status.
 
   auth login
       Authenticate Codex and Claude, then pair/authenticate and start the
-      configured remote provider (Happy or Kisuke).
+      configured remote provider (Happy, Kisuke or Multica).
 
   auth logout
       Sign out of Codex, Claude and the configured remote provider.
@@ -157,7 +161,7 @@ Commands:
       Upload the identity key to GitHub.
 
   remote-info
-      Explain the configured remote provider (Happy, Kisuke, or none).
+      Explain the configured remote provider (Happy, Kisuke, Multica, or none).
 
   status
       Show how this box is configured: version, profile, features,
@@ -621,6 +625,7 @@ Codex CLI:     ${CODEX_VERSION}
 Claude Code:   ${CLAUDE_VERSION}
 Happy:         ${HAPPY_VERSION}
 Kisuke:        ${KISUKE_VERSION}
+Multica:       ${MULTICA_VERSION}
 EOF
 }
 
@@ -637,6 +642,7 @@ show_version_json() {
     --arg claude_code "$CLAUDE_VERSION" \
     --arg happy "$HAPPY_VERSION" \
     --arg kisuke "$KISUKE_VERSION" \
+    --arg multica "$MULTICA_VERSION" \
     '{
       devbox: $devbox,
       commit: $commit,
@@ -647,7 +653,8 @@ show_version_json() {
       codex_cli: $codex_cli,
       claude_code: $claude_code,
       happy: $happy,
-      kisuke: $kisuke
+      kisuke: $kisuke,
+      multica: $multica
     }'
 }
 
@@ -951,6 +958,87 @@ kisuke_auth_logout() {
       _ \
       "${KISUKE_SERVICE}.service" \
       || warn "Kisuke daemon stop reported an error"
+  fi
+}
+
+# Remote-provider hooks for Multica. Its documented CLI is the authority for
+# authentication and daemon state; DevBox never reads its token files.
+multica_is_authenticated() {
+  multica auth status >/dev/null 2>&1
+}
+
+multica_daemon_service_is_installed() {
+  [[ -f "$MULTICA_SERVICE_UNIT" ]]
+}
+
+multica_daemon_service_is_enabled() {
+  systemctl is-enabled --quiet "$MULTICA_SERVICE" 2>/dev/null
+}
+
+multica_daemon_is_running() {
+  multica daemon status >/dev/null 2>&1
+}
+
+harden_multica_state() {
+  [[ -d "$MULTICA_HOME" ]] || return 0
+  chmod 0700 "$MULTICA_HOME"
+}
+
+multica_auth_status() {
+  local status=0
+
+  if multica_is_authenticated; then
+    ok "Multica is authenticated and this DevBox is registered"
+  else
+    warn "Multica is not authenticated"
+    status=1
+  fi
+
+  if multica_daemon_is_running; then
+    ok "Multica daemon is running"
+  else
+    warn "Multica daemon is not running"
+  fi
+
+  if multica_daemon_service_is_installed && multica_daemon_service_is_enabled; then
+    ok "Multica daemon starts automatically at boot (${MULTICA_SERVICE})"
+  else
+    warn "Multica daemon does not start at boot; run 'devbox update' as root"
+  fi
+
+  return "$status"
+}
+
+multica_auth_login() {
+  if multica_is_authenticated; then
+    ok "Multica is already authenticated"
+  else
+    info "Signing in to Multica"
+    info "For this headless DevBox, paste a token when prompted (create one at multica.ai/settings?tab=tokens)."
+    multica login --token=
+  fi
+
+  harden_multica_state
+
+  if multica_is_authenticated; then
+    if multica_daemon_is_running; then
+      ok "Multica daemon is already running"
+    else
+      info "Starting Multica daemon"
+      multica daemon start || warn "Multica daemon could not be started; run: multica daemon start"
+    fi
+  fi
+}
+
+multica_auth_logout() {
+  if multica_daemon_is_running; then
+    multica daemon stop || warn "Multica daemon stop reported an error"
+  fi
+
+  if multica_is_authenticated; then
+    multica auth logout || warn "Multica logout reported an error"
+  else
+    ok "Multica is already signed out"
   fi
 }
 
@@ -1589,6 +1677,46 @@ change root/admin SSH policy.
 EOF
 }
 
+multica_remote_info() {
+  cat <<'EOF'
+Multica agent workspace
+
+  Multica web / desktop / self-hosted server
+                    |
+                    v
+              Multica daemon
+                    |
+          +---------+---------+
+          |                   |
+        Claude               Codex
+          |                   |
+          +---------+---------+
+                    |
+          /home/dev/workspace
+
+
+Multica assigns issues to the installed agent CLIs and runs them on this
+DevBox. Create agents and assign work from Multica after authentication.
+
+Authentication:
+
+  devbox auth status
+  devbox auth login
+  devbox auth logout
+
+For a headless DevBox, `devbox auth login` prompts for a Multica API token.
+Create it at https://multica.ai/settings?tab=tokens.
+
+
+Boot behaviour:
+
+  devbox-multica-daemon.service
+
+Once authenticated, the Multica daemon starts at boot as user "dev". An
+unauthenticated DevBox leaves the service idle instead of failing.
+EOF
+}
+
 remote_info() {
   local remote_provider
   remote_provider="$(configured_remote_provider)"
@@ -1601,7 +1729,7 @@ remote_info() {
   cat <<'EOF'
 No remote provider configured (DEVBOX_REMOTE=none)
 
-This DevBox has no Happy or Kisuke remote-access layer installed. Reach it
+This DevBox has no Happy, Kisuke or Multica remote-access layer installed. Reach it
 over SSH or the host console, and use Codex/Claude directly:
 
   claude
@@ -1860,6 +1988,8 @@ doctor() {
     commands+=(happy)
   elif [[ "$remote_provider" == "kisuke" ]]; then
     commands+=(kisuke)
+  elif [[ "$remote_provider" == "multica" ]]; then
+    commands+=(multica)
   fi
 
   if feature_was_installed elixir; then
@@ -2204,6 +2334,25 @@ doctor() {
     else
       # shellcheck disable=SC2088 # literal display text, not a path expansion
       warn "~/.kisuke should have mode 0700"
+      status=1
+    fi
+  elif [[ "$remote_provider" == "multica" ]]; then
+    if multica_is_authenticated; then
+      ok "Multica is authenticated"
+    else
+      warn "Multica is not authenticated (run: devbox auth login)"
+    fi
+
+    if multica_daemon_is_running; then
+      ok "Multica daemon"
+    else
+      warn "Multica daemon is not running"
+    fi
+
+    if multica_daemon_service_is_installed && multica_daemon_service_is_enabled; then
+      ok "Multica daemon service (${MULTICA_SERVICE})"
+    else
+      warn "Multica daemon service is not enabled; run: devbox update as root"
       status=1
     fi
   fi
@@ -2677,6 +2826,7 @@ onboard() {
   case "$remote_provider" in
     happy) remote_step="Authenticate Codex and Claude and pair Happy" ;;
     kisuke) remote_step="Authenticate Codex, Claude and Kisuke Connect" ;;
+    multica) remote_step="Authenticate Codex, Claude and Multica" ;;
   esac
 
   cat <<EOF
@@ -2721,6 +2871,18 @@ Reach this box from the Kisuke app (terminal, editor, chat) once
 
 EOF
       ;;
+    multica)
+      cat <<'EOF'
+Agent commands after onboarding:
+
+  claude
+  codex
+
+Use Multica to create agents and assign them work on this DevBox once
+'devbox auth login' has authenticated Multica.
+
+EOF
+      ;;
     *)
       cat <<'EOF'
 Agent commands after onboarding:
@@ -2750,6 +2912,7 @@ EOF
   case "$remote_provider" in
     happy) login_prompt="Sign in to Codex and Claude and pair Happy now?" ;;
     kisuke) login_prompt="Sign in to Codex, Claude and Kisuke Connect now?" ;;
+    multica) login_prompt="Sign in to Codex, Claude and Multica now?" ;;
   esac
 
   if prompt_yes_no \

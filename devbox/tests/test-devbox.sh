@@ -16,6 +16,7 @@ readonly FEATURE_REDIS="${PROJECT_ROOT}/features/redis.sh"
 readonly FEATURE_AGENTS="${PROJECT_ROOT}/features/agents.sh"
 readonly FEATURE_HAPPY="${PROJECT_ROOT}/features/happy.sh"
 readonly FEATURE_KISUKE="${PROJECT_ROOT}/features/kisuke.sh"
+readonly FEATURE_MULTICA="${PROJECT_ROOT}/features/multica.sh"
 readonly FEATURE_AGENT_NOTIFY="${PROJECT_ROOT}/features/agent-notify.sh"
 readonly FEATURE_TOOLING="${PROJECT_ROOT}/features/tooling.sh"
 readonly FEATURE_ELIXIR="${PROJECT_ROOT}/features/elixir.sh"
@@ -80,6 +81,7 @@ readonly NORM_FEATURE_BASE="${TEST_TMP}/feature_base.normalized"
 readonly NORM_FEATURE_POSTGRES="${TEST_TMP}/feature_postgres.normalized"
 readonly NORM_FEATURE_HAPPY="${TEST_TMP}/feature_happy.normalized"
 readonly NORM_FEATURE_KISUKE="${TEST_TMP}/feature_kisuke.normalized"
+readonly NORM_FEATURE_MULTICA="${TEST_TMP}/feature_multica.normalized"
 readonly NORM_FEATURE_AGENT_NOTIFY="${TEST_TMP}/feature_agent_notify.normalized"
 readonly NORM_FEATURE_TOOLING="${TEST_TMP}/feature_tooling.normalized"
 readonly NORM_FEATURE_ELIXIR="${TEST_TMP}/feature_elixir.normalized"
@@ -96,6 +98,7 @@ scripts_have_valid_syntax() {
     "$FEATURE_AGENTS" \
     "$FEATURE_HAPPY" \
     "$FEATURE_KISUKE" \
+    "$FEATURE_MULTICA" \
     "$FEATURE_AGENT_NOTIFY" \
     "$FEATURE_TOOLING" \
     "$FEATURE_ELIXIR"
@@ -159,7 +162,7 @@ install_script_loads_all_modules_after_bootstrap() {
     grep -Fq "$module" "$NORM_INSTALL" || return 1
   done
 
-  grep -Fq 'readonly DEVBOX_REMOTE_PROVIDERS="happy kisuke"' "$INSTALL_SCRIPT" &&
+  grep -Fq 'readonly DEVBOX_REMOTE_PROVIDERS="happy kisuke multica"' "$INSTALL_SCRIPT" &&
     grep -Fq 'devbox_modules+=("features/${devbox_remote_provider}.sh")' "$NORM_INSTALL" &&
     grep -Fq 'for devbox_remote_provider in $DEVBOX_REMOTE_PROVIDERS; do' "$INSTALL_SCRIPT" &&
     grep -Fq 'fetch_devbox_module "$devbox_module" "$devbox_module_tmp"' "$INSTALL_SCRIPT" &&
@@ -982,6 +985,7 @@ manager_expected = {
     "CLAUDE_VERSION": manifest["CLAUDE_VERSION"],
     "HAPPY_VERSION": manifest["HAPPY_VERSION"],
     "KISUKE_VERSION": manifest["KISUKE_VERSION"],
+    "MULTICA_VERSION": manifest["MULTICA_VERSION"],
 }
 
 for key, value in manager_expected.items():
@@ -1000,6 +1004,7 @@ devbox_version_command_reports_the_manifest() {
     grep -Fq 'Claude Code:' <<<"$output" &&
     grep -Fq 'Happy:' <<<"$output" &&
     grep -Fq 'Kisuke:' <<<"$output" &&
+    grep -Fq 'Multica:' <<<"$output" &&
     grep -Fq 'version:)' "$MANAGER" &&
     grep -Fq 'show_version' "$NORM_MANAGER"
 }
@@ -1013,7 +1018,7 @@ devbox_version_json_reports_the_manifest() {
   json_output="$("$MANAGER" version --json)"
   expected_devbox_version="$(awk -F': +' '/^DevBox:/ { print $2 }' <<<"$text_output")"
 
-  jq -e '.devbox and .node and .erlang and .elixir and .phoenix and .codex_cli and .claude_code and .happy and .kisuke' \
+  jq -e '.devbox and .node and .erlang and .elixir and .phoenix and .codex_cli and .claude_code and .happy and .kisuke and .multica' \
     <<<"$json_output" >/dev/null &&
     [[ "$(jq -r '.devbox' <<<"$json_output")" == "$expected_devbox_version" ]] &&
     grep -Fq 'version:--json)' "$MANAGER" &&
@@ -1901,7 +1906,7 @@ redis_validation_and_doctor_are_feature_aware() {
 # pattern install.sh already used for DEVBOX_ALL_OPTIONAL_FEATURES.
 devbox_remote_defaults_to_happy_and_validates_input() {
   grep -Fq 'DEVBOX_REMOTE="${DEVBOX_REMOTE:-happy}"' "$INSTALL_SCRIPT" &&
-    grep -Fq 'readonly DEVBOX_REMOTE_PROVIDERS="happy kisuke"' "$INSTALL_SCRIPT" &&
+    grep -Fq 'readonly DEVBOX_REMOTE_PROVIDERS="happy kisuke multica"' "$INSTALL_SCRIPT" &&
     grep -Fq '" $DEVBOX_REMOTE_PROVIDERS " != *" $DEVBOX_REMOTE "*' "$NORM_INSTALL" &&
     grep -Fq 'Invalid DEVBOX_REMOTE' "$INSTALL_SCRIPT"
 }
@@ -2522,7 +2527,7 @@ EOF
 
   # Existing hooks (PreToolUse) and the deny merge stay untouched.
   [[ "$(jq '.hooks.PreToolUse | length' "$once")" == "1" ]] &&
-    [[ "$(jq '.permissions.deny | length' "$once")" == "3" ]] &&
+    [[ "$(jq '.permissions.deny | length' "$once")" == "4" ]] &&
     # Exactly one StopFailure entry, not duplicated on a second run.
     [[ "$(jq '.hooks.StopFailure | length' "$once")" == "1" ]] &&
     [[ "$(jq '.hooks.StopFailure | length' "$twice")" == "1" ]] &&
