@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # Multica agent workspace and local runtime (DEVBOX_REMOTE=multica).
 #
-# Multica drives the Codex and Claude CLIs installed by DevBox.  The pinned
+# Multica drives the Codex and Claude CLIs installed by DevBox. The pinned
 # release archive is verified against install.sh's checksum manifest before
-# its binary is installed system-wide; credentials and daemon state remain in
-# the dev user's ~/.multica directory.
+# its binary is installed system-wide. Its self-hosted server runs as a
+# root-managed Docker Compose stack, bound only to loopback.
 
 set -Eeuo pipefail
 
@@ -13,6 +13,10 @@ MULTICA_SERVICE_UNIT="/etc/systemd/system/${MULTICA_SERVICE}"
 MULTICA_HELPER_DIR="/usr/local/lib/devbox"
 MULTICA_DAEMON_START_SCRIPT="${MULTICA_HELPER_DIR}/multica-daemon-start.sh"
 MULTICA_DAEMON_STOP_SCRIPT="${MULTICA_HELPER_DIR}/multica-daemon-stop.sh"
+MULTICA_SELF_HOST_DIR="/opt/devbox/multica-self-host"
+MULTICA_COMPOSE_FILE="${MULTICA_SELF_HOST_DIR}/docker-compose.yml"
+MULTICA_ENV_FILE="${MULTICA_SELF_HOST_DIR}/.env"
+MULTICA_COMPOSE_URL="https://raw.githubusercontent.com/multica-ai/multica/v${MULTICA_VERSION}/docker-compose.selfhost.yml"
 
 install_multica() {
   local arch archive checksum url tmp_dir
@@ -46,6 +50,65 @@ install_multica() {
   msg_ok "Installed Multica CLI"
 }
 
+install_multica_self_host() {
+  msg_info "Installing Multica self-host dependencies"
+
+  silent apt-get install \
+    -y \
+    docker.io \
+    docker-compose-v2
+
+  systemctl enable --now docker.service
+
+  if ! docker info >/dev/null 2>&1; then
+    msg_error "Docker cannot run in this LXC container. Enable nesting for the container, then re-run the installer."
+    exit 1
+  fi
+
+  install -d -o root -g root -m 0700 "$MULTICA_SELF_HOST_DIR"
+  curl_with_retry "$MULTICA_COMPOSE_URL" "$MULTICA_COMPOSE_FILE"
+  chown root:root "$MULTICA_COMPOSE_FILE"
+  chmod 0644 "$MULTICA_COMPOSE_FILE"
+
+  if [[ ! -f "$MULTICA_ENV_FILE" ]]; then
+    (
+      umask 077
+      cat <<EOF >"$MULTICA_ENV_FILE"
+POSTGRES_DB=multica
+POSTGRES_USER=multica
+POSTGRES_PASSWORD=$(openssl rand -hex 24)
+JWT_SECRET=$(openssl rand -hex 32)
+MULTICA_VCS_SECRET_KEY=$(openssl rand -hex 32)
+MULTICA_IMAGE_TAG=v${MULTICA_VERSION}
+EOF
+    )
+    chown root:root "$MULTICA_ENV_FILE"
+    chmod 0600 "$MULTICA_ENV_FILE"
+  fi
+
+  msg_info "Starting self-hosted Multica ${MULTICA_VERSION}"
+  docker compose \
+    --env-file "$MULTICA_ENV_FILE" \
+    -f "$MULTICA_COMPOSE_FILE" \
+    pull
+  docker compose \
+    --env-file "$MULTICA_ENV_FILE" \
+    -f "$MULTICA_COMPOSE_FILE" \
+    up -d
+
+  local waited=0
+  until curl -fsS http://127.0.0.1:8080/healthz >/dev/null 2>&1; do
+    if (( waited >= 90 )); then
+      msg_error "Multica self-hosted backend did not become healthy; inspect: docker compose --env-file ${MULTICA_ENV_FILE} -f ${MULTICA_COMPOSE_FILE} logs"
+      exit 1
+    fi
+    sleep 3
+    waited=$((waited + 3))
+  done
+
+  msg_ok "Started self-hosted Multica (http://127.0.0.1:3000)"
+}
+
 install_multica_daemon_service() {
   msg_info "Configuring Multica daemon service"
 
@@ -56,7 +119,12 @@ install_multica_daemon_service() {
 set -Eeuo pipefail
 
 # An unconfigured DevBox is valid: wait for `devbox auth login` rather than
-# making boot fail until the owner has supplied a Multica token.
+# making boot fail until the owner has configured the local self-host server.
+if ! curl -fsS http://127.0.0.1:8080/healthz >/dev/null 2>&1; then
+  echo "Multica self-hosted server is not healthy; nothing to start."
+  exit 0
+fi
+
 if ! multica auth status >/dev/null 2>&1; then
   echo "Multica is not authenticated; nothing to start."
   exit 0
@@ -107,6 +175,7 @@ EOF
 
 remote_install_multica() {
   install_multica
+  install_multica_self_host
   install_multica_daemon_service
 }
 
@@ -118,10 +187,11 @@ remote_validate_multica() {
   run_as_dev multica version
   [[ -f "$MULTICA_SERVICE_UNIT" ]]
   systemctl is-enabled --quiet "$MULTICA_SERVICE"
+  curl -fsS http://127.0.0.1:8080/healthz >/dev/null
 }
 
 remote_banner_multica() {
-  echo -e "${YW}After onboarding, use Multica to assign work to the installed Codex/Claude CLIs:${CL}"
+  echo -e "${YW}Multica is self-hosted at http://127.0.0.1:3000 and uses the installed Codex/Claude CLIs:${CL}"
   echo
   echo "  multica"
   echo "  devbox auth login"
