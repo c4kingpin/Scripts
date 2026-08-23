@@ -59,27 +59,35 @@ configure_multica_reverse_proxy() {
   local app_url="${DEVBOX_MULTICA_APP_URL:-}"
   local server_url="${DEVBOX_MULTICA_SERVER_URL:-}"
   local proxy_cidr="${DEVBOX_MULTICA_PROXY_CIDR:-}"
+  local proxy_host_ip="${DEVBOX_MULTICA_PROXY_HOST_IP:-}"
   local app_host server_host cookie_domain="" public_ws_url
   local -a app_labels server_labels common_labels
   local app_index server_index
 
-  if [[ -z "$app_url" && -z "$server_url" && -z "$proxy_cidr" ]]; then
+  if [[ -z "$app_url" && -z "$server_url" && -z "$proxy_cidr" && -z "$proxy_host_ip" ]]; then
     return 0
   fi
 
-  [[ -n "$app_url" && -n "$server_url" && -n "$proxy_cidr" ]] || {
-    msg_error "Set DEVBOX_MULTICA_APP_URL, DEVBOX_MULTICA_SERVER_URL and DEVBOX_MULTICA_PROXY_CIDR together."
+  # A single-proxy /32 also unambiguously supplies the address used by the
+  # DevBox itself to resolve the public app/API names.
+  if [[ -z "$proxy_host_ip" && "$proxy_cidr" == */32 ]]; then
+    proxy_host_ip="${proxy_cidr%/32}"
+  fi
+
+  [[ -n "$app_url" && -n "$server_url" && -n "$proxy_cidr" && -n "$proxy_host_ip" ]] || {
+    msg_error "Set DEVBOX_MULTICA_APP_URL, DEVBOX_MULTICA_SERVER_URL, DEVBOX_MULTICA_PROXY_CIDR and DEVBOX_MULTICA_PROXY_HOST_IP together."
     exit 1
   }
   [[ "$app_url" =~ ^https://[^[:space:]/]+(:[0-9]+)?$ && "$server_url" =~ ^https://[^[:space:]/]+(:[0-9]+)?$ ]] || {
     msg_error "Multica reverse-proxy URLs must be HTTPS origins without a path."
     exit 1
   }
-  python3 - "$proxy_cidr" <<'PY' || { msg_error "DEVBOX_MULTICA_PROXY_CIDR must be a valid IPv4 CIDR."; exit 1; }
+  python3 - "$proxy_cidr" "$proxy_host_ip" <<'PY' || { msg_error "Multica proxy CIDR and proxy host IP must be valid IPv4 values, with the IP inside the CIDR."; exit 1; }
 import ipaddress, sys
 network = ipaddress.ip_network(sys.argv[1], strict=False)
-if network.version != 4:
-    raise ValueError("only IPv4 is currently supported")
+address = ipaddress.ip_address(sys.argv[2])
+if network.version != 4 or address.version != 4 or address not in network:
+    raise ValueError("invalid proxy network/address")
 PY
 
   app_host="${app_url#https://}"
@@ -111,6 +119,8 @@ PY
 
     cookie_domain=".$(IFS='.'; printf '%s' "${common_labels[*]}")"
   fi
+
+  configure_multica_proxy_hosts "$proxy_host_ip" "$app_host" "$server_host"
 
   sed -i -e '/^MULTICA_BIND_ADDRESS=/d' -e '/^FRONTEND_ORIGIN=/d' -e '/^CORS_ALLOWED_ORIGINS=/d' -e '/^COOKIE_DOMAIN=/d' -e '/^MULTICA_APP_URL=/d' -e '/^MULTICA_PUBLIC_URL=/d' -e '/^MULTICA_TRUSTED_PROXIES=/d' -e '/^REMOTE_API_URL=/d' -e '/^NEXT_PUBLIC_API_URL=/d' -e '/^NEXT_PUBLIC_WS_URL=/d' "$MULTICA_ENV_FILE"
   cat <<EOF >>"$MULTICA_ENV_FILE"
@@ -151,6 +161,37 @@ EOF
   systemctl enable "$MULTICA_FIREWALL_SERVICE"
   systemctl restart "$MULTICA_FIREWALL_SERVICE"
   msg_ok "Restricted Multica ports to reverse proxy ${proxy_cidr}"
+}
+
+configure_multica_proxy_hosts() {
+  local proxy_host_ip="$1"
+  local app_host="$2"
+  local server_host="$3"
+  local hosts_content hosts_tmp
+
+  reject_symlink /etc/hosts
+  [[ -f /etc/hosts ]] || {
+    msg_error "Refusing to update /etc/hosts: it is not a regular file."
+    exit 1
+  }
+
+  hosts_content="$(awk '
+    /^# BEGIN DevBox Multica reverse proxy$/ { skip=1; next }
+    /^# END DevBox Multica reverse proxy$/ { skip=0; next }
+    !skip { print }
+  ' /etc/hosts)"
+  hosts_tmp="$(mktemp /etc/hosts.devbox-multica.XXXXXX)"
+  {
+    printf '%s\n' "$hosts_content"
+    printf '%s\n' '# BEGIN DevBox Multica reverse proxy'
+    printf '%s %s %s\n' "$proxy_host_ip" "$app_host" "$server_host"
+    printf '%s\n' '# END DevBox Multica reverse proxy'
+  } >"$hosts_tmp"
+  chown root:root "$hosts_tmp"
+  chmod 0644 "$hosts_tmp"
+  mv -f "$hosts_tmp" /etc/hosts
+
+  msg_ok "Mapped Multica app and API hosts to reverse proxy ${proxy_host_ip}"
 }
 
 install_multica_self_host() {

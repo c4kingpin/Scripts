@@ -464,6 +464,7 @@ curl -fsSL https://raw.githubusercontent.com/c4kingpin/Scripts/master/devbox/ins
     DEVBOX_MULTICA_APP_URL=https://multica.example.com \
     DEVBOX_MULTICA_SERVER_URL=https://api.multica.example.com \
     DEVBOX_MULTICA_PROXY_CIDR=203.0.113.10/32 \
+    DEVBOX_MULTICA_PROXY_HOST_IP=203.0.113.10 \
     bash
 ```
 
@@ -480,6 +481,10 @@ Bei unterschiedlichen App- und API-Hosts leitet DevBox automatisch die
 gemeinsame Cookie-Domain ab (etwa `.example.com` für `app.example.com` und
 `api.example.com`) und setzt CORS, API- sowie WebSocket-URLs. Beide Hosts
 müssen daher unter derselben registrierten Domain liegen.
+
+DevBox trägt App- und API-Hostname außerdem in `/etc/hosts` auf die
+`DEVBOX_MULTICA_PROXY_HOST_IP` ein. Bei einem `/32`-CIDR kann diese Variable
+weggelassen werden; die IP wird dann aus dem CIDR übernommen.
 
 Die getroffene Auswahl landet in `/var/lib/devbox/remote-provider`,
 erscheint in `devbox status` und `devbox doctor --json`
