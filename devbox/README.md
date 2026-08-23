@@ -455,6 +455,9 @@ einmaligen Bestätigungscode in die Backend-Logs.
 Läuft der Reverse Proxy auf einem anderen Host, die öffentlichen HTTPS-URLs
 und ausschließlich dessen IP/CIDR beim Installieren übergeben:
 
+Bei einer interaktiven Neuinstallation (`DEVBOX_REMOTE` nicht gesetzt) fragt
+die Auswahl von **Multica** dieselben drei Werte optional ab.
+
 ```bash
 curl -fsSL https://raw.githubusercontent.com/c4kingpin/Scripts/master/devbox/install.sh |
   env DEVBOX_REMOTE=multica \
