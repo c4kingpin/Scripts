@@ -13,7 +13,7 @@ Installation aus demselben Branch/Commit heruntergeladen und unverändert nach
 `/usr/local/bin/devbox` geschrieben — so bleiben Installer und Manager immer
 versionsgleich. Am dokumentierten Curl-Einzeiler ändert das nichts: `install.sh`
 lädt ohnehin schon während der Installation weitere Artefakte (Pakete, Node.js,
-Erlang/Elixir, Codex/Claude/Happy oder Kisuke) nach.
+Erlang/Elixir, Codex/Claude/Happy, Kisuke oder Multica) nach.
 
 Betriebslogik, die `install.sh` erst nach seiner Bootstrap-Phase (Root-/OS-/
 Netzwerk-Check) braucht, wandert schrittweise in eigene, ebenfalls
@@ -219,7 +219,7 @@ das Skript die zugehörige Frage:
    [Feature-Auswahl](#feature-auswahl)) — Standard, Minimal oder
    Custom-Auswahl einzelner Features.
 2. **Remote-Provider** (`DEVBOX_REMOTE`, siehe
-   [Remote-Provider](#remote-provider)) — Happy, Kisuke Connect oder kein
+   [Remote-Provider](#remote-provider)) — Happy, Kisuke Connect, Multica oder kein
    Remote-Zugriff.
 3. **Agenten-Autonomie** (`DEVBOX_AUTONOMY`, siehe unten).
 
@@ -411,7 +411,7 @@ curl -fsSL https://raw.githubusercontent.com/c4kingpin/Scripts/master/devbox/ins
   env DEVBOX_REMOTE=kisuke bash
 ```
 
-Ohne Remote-Provider installiert der Installer weder Happy noch Kisuke und
+Ohne Remote-Provider installiert der Installer weder Happy, Kisuke noch Multica und
 richtet auch keinen zugehörigen Dienst ein; erreichbar bleibt die Box dann
 über die Host-Konsole (`pct enter`, `lxc exec`, `incus exec`) und optional
 SSH:
@@ -419,6 +419,17 @@ SSH:
 ```bash
 curl -fsSL https://raw.githubusercontent.com/c4kingpin/Scripts/master/devbox/install.sh |
   env DEVBOX_REMOTE=none bash
+```
+
+[Multica](https://github.com/multica-ai/multica) ist ebenfalls als
+Remote-Provider verfügbar. Es installiert den Multica-CLI-Daemon, der die
+bereits von DevBox installierten Codex- und Claude-CLIs als Agent-Runtimes
+ausführt. Die Anmeldung erfolgt anschließend mit `devbox auth login`; in der
+headless LXC-Umgebung wird dabei ein Multica-API-Token abgefragt.
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/c4kingpin/Scripts/master/devbox/install.sh |
+  env DEVBOX_REMOTE=multica bash
 ```
 
 Die getroffene Auswahl landet in `/var/lib/devbox/remote-provider`,

@@ -226,6 +226,7 @@ CODEX_VERSION="${CODEX_VERSION:-0.147.0}"
 CLAUDE_VERSION="${CLAUDE_VERSION:-2.1.233}"
 HAPPY_VERSION="${HAPPY_VERSION:-1.2.0}"
 KISUKE_VERSION="${KISUKE_VERSION:-1.2.20}"
+MULTICA_VERSION="${MULTICA_VERSION:-0.4.32}"
 
 # Single source of truth for which remote/session providers exist. Each name
 # here must have a devbox/features/<name>.sh module that defines the four
@@ -234,7 +235,7 @@ KISUKE_VERSION="${KISUKE_VERSION:-1.2.20}"
 # devbox/README.md, "Neuen Remote-Provider hinzufügen"). "none" is always a
 # valid DEVBOX_REMOTE value but deliberately not listed here - it has no
 # module and no hooks to call.
-readonly DEVBOX_REMOTE_PROVIDERS="happy kisuke"
+readonly DEVBOX_REMOTE_PROVIDERS="happy kisuke multica"
 
 DEVBOX_REPO_URL="${DEVBOX_REPO_URL:-https://raw.githubusercontent.com/c4kingpin/Scripts}"
 DEVBOX_GITHUB_REPO="${DEVBOX_GITHUB_REPO:-c4kingpin/Scripts}"
@@ -298,6 +299,8 @@ declare -A DEVBOX_CHECKSUMS=(
   ["otp:29.0.5:ubuntu-24.04:arm64"]="7ab17628fca446dc02d40ecb0afe6c18e72437e09fca5c90d208c66db4206ae0"
   ["otp:29.0.5:ubuntu-22.04:arm64"]="22bb49411e0a6dbb1829a32a2d31cc1cecc994e0c828d97845696ded66cd9c09"
   ["elixir:1.20.3:29"]="51f799b78374d569a5df659bdedeb0dd9ef8251230bcdaef00c533019086e625"
+  ["multica:0.4.32:amd64"]="c2c1c0ddcd6b1fb8fd5178b2037c19b781b1fd0c880c2df2ab2f3522f8eb889f"
+  ["multica:0.4.32:arm64"]="44aa9debc7406feb08f0cc46e889e8a20079a9c853a7916c0721879c9678e459"
 )
 # shellcheck disable=SC2034 # read by features/elixir.sh after it's sourced
 readonly DEVBOX_CHECKSUMS
@@ -455,7 +458,8 @@ Which remote/session provider should this DevBox use?
 
   1) Happy  - happy / happy claude / happy codex remote session layer (recommended)
   2) Kisuke - Kisuke Connect (kisuke.dev), phone/tablet terminal+editor+chat
-  3) None   - host console/SSH only, no remote provider
+  3) Multica - self-hostable agent workspace and daemon (multica.ai)
+  4) None   - host console/SSH only, no remote provider
 
 EOF
 
@@ -467,7 +471,8 @@ EOF
 
   case "${choice:-1}" in
     2) DEVBOX_REMOTE="kisuke" ;;
-    3) DEVBOX_REMOTE="none" ;;
+    3) DEVBOX_REMOTE="multica" ;;
+    4) DEVBOX_REMOTE="none" ;;
     *) DEVBOX_REMOTE="happy" ;;
   esac
 }
@@ -640,7 +645,7 @@ agent_instructions() {
 - Create focused commits and draft pull requests when GitHub is authenticated.
 - Never commit credentials, tokens, `.env` files, or generated secrets.
 - Never inspect credential stores such as `~/.ssh`, `~/.happy/access.key`,
-  `~/.kisuke`, `~/.codex/auth.json`, `~/.claude/.credentials.json`, or
+  `~/.kisuke`, `~/.multica`, `~/.codex/auth.json`, `~/.claude/.credentials.json`, or
   DevBox secret files unless the user explicitly requests authentication
   troubleshooting.
 - Never force-push unless the user explicitly requests it.
@@ -723,6 +728,7 @@ if [[ ! -f "${DEV_HOME}/.claude/settings.json" ]]; then
       "Read(~/.pgpass)",
       "Read(~/.happy/access.key)",
       "Read(~/.kisuke/**)",
+      "Read(~/.multica/**)",
       "Read(~/.codex/auth.json)",
       "Read(~/.claude/.credentials.json)",
       "Read(~/.config/devbox/openrouter.env)"
@@ -760,7 +766,7 @@ else
       .permissions.deny = (
         (
           (.permissions.deny // [])
-          + ["Read(~/.happy/access.key)", "Read(~/.kisuke/**)"]
+          + ["Read(~/.happy/access.key)", "Read(~/.kisuke/**)", "Read(~/.multica/**)"]
         )
         | unique
       ) |
