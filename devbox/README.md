@@ -450,6 +450,29 @@ Serverkonfiguration liegt root-geschützt unter
 ein `RESEND_API_KEY` ergänzt werden. Ohne Mail-Anbieter schreibt Multica den
 einmaligen Bestätigungscode in die Backend-Logs.
 
+### Externer Reverse Proxy
+
+Läuft der Reverse Proxy auf einem anderen Host, die öffentlichen HTTPS-URLs
+und ausschließlich dessen IP/CIDR beim Installieren übergeben:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/c4kingpin/Scripts/master/devbox/install.sh |
+  env DEVBOX_REMOTE=multica \
+    DEVBOX_MULTICA_APP_URL=https://multica.example.com \
+    DEVBOX_MULTICA_SERVER_URL=https://api.multica.example.com \
+    DEVBOX_MULTICA_PROXY_CIDR=203.0.113.10/32 \
+    bash
+```
+
+DevBox veröffentlicht dann die Ports 3000 und 8080, akzeptiert sie aber über
+eine eigene Docker-Firewallkette nur vom angegebenen Proxy-CIDR. Der
+Proxy routet die App-URL nach `http://<devbox-ip>:3000` und die API-URL nach
+`http://<devbox-ip>:8080`; dabei muss er die üblichen `Host`-,
+`X-Forwarded-For`- und `X-Forwarded-Proto`-Header weitergeben. Anschließend
+in der Web-App einen persönlichen
+Multica-Token erzeugen; `devbox auth login` fragt diesen Token ab und benötigt
+keinen Browser-Callback auf der DevBox.
+
 Die getroffene Auswahl landet in `/var/lib/devbox/remote-provider`,
 erscheint in `devbox status` und `devbox doctor --json`
 (`remote_provider`), und `devbox update` übernimmt sie automatisch —
