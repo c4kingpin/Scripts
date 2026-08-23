@@ -52,7 +52,7 @@ msg_error() { printf '%b\n' "${RD}✗ $*${CL}" >&2; }
 # installer version that produced it. The rest of the version manifest
 # (Node.js, Erlang, agent CLIs, ...) is defined further down, where it's
 # actually used.
-readonly DEVBOX_VERSION="${DEVBOX_VERSION:-1.5.0-RC1}"
+readonly DEVBOX_VERSION="${DEVBOX_VERSION:-1.5.0-RC2}"
 
 msg_info "DevBox installer v${DEVBOX_VERSION}"
 
