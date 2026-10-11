@@ -30,12 +30,16 @@ def load_module():
 
 m = load_module()
 failures: list[str] = []
+passed = 0
 
 
 def check(name: str, condition: bool, detail: str = "") -> None:
+    global passed
     print(("PASS " if condition else "FAIL ") + name +
           (f" :: {detail}" if detail and not condition else ""))
-    if not condition:
+    if condition:
+        passed += 1
+    else:
         failures.append(name)
 
 
@@ -339,4 +343,4 @@ print()
 if failures:
     print(f"FEHLGESCHLAGEN ({len(failures)}): " + ", ".join(failures))
     sys.exit(1)
-print("Alle Tests bestanden.")
+print(f"Alle {passed} Tests bestanden.")
