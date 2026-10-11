@@ -58,6 +58,78 @@ das Skript – und zwar so, dass es im Zweifelsfall lieber nichts tut.
   Das Vertrauen stützt sich auf TLS zu `docs.evcc.io` – siehe
   [Sicherheitszusagen](#sicherheitszusagen).
 
+## Installation
+
+Das Skript installiert evcc **nicht**. Es setzt eine laufende Installation
+voraus und tauscht dort nur das Testtoken.
+
+### 1. Vorprüfung
+
+Das Skript bricht bei jeder nicht erfüllten Voraussetzung ab, statt etwas falsch
+zu machen. Vorher zu wissen, woran es liegt, spart trotzdem Zeit:
+
+```bash
+systemctl is-active evcc                      # muss "active" sein
+python3 --version
+# 0 Treffer oder Datei fehlt => Datenbankmodus
+sudo grep -c '^sponsortoken:' /etc/evcc.yaml
+curl -s http://127.0.0.1:7070/api/state | head -c 120
+```
+
+Ein `401` in der letzten Zeile heißt: `--api-key-file` wird gebraucht. Fehlt
+`/etc/evcc.yaml`, ist das der Normalfall bei Konfiguration über die
+Weboberfläche — dann greift der Datenbankmodus, ohne dass du etwas angeben
+musst.
+
+### 2. Skript holen und ansehen
+
+```bash
+curl -fsSL -o /tmp/update-trial-token.py \
+  https://raw.githubusercontent.com/c4kingpin/Scripts/master/evcc/update-trial-token.py
+less /tmp/update-trial-token.py
+chmod +x /tmp/update-trial-token.py
+```
+
+Der zweite Schritt ist kein Ritual: Das Skript schreibt nach `/etc` bzw. in die
+evcc-Datenbank und startet einen Dienst neu. Wer es ausführt, sollte es gelesen
+haben. Eine Prüfsumme steht hier bewusst nicht — sie würde bei jeder Änderung
+des Skripts veralten und wäre dann irreführend. Wer den Inhalt gegen das
+Repository abgleichen will, klont es und vergleicht mit `git diff`.
+
+### 3. Trockenlauf
+
+Der wichtigste Schritt. Schreibt nichts und startet nichts neu:
+
+```bash
+sudo /tmp/update-trial-token.py --dry-run
+```
+
+Die erste Zeile nennt die erkannte Konfigurationsquelle. Erwartet sind danach
+zwei Datumszeilen und entweder `Keine Aenderung erforderlich.` oder
+`TROCKENLAUF: Neueres Token gefunden.` Alles andere steht mit seiner Bedeutung
+unter [Typische Meldungen](#typische-meldungen).
+
+### 4. Echter Lauf
+
+```bash
+sudo /tmp/update-trial-token.py
+```
+
+Startet evcc neu. Das Skript verschiebt die Aktualisierung von selbst, wenn
+gerade geladen wird; eine ruhige Zeit zu wählen ist trotzdem sinnvoll.
+
+### 5. Dauerhaft einrichten
+
+Erst wenn Schritt 4 sauber lief:
+
+```bash
+sudo install -m 0755 /tmp/update-trial-token.py \
+  /usr/local/bin/update-trial-token.py
+```
+
+Danach die Unit-Dateien aus
+[Regelmäßig ausführen](#regelmäßig-ausführen-systemd-timer) anlegen.
+
 ## Verwendung
 
 ```bash
