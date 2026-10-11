@@ -350,11 +350,14 @@ echo "[main  ] INFO 2026/01/01 00:00:00 using sqlite database: ${store%.settings
 case "${args[0]}:${args[1]}" in
   settings:get)
     echo 'eebus: {"port":4712}'
-    [ -s "$store" ] && echo "sponsortoken: $(cat "$store")"
+    [ -s "$store" ] && sed -E 's/^([^=]+)=(.*)$/\1: \2/' "$store"
     exit 0 ;;
   settings:set)
-    [ "${args[2]}" = "sponsortoken" ] || { echo "unknown key" >&2; exit 1; }
-    printf '%s' "${args[3]}" > "$store"
+    # Schluessel werden exakt abgelegt, wie evcc es tut.
+    tmp="$store.tmp"; : > "$tmp"
+    [ -s "$store" ] && grep -v "^${args[2]}=" "$store" >> "$tmp"
+    printf '%s=%s\n' "${args[2]}" "${args[3]}" >> "$tmp"
+    mv "$tmp" "$store"
     exit 0 ;;
   *) echo "Error: unexpected ${args[*]}" >&2; exit 1 ;;
 esac
@@ -370,15 +373,21 @@ def setup_db(fake: Fake, token: str | None) -> tuple[Path, str]:
     database = directory / "evcc.db"
     database.write_bytes(b"SQLite format 3\x00")
     if token is not None:
-        (directory / "evcc.db.settings").write_text(token)
+        (directory / "evcc.db.settings").write_text(f"{m.SETTING_KEY}={token}\n")
     m.systemctl = fake.systemctl
     m.fetch_url = fake.fetch_url
     return database, str(stub)
 
 
-def db_token(database: Path) -> str | None:
+def db_settings(database: Path) -> dict[str, str]:
     side = database.with_name(database.name + ".settings")
-    return side.read_text() if side.exists() else None
+    if not side.exists():
+        return {}
+    return dict(line.split("=", 1) for line in side.read_text().splitlines() if line)
+
+
+def db_token(database: Path) -> str | None:
+    return db_settings(database).get(m.SETTING_KEY)
 
 
 def db_run(database: Path, stub: str, **kwargs):
@@ -431,7 +440,7 @@ try:
     check("DB: fehlendes Token fuehrt zu Fehler", False)
 except m.UpdaterError as exc:
     check("DB: fehlendes Token fuehrt zu Fehler",
-          "kein sponsortoken" in str(exc).lower(), str(exc))
+          "kein 'sponsortoken' gesetzt" in str(exc).lower(), str(exc))
 
 # Fehlende Datenbankdatei
 fake = Fake()
@@ -487,6 +496,42 @@ ybackend.read_current()
 ybackend.restore()
 check("YAML: Anker uebersteht erneutes Lesen",
       ybackend.current_value() == TRIAL_OLD, str(ybackend.current_value())[:40])
+
+# Der kanonische Schluessel ist camelCase -- evcc vergleicht exakt.
+check("Schluessel ist sponsorToken", m.SETTING_KEY == "sponsorToken", m.SETTING_KEY)
+
+fake = Fake()
+database, stub = setup_db(fake, TRIAL_OLD)
+db_run(database, stub)
+check("DB: schreibt in den kanonischen Schluessel",
+      list(db_settings(database)) == ["sponsorToken"], str(list(db_settings(database))))
+
+# Nur ein Eintrag mit falscher Schreibweise: wirkungslos, muss benannt werden
+fake = Fake()
+database, stub = setup_db(fake, None)
+database.with_name(database.name + ".settings").write_text(f"sponsortoken={TRIAL_OLD}\n")
+try:
+    db_run(database, stub)
+    check("DB: falsche Schreibweise wird erkannt", False)
+except m.UpdaterError as exc:
+    check("DB: falsche Schreibweise wird erkannt",
+          "sponsortoken" in str(exc) and "wirkungslos" in str(exc), str(exc))
+
+# Richtiger Schluessel plus Altlast: Warnung, aber Arbeit geht weiter
+fake = Fake()
+database, stub = setup_db(fake, TRIAL_OLD)
+side = database.with_name(database.name + ".settings")
+side.write_text(f"{m.SETTING_KEY}={TRIAL_OLD}\nsponsortoken={SPONSOR}\n")
+buffer = io.StringIO()
+with contextlib.redirect_stdout(buffer):
+    db_run(database, stub)
+printed = buffer.getvalue()
+check("DB: Altlast wird gemeldet, blockiert aber nicht",
+      "WARNUNG" in printed and db_settings(database)[m.SETTING_KEY] == TRIAL_NEW,
+      printed[:200])
+check("DB: Altlast wird nicht angefasst",
+      db_settings(database).get("sponsortoken") == SPONSOR)
+
 
 # Nicht vorhandene CLI
 fake = Fake()
@@ -561,7 +606,7 @@ if real_bin:
     backend = m.DatabaseBackend(database, real_bin, None)
     try:
         subprocess.run([real_bin, "settings", "set", "--database", str(database),
-                        "-f", "sponsortoken", TRIAL_OLD],
+                        "-f", m.SETTING_KEY, TRIAL_OLD],
                        capture_output=True, check=True, timeout=120)
         check("REAL: Token wird korrekt gelesen", backend.read_current() == TRIAL_OLD)
         backend.apply(TRIAL_NEW)
@@ -577,6 +622,10 @@ if real_bin:
         backend.restore()
         check("REAL: Anker uebersteht erneutes Lesen",
               backend.current_value() == TRIAL_OLD, str(backend.current_value())[:40])
+        # Die echte CLI muss den kanonischen Schluessel zurueckmelden.
+        keys = list(backend._all_settings())
+        check("REAL: kanonischer Schluessel in der Datenbank",
+              "sponsorToken" in keys and "sponsortoken" not in keys, str(keys))
     except Exception as exc:  # noqa: BLE001 - Diagnose im Testlauf
         check("REAL: Durchlauf gegen echte Binary", False,
               f"{type(exc).__name__}: {exc}")

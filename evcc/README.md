@@ -11,7 +11,7 @@ Es werden **beide Konfigurationswege** von evcc unterstützt und im Modus
 | Weg | Wo das Token liegt | Wie das Skript es ändert |
 | --- | --- | --- |
 | YAML-Datei (traditionell) | `sponsortoken:` in `/etc/evcc.yaml` | formaterhaltender Zeilentausch, atomar, mit Backup |
-| Weboberfläche (empfohlen, Standard) | evcc-Datenbank, i. d. R. `/var/lib/evcc/evcc.db` | über die offizielle CLI `evcc settings get/set` |
+| Weboberfläche (empfohlen, Standard) | `sponsorToken` in der evcc-Datenbank, i. d. R. `/var/lib/evcc/evcc.db` | über die offizielle CLI `evcc settings get/set` |
 
 Wichtig für den zweiten Fall: Das `.deb`-Paket legt **keine** `/etc/evcc.yaml`
 an. Wer evcc über die Weboberfläche konfiguriert hat, hat gar keine
@@ -33,7 +33,8 @@ das Skript – und zwar so, dass es im Zweifelsfall lieber nichts tut.
 
 - evcc per `apt`/`.deb` installiert und als systemd-Dienst `evcc` aktiv
 - Ein bereits vorhandenes **Testtoken** – entweder als `sponsortoken:` auf
-  oberster Ebene einer YAML-Datei, oder in der evcc-Datenbank
+  oberster Ebene einer YAML-Datei, oder als `sponsorToken` in der
+  evcc-Datenbank (zur unterschiedlichen Schreibweise siehe unten)
 - Für den Datenbankmodus: die `evcc`-CLI im `PATH` (beim `.deb`-Paket gegeben)
 - Python 3 aus der Distribution; die Raspberry-Pi-OS-Versionen Bullseye (3.9)
   und Bookworm (3.11) erfüllen das. Entwickelt und getestet wurde mit 3.12.
@@ -52,8 +53,9 @@ das Skript – und zwar so, dass es im Zweifelsfall lieber nichts tut.
   Zugriff über `evcc settings get/set`. Schema und Ablage der Datenbank sind
   kein zugesichertes Format, die CLI ist die dokumentierte Schnittstelle.
 - **Ein Token anlegen, wo keines ist.** Ist weder in der YAML-Datei noch in der
-  Datenbank ein `sponsortoken` gesetzt, bricht das Skript ab. Es ersetzt nur,
-  es richtet nicht ein.
+  Datenbank ein Token gesetzt, bricht das Skript ab. Es ersetzt nur, es richtet
+  nicht ein. Das erste Token trägst du in der Weboberfläche unter Sponsoring
+  ein (oder in die YAML-Datei).
 - **Die JWT-Signatur prüfen.** Es gibt keinen öffentlichen Signaturschlüssel.
   Das Vertrauen stützt sich auf TLS zu `docs.evcc.io` – siehe
   [Sicherheitszusagen](#sicherheitszusagen).
@@ -160,7 +162,8 @@ Fall für `journalctl`.
 | `Keine Aenderung: Bestehendes Token wird geschuetzt (…)` | Kein Testtoken in der Datei – vermutlich ein Sponsor-Token. Gewolltes Verhalten. |
 | `Ein Ladepunkt laedt derzeit. Aktualisierung wird verschoben.` | Kein Eingriff während eines Ladevorgangs; beim nächsten Timer-Lauf erneut versuchen. |
 | `Konfigurationsquelle: …` | Erste Zeile jedes Laufs; zeigt, welcher Weg erkannt wurde. |
-| `In der evcc-Datenbank ist kein sponsortoken gesetzt.` | Es gibt kein Testtoken zum Ersetzen – erst eines in der Weboberfläche eintragen. |
+| `In der evcc-Datenbank ist kein 'sponsorToken' gesetzt.` | Es gibt kein Testtoken zum Ersetzen – erst eines in der Weboberfläche unter Sponsoring eintragen. |
+| `Die Datenbank enthaelt 'sponsortoken', aber kein 'sponsorToken'.` | Ein Eintrag mit falscher Schreibweise, den evcc nie liest. Entfernen und das Token in der Weboberfläche eintragen. |
 | `Keine evcc-Datenbank unter …` | Falscher Pfad; mit `--database` angeben. |
 | `Kein YAML-Eintrag 'sponsortoken:' …` | Nur im Modus `yaml`: der Eintrag fehlt oder ist eingerückt. |
 | `Auf der offiziellen evcc-Seite wurde kein noch gueltiges Testtoken gefunden.` | Entweder ist das Doku-Token abgelaufen, oder der Seitenaufbau hat sich geändert. |
@@ -171,6 +174,17 @@ Fall für `journalctl`.
 Alles hier Beschriebene ist gegen die echte evcc-Binary 0.317.1 gemessen, nicht
 aus der Doku abgeleitet:
 
+- **Der Schlüssel heißt `sponsorToken`, mit grossem T.** evcc vergleicht
+  Einstellungsschlüssel exakt (`db/settings/setting.go`: `s.Key == key`, keine
+  Normalisierung) und liest ausschließlich diese Schreibweise
+  (`core/keys/global.go`). Ein Eintrag namens `sponsortoken` steht als zweiter,
+  eigener Datensatz daneben und wird **nie gelesen** – gemessen: mit
+  `sponsorToken` meldet die API `name: trial` samt Ablaufdatum, mit
+  `sponsortoken` bleibt der Sponsor-Status leer. In der **YAML-Datei** heißt
+  derselbe Wert dagegen `sponsortoken` (klein), weil die YAML-Ebene Schlüssel
+  normalisiert. Diese Asymmetrie ist die unangenehmste Falle des
+  Datenbankmodus; das Skript erkennt einen Eintrag mit abweichender
+  Schreibweise und benennt ihn, statt ihn zu übergehen.
 - **Zugriff als Dienstnutzer, nicht als root.** Die Datenbank läuft im
   SQLite-WAL-Modus und legt beim Zugriff `-wal`/`-shm`-Seitendateien an, die dem
   *schreibenden* Nutzer gehören. Ein Schreibzugriff als root kann also Dateien
@@ -183,9 +197,10 @@ aus der Doku abgeleitet:
   verlassen. Dieser Standard wäre unter `sudo` das Home von **root** – das
   Skript würde dann an der falschen Datenbank arbeiten und nichts bewirken.
 - **Ein Neustart ist nötig.** Wird das Token bei laufendem Dienst geändert,
-  übernimmt evcc es nicht; der Sponsor-Status blieb in der Messung über 20
-  Sekunden unverändert. Deshalb startet das Skript den Dienst neu — mit
-  denselben Vorsichtsmaßnahmen wie im YAML-Modus.
+  übernimmt evcc es nicht; der Sponsor-Status blieb in der Messung über 30
+  Sekunden unverändert – nachgemessen mit dem korrekten Schlüssel. Deshalb
+  startet das Skript den Dienst neu, mit denselben Vorsichtsmaßnahmen wie im
+  YAML-Modus.
 - **`evcc settings set` braucht `-f`.** Ohne das Flag fragt die CLI interaktiv
   nach und bricht ohne Terminal mit `FATAL` ab. In einem Timer wäre das ein
   Hänger, deshalb wird `-f` immer mitgegeben.
@@ -305,13 +320,13 @@ bash tests/test-evcc.sh
 EVCC_LIVE_TEST=1 bash tests/test-evcc.sh
 ```
 
-69 Prüfungen ohne Netzwerk und ohne evcc; die Suite nennt die Zahl am Ende
+74 Prüfungen ohne Netzwerk und ohne evcc; die Suite nennt die Zahl am Ende
 selbst. Zwei optionale Erweiterungen:
 
 | Variable | Wirkung |
 | --- | --- |
 | `EVCC_LIVE_TEST=1` | fragt zusätzlich die echte evcc-Dokumentation ab |
-| `EVCC_REAL_BIN=/pfad/zu/evcc` | testet den Datenbankmodus gegen eine echte evcc-Binary statt gegen die Stub-CLI |
+| `EVCC_REAL_BIN=/pfad/zu/evcc` | testet den Datenbankmodus gegen eine echte evcc-Binary statt gegen die Stub-CLI (6 weitere Prüfungen) |
 
 ```bash
 EVCC_REAL_BIN=/usr/bin/evcc bash tests/test-evcc.sh

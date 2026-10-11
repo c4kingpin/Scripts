@@ -56,7 +56,11 @@ DEFAULT_STATE_URL = "http://127.0.0.1:7070/api/state"
 DEFAULT_DATABASE = Path("/var/lib/evcc/evcc.db")
 DEFAULT_SERVICE_USER = "evcc"
 SERVICE_UNIT = "evcc"
-SETTING_KEY = "sponsortoken"
+# Gross-/Kleinschreibung ist entscheidend: evcc vergleicht Schluessel exakt
+# (db/settings/setting.go: `s.Key == key`, keine Normalisierung) und liest
+# ausschliesslich "sponsorToken" (core/keys/global.go). Ein Eintrag mit anderer
+# Schreibweise wird stillschweigend nie gelesen.
+SETTING_KEY = "sponsorToken"
 JWT_PATTERN = r"eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+"
 JWT_RE = re.compile(r"(?<![A-Za-z0-9_-])" + JWT_PATTERN + r"(?![A-Za-z0-9_-])")
 YAML_TOKEN_RE = re.compile(
@@ -404,22 +408,37 @@ class DatabaseBackend:
         self._written: str | None = None
         self._anchored = False
 
-    def _settings_get(self) -> str | None:
+    def _all_settings(self) -> dict[str, str]:
         output = evcc_cli(["settings", "get", "--database", str(self.database)],
                           evcc_bin=self.evcc_bin, run_as=self.run_as)
-        found = []
+        values: dict[str, str] = {}
         for line in output.splitlines():
             # evcc mischt eigene Logzeilen (beginnen mit '[') in dieselbe Ausgabe.
             if line.startswith("["):
                 continue
             key, separator, value = line.partition(":")
-            if separator and key.strip() == SETTING_KEY:
-                found.append(value.strip().strip("\"'"))
-        if len(found) > 1:
-            raise UpdaterError(
-                f"Die evcc-Datenbank meldet {SETTING_KEY} mehrfach; Abbruch."
-            )
-        return found[0] if found and found[0] else None
+            if separator:
+                values[key.strip()] = value.strip().strip("\"'")
+        return values
+
+    def _settings_get(self) -> str | None:
+        values = self._all_settings()
+        token = values.get(SETTING_KEY) or None
+        # Eintraege mit abweichender Schreibweise liest evcc nie. Sie still zu
+        # uebergehen wuerde genau den Fehler verschleiern, der sie erzeugt hat.
+        strays = sorted(k for k in values
+                        if k != SETTING_KEY and k.lower() == SETTING_KEY.lower())
+        if strays:
+            listed = ", ".join(repr(k) for k in strays)
+            if token is None:
+                raise UpdaterError(
+                    f"Die Datenbank enthaelt {listed}, aber kein '{SETTING_KEY}'. "
+                    f"evcc vergleicht Schluessel exakt und liest nur "
+                    f"'{SETTING_KEY}' -- der vorhandene Eintrag ist wirkungslos. "
+                    f"Entfernen und das Token in der Weboberflaeche eintragen."
+                )
+            log(f"WARNUNG: wirkungsloser Zusatzeintrag in der Datenbank: {listed}.")
+        return token
 
     def _settings_set(self, token: str) -> None:
         # -f ist Pflicht: ohne das Flag fragt die CLI interaktiv nach und
@@ -439,8 +458,9 @@ class DatabaseBackend:
         token = self._settings_get()
         if token is None:
             raise UpdaterError(
-                f"In der evcc-Datenbank ist kein {SETTING_KEY} gesetzt. "
-                "Es gibt also kein Testtoken, das ersetzt werden koennte."
+                f"In der evcc-Datenbank ist kein '{SETTING_KEY}' gesetzt. "
+                "Es gibt also kein Testtoken, das ersetzt werden koennte -- "
+                "zuerst eines in der Weboberflaeche unter Sponsoring eintragen."
             )
         self._original = token
         self._anchored = True
