@@ -13,7 +13,7 @@ Installation aus demselben Branch/Commit heruntergeladen und unverändert nach
 `/usr/local/bin/devbox` geschrieben — so bleiben Installer und Manager immer
 versionsgleich. Am dokumentierten Curl-Einzeiler ändert das nichts: `install.sh`
 lädt ohnehin schon während der Installation weitere Artefakte (Pakete, Node.js,
-Erlang/Elixir, Codex/Claude/Happy oder Kisuke) nach.
+Erlang/Elixir, Codex/Claude/Happy, Kisuke oder Multica) nach.
 
 Betriebslogik, die `install.sh` erst nach seiner Bootstrap-Phase (Root-/OS-/
 Netzwerk-Check) braucht, wandert schrittweise in eigene, ebenfalls
@@ -219,7 +219,7 @@ das Skript die zugehörige Frage:
    [Feature-Auswahl](#feature-auswahl)) — Standard, Minimal oder
    Custom-Auswahl einzelner Features.
 2. **Remote-Provider** (`DEVBOX_REMOTE`, siehe
-   [Remote-Provider](#remote-provider)) — Happy, Kisuke Connect oder kein
+   [Remote-Provider](#remote-provider)) — Happy, Kisuke Connect, Multica oder kein
    Remote-Zugriff.
 3. **Agenten-Autonomie** (`DEVBOX_AUTONOMY`, siehe unten).
 
@@ -411,7 +411,7 @@ curl -fsSL https://raw.githubusercontent.com/c4kingpin/Scripts/master/devbox/ins
   env DEVBOX_REMOTE=kisuke bash
 ```
 
-Ohne Remote-Provider installiert der Installer weder Happy noch Kisuke und
+Ohne Remote-Provider installiert der Installer weder Happy, Kisuke noch Multica und
 richtet auch keinen zugehörigen Dienst ein; erreichbar bleibt die Box dann
 über die Host-Konsole (`pct enter`, `lxc exec`, `incus exec`) und optional
 SSH:
@@ -420,6 +420,109 @@ SSH:
 curl -fsSL https://raw.githubusercontent.com/c4kingpin/Scripts/master/devbox/install.sh |
   env DEVBOX_REMOTE=none bash
 ```
+
+[Multica](https://github.com/multica-ai/multica) läuft als Remote-Provider
+vollständig self-hosted: DevBox installiert Docker, startet den offiziellen
+Compose-Stack (PostgreSQL, Backend und Web-UI) und bindet dessen Ports nur an
+`127.0.0.1:3000` und `127.0.0.1:8080`. Die Images sind auf die in
+`devbox version` angezeigte Multica-Version gepinnt. Der LXC-Container muss
+Docker ausführen dürfen (bei Proxmox typischerweise mit aktivierter
+`nesting`-Option); der Installer prüft das mit `docker info`.
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/c4kingpin/Scripts/master/devbox/install.sh |
+  env DEVBOX_REMOTE=multica bash
+```
+
+Nach der Installation die Web-UI über einen SSH-Tunnel öffnen und die lokale
+Multica-Instanz anmelden:
+
+```bash
+ssh -L 3000:127.0.0.1:3000 -L 8080:127.0.0.1:8080 dev@<devbox-host>
+# Danach lokal im Browser: http://localhost:3000
+# Auf der DevBox:
+devbox auth login
+```
+
+`devbox auth login` führt `multica setup self-host` aus. Die selbst gehostete
+Serverkonfiguration liegt root-geschützt unter
+`/opt/devbox/multica-self-host/`; für die E-Mail-Anmeldung kann dort später
+ein `RESEND_API_KEY` ergänzt werden. Ohne Mail-Anbieter schreibt Multica den
+einmaligen Bestätigungscode in die Backend-Logs.
+
+### Externer Reverse Proxy
+
+Läuft der Reverse Proxy auf einem anderen Host, die öffentlichen HTTPS-URLs
+und ausschließlich dessen IP/CIDR beim Installieren übergeben:
+
+Bei einer interaktiven Neuinstallation (`DEVBOX_REMOTE` nicht gesetzt) fragt
+die Auswahl von **Multica** dieselben drei Werte optional ab.
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/c4kingpin/Scripts/master/devbox/install.sh |
+  env DEVBOX_REMOTE=multica \
+    DEVBOX_MULTICA_APP_URL=https://multica.example.com \
+    DEVBOX_MULTICA_SERVER_URL=https://api.multica.example.com \
+    DEVBOX_MULTICA_PROXY_CIDR=203.0.113.10/32 \
+    DEVBOX_MULTICA_PROXY_HOST_IP=203.0.113.10 \
+    bash
+```
+
+DevBox veröffentlicht dann die Ports 3000 und 8080, akzeptiert sie aber über
+eine eigene Docker-Firewallkette nur vom angegebenen Proxy-CIDR. Der
+Proxy routet die App-URL nach `http://<devbox-ip>:3000` und die API-URL nach
+`http://<devbox-ip>:8080`; dabei muss er die üblichen `Host`-,
+`X-Forwarded-For`- und `X-Forwarded-Proto`-Header weitergeben. Anschließend
+in der Web-App einen persönlichen
+Multica-Token erzeugen; `devbox auth login` fragt diesen Token ab und benötigt
+keinen Browser-Callback auf der DevBox.
+
+Bei unterschiedlichen App- und API-Hosts leitet DevBox automatisch die
+gemeinsame Cookie-Domain ab (etwa `.example.com` für `app.example.com` und
+`api.example.com`) und setzt CORS, API- sowie WebSocket-URLs. Beide Hosts
+müssen daher unter derselben registrierten Domain liegen.
+
+DevBox trägt App- und API-Hostname außerdem in `/etc/hosts` auf die
+`DEVBOX_MULTICA_PROXY_HOST_IP` ein. Bei einem `/32`-CIDR kann diese Variable
+weggelassen werden; die IP wird dann aus dem CIDR übernommen.
+
+SMTP für Login-Codes lässt sich bei einer interaktiven Multica-Installation
+passwortgeschützt eingeben. Für automatisierte Installationen alle Werte
+zusammen setzen, beispielsweise für SMTPS:
+
+```bash
+DEVBOX_MULTICA_SMTP_HOST=smtp.example.com \
+DEVBOX_MULTICA_SMTP_PORT=465 \
+DEVBOX_MULTICA_SMTP_USERNAME=multica@example.com \
+DEVBOX_MULTICA_SMTP_PASSWORD='<SMTP-PASSWORT>' \
+DEVBOX_MULTICA_SMTP_FROM_EMAIL=multica@example.com \
+DEVBOX_MULTICA_SMTP_TLS=implicit
+```
+
+Das Passwort nicht in ein Repository oder die Shell-Historie übernehmen;
+für interaktive Installationen ist die Passwortabfrage vorzuziehen.
+
+### GitHub-App-Integration
+
+Die optionale GitHub-Integration verknüpft Pull Requests mit Multica-Issues
+und kann CI- sowie Merge-Status anzeigen. Sie benötigt einen öffentlich
+erreichbaren HTTPS-Reverse-Proxy für die App- und API-URL. Im interaktiven
+Multica-Installer werden App-Slug, App-ID, Webhook-Secret und der PEM-Schlüssel
+abgefragt. Den PEM-Schlüssel mit einer eigenen Zeile `END` abschließen; er wird
+nur in der root-geschützten Multica-`.env` gespeichert.
+
+Die GitHub App wird mit folgenden URLs angelegt:
+
+- Homepage: die öffentliche Multica-App-URL
+- Setup URL: `https://<api-host>/api/github/setup` ("Redirect on update" aktivieren)
+- Webhook URL: `https://<api-host>/api/webhooks/github`
+
+Erforderliche Repository-Berechtigungen sind **Metadata**, **Pull requests**,
+**Checks** und **Commit statuses**, jeweils schreibgeschützt. Die Events sind
+**Pull request**, **Check suite**, **Check run** und **Status**. Das
+Webhook-Secret der GitHub App muss mit dem im Installer eingegebenen Wert
+übereinstimmen. Die Runtime-CLI wird unabhängig davon über `devbox github setup`
+angemeldet.
 
 Die getroffene Auswahl landet in `/var/lib/devbox/remote-provider`,
 erscheint in `devbox status` und `devbox doctor --json`

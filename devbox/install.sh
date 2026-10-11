@@ -52,7 +52,7 @@ msg_error() { printf '%b\n' "${RD}✗ $*${CL}" >&2; }
 # installer version that produced it. The rest of the version manifest
 # (Node.js, Erlang, agent CLIs, ...) is defined further down, where it's
 # actually used.
-readonly DEVBOX_VERSION="${DEVBOX_VERSION:-1.3.1}"
+readonly DEVBOX_VERSION="${DEVBOX_VERSION:-1.5.0-RC11}"
 
 msg_info "DevBox installer v${DEVBOX_VERSION}"
 
@@ -226,6 +226,7 @@ CODEX_VERSION="${CODEX_VERSION:-0.147.0}"
 CLAUDE_VERSION="${CLAUDE_VERSION:-2.1.233}"
 HAPPY_VERSION="${HAPPY_VERSION:-1.2.0}"
 KISUKE_VERSION="${KISUKE_VERSION:-1.2.20}"
+MULTICA_VERSION="${MULTICA_VERSION:-0.4.32}"
 
 # Single source of truth for which remote/session providers exist. Each name
 # here must have a devbox/features/<name>.sh module that defines the four
@@ -234,7 +235,8 @@ KISUKE_VERSION="${KISUKE_VERSION:-1.2.20}"
 # devbox/README.md, "Neuen Remote-Provider hinzufügen"). "none" is always a
 # valid DEVBOX_REMOTE value but deliberately not listed here - it has no
 # module and no hooks to call.
-readonly DEVBOX_REMOTE_PROVIDERS="happy kisuke"
+readonly DEVBOX_REMOTE_PROVIDERS="happy kisuke multica"
+DEVBOX_REMOTE_INTERACTIVE_SELECTION=0
 
 DEVBOX_REPO_URL="${DEVBOX_REPO_URL:-https://raw.githubusercontent.com/c4kingpin/Scripts}"
 DEVBOX_GITHUB_REPO="${DEVBOX_GITHUB_REPO:-c4kingpin/Scripts}"
@@ -298,6 +300,8 @@ declare -A DEVBOX_CHECKSUMS=(
   ["otp:29.0.5:ubuntu-24.04:arm64"]="7ab17628fca446dc02d40ecb0afe6c18e72437e09fca5c90d208c66db4206ae0"
   ["otp:29.0.5:ubuntu-22.04:arm64"]="22bb49411e0a6dbb1829a32a2d31cc1cecc994e0c828d97845696ded66cd9c09"
   ["elixir:1.20.3:29"]="51f799b78374d569a5df659bdedeb0dd9ef8251230bcdaef00c533019086e625"
+  ["multica:0.4.32:amd64"]="c2c1c0ddcd6b1fb8fd5178b2037c19b781b1fd0c880c2df2ab2f3522f8eb889f"
+  ["multica:0.4.32:arm64"]="44aa9debc7406feb08f0cc46e889e8a20079a9c853a7916c0721879c9678e459"
 )
 # shellcheck disable=SC2034 # read by features/elixir.sh after it's sourced
 readonly DEVBOX_CHECKSUMS
@@ -455,7 +459,8 @@ Which remote/session provider should this DevBox use?
 
   1) Happy  - happy / happy claude / happy codex remote session layer (recommended)
   2) Kisuke - Kisuke Connect (kisuke.dev), phone/tablet terminal+editor+chat
-  3) None   - host console/SSH only, no remote provider
+  3) Multica - self-hostable agent workspace and daemon (multica.ai)
+  4) None   - host console/SSH only, no remote provider
 
 EOF
 
@@ -467,9 +472,12 @@ EOF
 
   case "${choice:-1}" in
     2) DEVBOX_REMOTE="kisuke" ;;
-    3) DEVBOX_REMOTE="none" ;;
+    3) DEVBOX_REMOTE="multica" ;;
+    4) DEVBOX_REMOTE="none" ;;
     *) DEVBOX_REMOTE="happy" ;;
   esac
+
+  DEVBOX_REMOTE_INTERACTIVE_SELECTION=1
 }
 
 select_remote
@@ -482,6 +490,119 @@ if [[ "$DEVBOX_REMOTE" != "none" &&
   msg_error "Invalid DEVBOX_REMOTE: ${DEVBOX_REMOTE} (expected none or one of: ${DEVBOX_REMOTE_PROVIDERS})"
   exit 1
 fi
+
+select_multica_reverse_proxy() {
+  local choice=""
+
+  # Environment variables are the non-interactive interface. Ask only during
+  # a fresh, interactive provider selection, never while devbox update reruns
+  # the installer for an already configured Multica box.
+  [[ "$DEVBOX_REMOTE" == "multica" && "$DEVBOX_REMOTE_INTERACTIVE_SELECTION" -eq 1 ]] || return 0
+
+  cat <<'EOF'
+
+Multica runs locally by default (127.0.0.1 only).
+EOF
+  read -r -p "Use an external reverse proxy on another host? [y/N]: " choice
+
+  case "${choice,,}" in
+    y | yes)
+      read -r -p "Public Multica app URL (e.g. https://multica.example.com): " DEVBOX_MULTICA_APP_URL
+      read -r -p "Public Multica API URL (e.g. https://api.multica.example.com): " DEVBOX_MULTICA_SERVER_URL
+      read -r -p "Reverse-proxy IPv4 CIDR (e.g. 203.0.113.10/32): " DEVBOX_MULTICA_PROXY_CIDR
+      read -r -p "Reverse-proxy IPv4 address for /etc/hosts: " DEVBOX_MULTICA_PROXY_HOST_IP
+
+      [[ -n "$DEVBOX_MULTICA_APP_URL" && -n "$DEVBOX_MULTICA_SERVER_URL" && -n "$DEVBOX_MULTICA_PROXY_CIDR" && -n "$DEVBOX_MULTICA_PROXY_HOST_IP" ]] || {
+        msg_error "All reverse-proxy values are required when external access is enabled."
+        exit 1
+      }
+      ;;
+    "" | n | no)
+      ;;
+    *)
+      msg_error "Please answer y or n."
+      exit 1
+      ;;
+  esac
+}
+
+select_multica_reverse_proxy
+
+select_multica_smtp() {
+  local choice=""
+
+  [[ "$DEVBOX_REMOTE" == "multica" && "$DEVBOX_REMOTE_INTERACTIVE_SELECTION" -eq 1 ]] || return 0
+
+  read -r -p "Configure SMTP delivery for Multica login codes? [y/N]: " choice
+  case "${choice,,}" in
+    y | yes)
+      read -r -p "SMTP host: " DEVBOX_MULTICA_SMTP_HOST
+      read -r -p "SMTP port [465]: " DEVBOX_MULTICA_SMTP_PORT
+      DEVBOX_MULTICA_SMTP_PORT="${DEVBOX_MULTICA_SMTP_PORT:-465}"
+      read -r -p "SMTP username: " DEVBOX_MULTICA_SMTP_USERNAME
+      read -r -s -p "SMTP password: " DEVBOX_MULTICA_SMTP_PASSWORD
+      echo
+      read -r -p "SMTP sender address: " DEVBOX_MULTICA_SMTP_FROM_EMAIL
+      # shellcheck disable=SC2034 # consumed by features/multica.sh after source.
+      DEVBOX_MULTICA_SMTP_TLS="implicit"
+
+      [[ -n "$DEVBOX_MULTICA_SMTP_HOST" && -n "$DEVBOX_MULTICA_SMTP_USERNAME" && -n "$DEVBOX_MULTICA_SMTP_PASSWORD" && -n "$DEVBOX_MULTICA_SMTP_FROM_EMAIL" ]] || {
+        msg_error "All SMTP values are required when SMTP delivery is enabled."
+        exit 1
+      }
+      ;;
+    "" | n | no)
+      ;;
+    *)
+      msg_error "Please answer y or n."
+      exit 1
+      ;;
+  esac
+}
+
+select_multica_smtp
+
+select_multica_github() {
+  local choice=""
+  local line=""
+
+  [[ "$DEVBOX_REMOTE" == "multica" && "$DEVBOX_REMOTE_INTERACTIVE_SELECTION" -eq 1 ]] || return 0
+
+  cat <<'EOF'
+
+GitHub integration links pull requests and can display CI status in Multica.
+It requires a public HTTPS API URL and a GitHub App.
+EOF
+  read -r -p "Configure GitHub App integration for Multica? [y/N]: " choice
+
+  case "${choice,,}" in
+    y | yes)
+      read -r -p "GitHub App slug: " DEVBOX_MULTICA_GITHUB_APP_SLUG
+      read -r -p "GitHub App ID: " DEVBOX_MULTICA_GITHUB_APP_ID
+      read -r -s -p "GitHub webhook secret: " DEVBOX_MULTICA_GITHUB_WEBHOOK_SECRET
+      echo
+      echo "Paste the GitHub App private-key PEM. Finish with a line containing only END."
+      DEVBOX_MULTICA_GITHUB_APP_PRIVATE_KEY=""
+      while IFS= read -r line; do
+        [[ "$line" == "END" ]] && break
+        DEVBOX_MULTICA_GITHUB_APP_PRIVATE_KEY+="${line}"$'\n'
+      done
+
+      [[ -n "$DEVBOX_MULTICA_GITHUB_APP_SLUG" && -n "$DEVBOX_MULTICA_GITHUB_APP_ID" && -n "$DEVBOX_MULTICA_GITHUB_WEBHOOK_SECRET" && -n "$DEVBOX_MULTICA_GITHUB_APP_PRIVATE_KEY" ]] || {
+        msg_error "All GitHub App values are required when GitHub integration is enabled."
+        exit 1
+      }
+      ;;
+    "" | n | no)
+      ;;
+    *)
+      msg_error "Please answer y or n."
+      exit 1
+      ;;
+  esac
+}
+
+select_multica_github
 
 msg_ok "DevBox profile: ${DEVBOX_PROFILE} (optional features: ${devbox_selected_features:-none})"
 
@@ -640,7 +761,7 @@ agent_instructions() {
 - Create focused commits and draft pull requests when GitHub is authenticated.
 - Never commit credentials, tokens, `.env` files, or generated secrets.
 - Never inspect credential stores such as `~/.ssh`, `~/.happy/access.key`,
-  `~/.kisuke`, `~/.codex/auth.json`, `~/.claude/.credentials.json`, or
+  `~/.kisuke`, `~/.multica`, `~/.codex/auth.json`, `~/.claude/.credentials.json`, or
   DevBox secret files unless the user explicitly requests authentication
   troubleshooting.
 - Never force-push unless the user explicitly requests it.
@@ -723,6 +844,7 @@ if [[ ! -f "${DEV_HOME}/.claude/settings.json" ]]; then
       "Read(~/.pgpass)",
       "Read(~/.happy/access.key)",
       "Read(~/.kisuke/**)",
+      "Read(~/.multica/**)",
       "Read(~/.codex/auth.json)",
       "Read(~/.claude/.credentials.json)",
       "Read(~/.config/devbox/openrouter.env)"
@@ -760,7 +882,7 @@ else
       .permissions.deny = (
         (
           (.permissions.deny // [])
-          + ["Read(~/.happy/access.key)", "Read(~/.kisuke/**)"]
+          + ["Read(~/.happy/access.key)", "Read(~/.kisuke/**)", "Read(~/.multica/**)"]
         )
         | unique
       ) |
