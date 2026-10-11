@@ -7,6 +7,7 @@ Tests.
 | Projekt | Beschreibung |
 | --- | --- |
 | [`devbox/`](devbox/) | Isolierte Entwicklungsumgebung für Codex und Claude in einem Ubuntu-LXC-Container: Agenten-CLIs, Node.js, Erlang/Elixir/Phoenix, PostgreSQL, GitHub CLI. |
+| [`evcc/`](evcc/) | Installation und Verwaltung von evcc (Ladesteuerung für E-Autos) auf einem Raspberry Pi. |
 
 ## Aufbau
 
