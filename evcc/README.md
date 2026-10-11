@@ -22,12 +22,17 @@ unregelmäßigen Abständen erneuert. Läuft es ab, fallen die Sponsor-Funktione
 aus, bis das Token von Hand ersetzt wird. Genau diesen Handgriff automatisiert
 das Skript – und zwar so, dass es im Zweifelsfall lieber nichts tut.
 
-> **Status:** Die Regressionstests laufen durch, die Tokenquelle ist live gegen
-> `docs.evcc.io` geprüft, und der Datenbankmodus ist gegen eine echte
-> evcc-Binary (0.317.1) getestet — Lesen, Schreiben, Zurückschreiben. Was noch
-> fehlt, ist ein Durchlauf auf echter Hardware mit laufendem Dienst und
-> echtem systemd; `systemctl` ist in allen Tests eine Attrappe. Zuerst
-> `--dry-run` verwenden.
+> **Status:** Auf echter Hardware verifiziert — Raspberry Pi, evcc als
+> systemd-Dienst, Konfiguration über die Weboberfläche. Geprüft wurden dort
+> Pfadermittlung aus der systemd-Unit, Moduserkennung, Lesen und Schreiben über
+> die CLI, der Nutzerwechsel per `runuser`, die Ladepunkt-Prüfung und der
+> Dienstneustart. Dazu Regressionstests, eine Live-Prüfung der Tokenquelle und
+> Läufe gegen eine echte evcc-Binary (0.317.1).
+>
+> **Nicht erprobt:** der Rückrollpfad. Dass bei einem fehlgeschlagenen Neustart
+> der vorherige Wert zurückgeschrieben wird, ist nur durch Tests mit Attrappen
+> abgedeckt — ein echter Neustartfehler lässt sich schlecht herbeiführen.
+> Bei einer neuen Installation trotzdem mit `--dry-run` anfangen.
 
 ## Voraussetzungen
 
@@ -115,6 +120,22 @@ unter [Typische Meldungen](#typische-meldungen).
 
 ```bash
 sudo /tmp/update-trial-token.py
+```
+
+Steht gerade keine Aktualisierung an, bleibt der Schreibpfad ungetestet — er
+liefe dann erstmals unbeaufsichtigt aus dem Timer. Wer das vorher sehen will,
+probt an einer **Kopie** der Datenbank; die echte bleibt unberührt, evcc wird
+einmal neu gestartet:
+
+```bash
+sudo cp /var/lib/evcc/evcc.db /var/lib/evcc/probelauf.db
+sudo chown evcc:evcc /var/lib/evcc/probelauf.db
+# ein künstlich älteres Testtoken eintragen (iss=evcc.io, sub=trial,
+# früheres exp; die Signatur prüft das Skript ohnehin nicht)
+sudo runuser -u evcc -- evcc settings set \
+  --database /var/lib/evcc/probelauf.db -f sponsorToken '<aelteres-jwt>'
+sudo ./update-trial-token.py --database /var/lib/evcc/probelauf.db
+sudo rm -f /var/lib/evcc/probelauf.db*
 ```
 
 Startet evcc neu. Das Skript verschiebt die Aktualisierung von selbst, wenn
