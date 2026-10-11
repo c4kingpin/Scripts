@@ -9,10 +9,13 @@ evcc-Dokumentation abgefragt.
 from __future__ import annotations
 
 import base64
+import contextlib
 import importlib.util
+import io
 import json
 import os
 import stat
+import subprocess
 import sys
 import tempfile
 import time
@@ -262,11 +265,11 @@ try:
 except m.UpdaterError as exc:
     check("Symlink abgelehnt", "Symlinks" in str(exc), str(exc))
 
-# Fehlender Eintrag (Konfiguration ueber die Weboberflaeche)
+# Fehlender Eintrag bei festgelegtem YAML-Modus
 fake = Fake()
 config = setup(fake, "site:\n  title: Home\n")
 try:
-    m.run(config, m.DEFAULT_STATE_URL, None, True, now=1000)
+    m.run(config, m.DEFAULT_STATE_URL, None, True, mode="yaml", now=1000)
     check("fehlender Eintrag fuehrt zu Fehler", False)
 except m.UpdaterError as exc:
     check("fehlender Eintrag fuehrt zu Fehler", "oberste" in str(exc), str(exc))
@@ -317,9 +320,6 @@ except isolated.UpdaterError as exc:
     check("Weiterleitung auf fremden Host abgelehnt", "fremden Host" in str(exc), str(exc))
 
 # Logausgaben enthalten nie ein Token
-import io
-import contextlib
-
 fake = Fake()
 config = setup(fake, yml(f"sponsortoken: {TRIAL_OLD}"))
 buffer = io.StringIO()
@@ -328,6 +328,259 @@ with contextlib.redirect_stdout(buffer):
 printed = buffer.getvalue()
 check("keine Tokens in der Logausgabe",
       TRIAL_OLD not in printed and TRIAL_NEW not in printed, printed)
+
+# --------------------------------------------------------------------------
+# Datenbankmodus
+# --------------------------------------------------------------------------
+# Die Attrappe bildet das an evcc 0.317.1 gemessene Verhalten nach: eigene
+# INFO-Zeilen auf stdout zwischen den Nutzdaten, `set` verlangt -f, Exitcode 1
+# bei Fehlern.
+STUB = r"""#!/usr/bin/env bash
+store=""
+args=()
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --database) store="$2.settings"; shift 2 ;;
+    -f) shift ;;
+    *) args+=("$1"); shift ;;
+  esac
+done
+echo "[main  ] INFO 2026/01/01 00:00:00 config file not found, database-only mode"
+echo "[main  ] INFO 2026/01/01 00:00:00 using sqlite database: ${store%.settings}?_pragma=x"
+case "${args[0]}:${args[1]}" in
+  settings:get)
+    echo 'eebus: {"port":4712}'
+    [ -s "$store" ] && echo "sponsortoken: $(cat "$store")"
+    exit 0 ;;
+  settings:set)
+    [ "${args[2]}" = "sponsortoken" ] || { echo "unknown key" >&2; exit 1; }
+    printf '%s' "${args[3]}" > "$store"
+    exit 0 ;;
+  *) echo "Error: unexpected ${args[*]}" >&2; exit 1 ;;
+esac
+"""
+
+
+def setup_db(fake: Fake, token: str | None) -> tuple[Path, str]:
+    """Legt eine Stub-CLI samt Datenbankdatei an und verdrahtet die Attrappen."""
+    directory = Path(tempfile.mkdtemp())
+    stub = directory / "evcc-stub"
+    stub.write_text(STUB)
+    stub.chmod(0o755)
+    database = directory / "evcc.db"
+    database.write_bytes(b"SQLite format 3\x00")
+    if token is not None:
+        (directory / "evcc.db.settings").write_text(token)
+    m.systemctl = fake.systemctl
+    m.fetch_url = fake.fetch_url
+    return database, str(stub)
+
+
+def db_token(database: Path) -> str | None:
+    side = database.with_name(database.name + ".settings")
+    return side.read_text() if side.exists() else None
+
+
+def db_run(database: Path, stub: str, **kwargs):
+    options = dict(mode="db", database=database, evcc_bin=stub,
+                   service_user=None, now=1000)
+    dry_run = kwargs.pop("dry_run", False)
+    options.update(kwargs)
+    return m.run(Path("/nonexistent/evcc.yaml"), m.DEFAULT_STATE_URL, None,
+                 dry_run, **options)
+
+
+# Token wird in der Datenbank getauscht
+fake = Fake()
+database, stub = setup_db(fake, TRIAL_OLD)
+check("DB: Rueckgabewert 0", db_run(database, stub) == 0)
+check("DB: Token getauscht", db_token(database) == TRIAL_NEW,
+      str(db_token(database))[:40])
+check("DB: evcc neu gestartet", ("restart", "evcc") in fake.calls)
+
+# Logzeilen der CLI werden nicht als Wert missverstanden, Token nicht geloggt
+fake = Fake()
+database, stub = setup_db(fake, TRIAL_OLD)
+buffer = io.StringIO()
+with contextlib.redirect_stdout(buffer):
+    db_run(database, stub)
+printed = buffer.getvalue()
+check("DB: keine Tokens in der Logausgabe",
+      TRIAL_OLD not in printed and TRIAL_NEW not in printed, printed[:200])
+check("DB: Quelle wird benannt", "evcc-Datenbank" in printed, printed[:200])
+
+# Trockenlauf schreibt nicht
+fake = Fake()
+database, stub = setup_db(fake, TRIAL_OLD)
+check("DB: Trockenlauf schreibt nicht",
+      db_run(database, stub, dry_run=True) == 0
+      and db_token(database) == TRIAL_OLD and fake.calls == [])
+
+# Sponsor-Token wird auch hier nie ersetzt
+fake = Fake()
+database, stub = setup_db(fake, SPONSOR)
+check("DB: Sponsor-Token bleibt unangetastet",
+      db_run(database, stub) == 0 and db_token(database) == SPONSOR
+      and fake.calls == [])
+
+# Kein Token in der Datenbank
+fake = Fake()
+database, stub = setup_db(fake, None)
+try:
+    db_run(database, stub)
+    check("DB: fehlendes Token fuehrt zu Fehler", False)
+except m.UpdaterError as exc:
+    check("DB: fehlendes Token fuehrt zu Fehler",
+          "kein sponsortoken" in str(exc).lower(), str(exc))
+
+# Fehlende Datenbankdatei
+fake = Fake()
+database, stub = setup_db(fake, TRIAL_OLD)
+database.unlink()
+try:
+    db_run(database, stub)
+    check("DB: fehlende Datei fuehrt zu Fehler", False)
+except m.UpdaterError as exc:
+    check("DB: fehlende Datei fuehrt zu Fehler",
+          "Keine evcc-Datenbank" in str(exc), str(exc))
+
+# Aktiver Ladevorgang blockiert auch im Datenbankmodus
+fake = Fake()
+fake.charging = True
+database, stub = setup_db(fake, TRIAL_OLD)
+try:
+    db_run(database, stub)
+    check("DB: Ladevorgang blockiert", False)
+except m.UpdaterError as exc:
+    check("DB: Ladevorgang blockiert", "laedt derzeit" in str(exc), str(exc))
+check("DB: Ladevorgang laesst Token unveraendert", db_token(database) == TRIAL_OLD)
+
+# Neustartfehler -> alter Wert wird zurueckgeschrieben
+fake = Fake()
+fake.restart_ok = False
+database, stub = setup_db(fake, TRIAL_OLD)
+try:
+    db_run(database, stub)
+    check("DB: Neustartfehler fuehrt zu Fehler", False)
+except m.UpdaterError:
+    check("DB: Neustartfehler fuehrt zu Fehler", True)
+check("DB: alter Token zurueckgeschrieben", db_token(database) == TRIAL_OLD,
+      str(db_token(database))[:40])
+
+# Der Rueckrollanker uebersteht ein erneutes read_current()
+fake = Fake()
+database, stub = setup_db(fake, TRIAL_OLD)
+backend = m.DatabaseBackend(database, stub, None)
+backend.read_current()
+backend.apply(TRIAL_NEW)
+backend.read_current()
+backend.restore()
+check("DB: Anker uebersteht erneutes Lesen", db_token(database) == TRIAL_OLD,
+      str(db_token(database))[:40])
+
+fake = Fake()
+config = setup(fake, yml(f"sponsortoken: {TRIAL_OLD}"))
+ybackend = m.YamlBackend(config)
+ybackend.read_current()
+ybackend.apply(TRIAL_NEW)
+ybackend.read_current()
+ybackend.restore()
+check("YAML: Anker uebersteht erneutes Lesen",
+      ybackend.current_value() == TRIAL_OLD, str(ybackend.current_value())[:40])
+
+# Nicht vorhandene CLI
+fake = Fake()
+database, stub = setup_db(fake, TRIAL_OLD)
+try:
+    db_run(database, "/nonexistent/evcc")
+    check("DB: fehlende CLI fuehrt zu Fehler", False)
+except m.UpdaterError as exc:
+    check("DB: fehlende CLI fuehrt zu Fehler", "--evcc-bin" in str(exc), str(exc))
+
+
+# --------------------------------------------------------------------------
+# Modusauswahl
+# --------------------------------------------------------------------------
+fake = Fake()
+config = setup(fake, yml(f"sponsortoken: {TRIAL_OLD}"))
+check("auto waehlt YAML bei vorhandenem Eintrag",
+      isinstance(m.choose_backend("auto", config, None, "evcc", None), m.YamlBackend))
+
+check("auto waehlt DB ohne YAML-Datei",
+      isinstance(m.choose_backend("auto", Path("/nonexistent/evcc.yaml"),
+                                  Path("/tmp/x.db"), "evcc", None),
+                 m.DatabaseBackend))
+
+fake = Fake()
+config = setup(fake, "site:\n  title: Home\n")
+check("auto waehlt DB bei YAML ohne Token",
+      isinstance(m.choose_backend("auto", config, Path("/tmp/x.db"), "evcc", None),
+                 m.DatabaseBackend))
+
+# Ein Symlink darf nicht still zum Datenbankmodus fuehren
+fake = Fake()
+config = setup(fake, yml(f"sponsortoken: {TRIAL_OLD}"))
+link = config.with_name("link.yaml")
+link.symlink_to(config)
+try:
+    m.choose_backend("auto", link, Path("/tmp/x.db"), "evcc", None)
+    check("auto: Symlink abgelehnt statt umgangen", False)
+except m.UpdaterError as exc:
+    check("auto: Symlink abgelehnt statt umgangen", "Symlinks" in str(exc), str(exc))
+
+
+# --------------------------------------------------------------------------
+# Hilfsfunktionen
+# --------------------------------------------------------------------------
+check("scrub entfernt JWTs",
+      TRIAL_OLD not in m.scrub(f"Fehler bei {TRIAL_OLD}")
+      and "<token>" in m.scrub(f"Fehler bei {TRIAL_OLD}"))
+check("privilege_prefix ohne Nutzer ist leer", m.privilege_prefix(None) == [])
+if os.geteuid() != 0:
+    check("privilege_prefix ohne root ist leer", m.privilege_prefix("evcc") == [])
+
+m.systemctl_run = lambda *a, **k: subprocess.CompletedProcess(
+    a, 0, "Environment=EVCC_DATABASE_DSN=/var/lib/evcc/evcc.db OTHER=1\n", "")
+check("DB-Pfad aus der systemd-Unit",
+      m.service_database() == Path("/var/lib/evcc/evcc.db"), str(m.service_database()))
+m.systemctl_run = lambda *a, **k: subprocess.CompletedProcess(a, 0, "Environment=\n", "")
+check("ohne DSN in der Unit kein Pfad", m.service_database() is None)
+m.systemctl_run = lambda *a, **k: subprocess.CompletedProcess(
+    a, 0, "Environment=EVCC_DATABASE_DSN=/x/y.db?_pragma=busy_timeout(5000)\n", "")
+check("DSN-Parameter werden abgeschnitten",
+      m.service_database() == Path("/x/y.db"), str(m.service_database()))
+
+
+# --------------------------------------------------------------------------
+# Optional: gegen eine echte evcc-Binary (EVCC_REAL_BIN=/pfad/zu/evcc)
+# --------------------------------------------------------------------------
+real_bin = os.environ.get("EVCC_REAL_BIN")
+if real_bin:
+    directory = Path(tempfile.mkdtemp())
+    database = directory / "evcc.db"
+    backend = m.DatabaseBackend(database, real_bin, None)
+    try:
+        subprocess.run([real_bin, "settings", "set", "--database", str(database),
+                        "-f", "sponsortoken", TRIAL_OLD],
+                       capture_output=True, check=True, timeout=120)
+        check("REAL: Token wird korrekt gelesen", backend.read_current() == TRIAL_OLD)
+        backend.apply(TRIAL_NEW)
+        check("REAL: Token wird korrekt geschrieben",
+              backend.current_value() == TRIAL_NEW)
+        check("REAL: Aenderung wird erkannt", backend.is_applied())
+        backend.restore()
+        check("REAL: Rueckschreiben funktioniert", backend.current_value() == TRIAL_OLD)
+        # Der Anker darf durch erneutes Lesen nicht verlorengehen.
+        backend.read_current()
+        backend.apply(TRIAL_NEW)
+        backend.read_current()
+        backend.restore()
+        check("REAL: Anker uebersteht erneutes Lesen",
+              backend.current_value() == TRIAL_OLD, str(backend.current_value())[:40])
+    except Exception as exc:  # noqa: BLE001 - Diagnose im Testlauf
+        check("REAL: Durchlauf gegen echte Binary", False,
+              f"{type(exc).__name__}: {exc}")
+
 
 # Optional: echte evcc-Dokumentation
 if os.environ.get("EVCC_LIVE_TEST") == "1":
