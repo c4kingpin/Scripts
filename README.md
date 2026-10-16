@@ -8,7 +8,7 @@ Tests.
 | --- | --- |
 | [`devbox/`](devbox/) | Isolierte Entwicklungsumgebung für Codex und Claude in einem Ubuntu-LXC-Container: Agenten-CLIs, Node.js, Erlang/Elixir/Phoenix, PostgreSQL, GitHub CLI. |
 | [`evcc/`](evcc/) | Wartung einer evcc-Installation (Ladesteuerung für E-Autos) auf einem Raspberry Pi: tauscht das ablaufende Testtoken, in `evcc.yaml` oder in der evcc-Datenbank. |
-| [`theater/`](theater/) | Ubuntu-26.04-Grundinstallation für Linux Show Player, Spotify und die MIDI-Ansteuerung eines MA Lightcommander über ein Lekato USB-MIDI-Interface. |
+| [`theater/`](theater/) | Ubuntu-26.04-Grundinstallation für Linux Show Player, Spotify und die MIDI-Ansteuerung eines MA Lightcommander über ein Lekato USB-MIDI-Interface; optional Autologin und Kiosk-Härtung. |
 
 ## Aufbau
 

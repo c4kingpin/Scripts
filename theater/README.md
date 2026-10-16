@@ -42,10 +42,11 @@ einer anderen Version gibt es `--skip-release-check`; die Prüfung wird dann zur
 Warnung.
 
 Ein erneuter Aufruf ist grundsätzlich möglich. Bereits vorhandene Show- und
-Dokumentationsdateien werden nicht überschrieben; `bin/midi-check.sh` wird bei
-jedem Lauf aktualisiert. Ein vorhandener Quellbaum von `alsa-scarlett-gui` wird
-unverändert weiterverwendet. Updates dieser Software deshalb bewusst außerhalb
-einer laufenden Produktionsserie manuell testen und durchführen.
+Dokumentationsdateien werden nicht überschrieben; `bin/midi-check.sh` und der
+Autostart-Eintrag werden bei jedem Lauf aktualisiert. Ein vorhandener Quellbaum
+von `alsa-scarlett-gui` wird unverändert weiterverwendet. Updates dieser
+Software deshalb bewusst außerhalb einer laufenden Produktionsserie manuell
+testen und durchführen.
 
 ## Was das Skript einrichtet
 
@@ -61,14 +62,16 @@ einer laufenden Produktionsserie manuell testen und durchführen.
   Quellrepository samt Build-Abhängigkeiten
 - GNOME-Einstellungen gegen Bildschirm-Leerlauf, Suspend und
   Benachrichtigungsbanner
+- optional mit `--kiosk`: Autologin, Update-Sperren, Härtung gegen
+  Unterbrechungen und Autostart des Players (siehe unten)
 
 Nach der Spotify-Installation zeigt der Installer die ALSA-Geräte und die
 PulseAudio/PipeWire-Ausgänge an. Die vorgesehene Audioausgabe – die Soundkarte
 oder, mit `--with-scarlett`, das Scarlett – muss dort als Ausgabegerät
 erscheinen.
 
-Es richtet kein automatisches Login ein und schaltet WLAN/Bluetooth nicht ab:
-beides sind betriebsspezifische Sicherheits- bzw. Verwaltungsentscheidungen.
+WLAN und Bluetooth bleiben in jedem Fall unangetastet: Spotify braucht Netz,
+und ob Funk im Betrieb abgeschaltet wird, ist eine Entscheidung vor Ort.
 
 Spotify kann mit `spotify` gestartet und anschließend mit einem persönlichen
 Spotify-Konto angemeldet werden. Es ist für Pausen- und Hintergrundmusik
@@ -76,6 +79,68 @@ geeignet, aber nicht für ausfallsichere Aufführungs-Cues: Streaming,
 Kontozugang, Werbung (Free-Konto) und mögliche App-Updates machen es weniger
 vorhersehbar als lokal gespeicherte WAV-Dateien in Linux Show Player. Mit
 `--skip-spotify` lässt sich die Installation auslassen.
+
+## Autologin und Kiosk-Betrieb (`--kiosk`)
+
+```bash
+./install.sh --user theater --kiosk
+```
+
+**Autologin heißt ohne Passwort.** Wer physisch am Rechner ist, ist angemeldet.
+Für einen Theater-PC in einer verschlossenen Technikkabine ist das die richtige
+Abwägung; für ein Gerät im offenen Foyer nicht. Ist GDM nicht der
+Display-Manager, überspringt das Skript diesen Teil mit einer Warnung, statt zu
+raten.
+
+`--kiosk` richtet ein:
+
+| Bereich | Maßnahme |
+| --- | --- |
+| Anmeldung | `AutomaticLoginEnable` / `AutomaticLogin` in `/etc/gdm3/custom.conf` |
+| Updates | `apt`-Periodik auf 0, `apt-daily`-Timer deaktiviert, `snap refresh --hold`, GNOME-Software-Downloads aus |
+| Dialoge | apport (Crash-Dialoge) abgeschaltet, Sperrbildschirm und Bildschirmabdunklung aus |
+| Fehlgriffe | Einschaltknopf ohne Funktion (GNOME und logind), Bildschirmleser samt Super+Alt+S aus |
+| Datenträger | kein Dateifenster beim Anstecken eines USB-Sticks |
+| Start | Autostart von Linux Show Player (ohne Showdatei) |
+
+### Login-Keyring vor der ersten Vorstellung entsperren
+
+Bei Autologin fragt GNOME Keyring beim Sitzungsstart nach dem Passwort des
+Login-Keyrings – ein modaler Dialog genau dort, wo keiner sein darf. Spotify
+legt seine Zugangsdaten dort ab, deshalb tritt das hier zuverlässig auf.
+
+Einmalig im Programm **„Passwörter und Schlüssel"** für den Schlüsselbund
+„Anmeldung" ein leeres Passwort setzen (Rechtsklick → Passwort ändern, neues
+Passwort leer lassen) oder ihn löschen und neu anlegen. Das Skript automatisiert
+das bewusst nicht: es würde ein Passwort im Klartext verarbeiten müssen.
+
+### Updates zwischen zwei Produktionsserien
+
+Mit `--kiosk` bleiben Sicherheitsupdates liegen – gewollt, denn ein Update
+mitten in einer Serie ist das größere Risiko. Außerhalb der Spielzeit von Hand:
+
+```bash
+sudo snap refresh --unhold
+sudo apt-get update && sudo apt-get full-upgrade
+flatpak update --user
+```
+
+Danach die komplette Kette erneut durchtesten (Audio, MIDI, Memories) und
+`sudo snap refresh --hold` wieder setzen.
+
+### Härtung zurücknehmen
+
+Jeder Eingriff liegt in einer eigenen Datei oder hat eine Sicherung:
+
+| Eingriff | Zurücknehmen |
+| --- | --- |
+| Autologin | `sudo theater/lib/gdm-autologin.sh --file /etc/gdm3/custom.conf --disable` oder `/etc/gdm3/custom.conf.theater-bak` zurückkopieren |
+| apt-Sperre | `sudo rm /etc/apt/apt.conf.d/99-theater-no-auto-upgrades` und `sudo systemctl enable --now apt-daily.timer apt-daily-upgrade.timer` |
+| Snap-Sperre | `sudo snap refresh --unhold` |
+| Crash-Dialoge | `enabled=1` in `/etc/default/apport`, `sudo systemctl enable --now apport.service` |
+| Einschaltknopf | `sudo rm /etc/systemd/logind.conf.d/90-theater-kiosk.conf` |
+| Autostart | `rm ~/.config/autostart/org.linuxshowplayer.LinuxShowPlayer.desktop` |
+| GNOME-Einstellungen | je Schlüssel `gsettings reset <Schema> <Key>` |
 
 ## Das Lekato-Interface im Betrieb
 

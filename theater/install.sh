@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Theater-PC installer for Ubuntu 26.04 LTS
 # Installs Linux Show Player, Spotify, USB-MIDI support, and operating aids.
+# With --kiosk it also enables autologin and hardens the machine for show use.
 
 set -Eeuo pipefail
 umask 022
@@ -8,6 +9,9 @@ umask 022
 readonly APP_ID="org.linuxshowplayer.LinuxShowPlayer"
 readonly SCARLETT_GUI_REPOSITORY="https://github.com/geoffreybennett/alsa-scarlett-gui.git"
 readonly SUPPORTED_RELEASE="26.04"
+readonly GDM_CONFIG="/etc/gdm3/custom.conf"
+readonly APT_HOLD_CONFIG="/etc/apt/apt.conf.d/99-theater-no-auto-upgrades"
+readonly LOGIND_DROPIN="/etc/systemd/logind.conf.d/90-theater-kiosk.conf"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 readonly SCRIPT_DIR
@@ -34,14 +38,25 @@ Optionen:
   --skip-spotify          Spotify nicht als Snap installieren
   --skip-release-check    Nur warnen statt abbrechen, wenn das System nicht
                           Ubuntu 26.04 LTS ist
+  --kiosk                 Showbetrieb einrichten: Autologin des Zielbenutzers,
+                          automatische Updates stilllegen, Sperrbildschirm,
+                          Crash-Dialoge und Datenträger-Fenster abschalten,
+                          Linux Show Player automatisch starten
   -h, --help              Diese Hilfe anzeigen
 
 Beispiel:
   ./install.sh --user theater --project Stueck_2026 --upgrade-system
+  ./install.sh --user theater --kiosk
 
-Das Skript richtet keine MIDI-Controllerwerte und keine Autologin-Konfiguration
-ein. Diese Werte sind von der konkreten Hardware- und Show-Konfiguration
-abhängig und müssen anschließend geprüft werden.
+Achtung: --kiosk schließt Autologin ein. Der Rechner meldet sich danach ohne
+Passwort an - wer physisch am Gerät ist, ist angemeldet. Das ist für einen
+Theater-PC hinter verschlossener Tür gedacht, nicht für ein Gerät im Foyer.
+Mit --kiosk bleiben außerdem Sicherheitsupdates bewusst liegen; sie müssen
+zwischen zwei Produktionsserien von Hand eingespielt werden.
+
+Das Skript richtet keine MIDI-Controllerwerte ein. Diese Werte sind von der
+konkreten Hardware- und Show-Konfiguration abhängig und müssen anschließend
+geprüft werden.
 EOF
 }
 
@@ -65,6 +80,18 @@ require_supported_release() {
 
 run_as_target() {
   sudo -H -u "$TARGET_USER" env HOME="$TARGET_HOME" "$@"
+}
+
+# Ein zwischen GNOME-Versionen umbenanntes Schema oder ein nur mit GNOME
+# Software vorhandener Key darf die Installation nicht abbrechen.
+set_gsetting() {
+  local schema="$1" key="$2" value="$3"
+
+  if run_as_target gsettings writable "$schema" "$key" >/dev/null 2>&1; then
+    run_as_target gsettings set "$schema" "$key" "$value"
+  else
+    warn "Einstellung ${schema} ${key} ist auf diesem System nicht vorhanden; übersprungen."
+  fi
 }
 
 install_scarlett_gui() {
@@ -185,11 +212,103 @@ EOF
 
 configure_gnome_for_show() {
   info "Deaktiviere Energiesparen und Benachrichtigungsbanner für ${TARGET_USER}"
-  run_as_target gsettings set org.gnome.desktop.session idle-delay 0
-  run_as_target gsettings set org.gnome.settings-daemon.plugins.power sleep-inactive-ac-type 'nothing'
-  run_as_target gsettings set org.gnome.settings-daemon.plugins.power sleep-inactive-battery-type 'nothing'
-  run_as_target gsettings set org.gnome.desktop.notifications show-banners false
-  run_as_target gsettings set org.gnome.desktop.notifications show-in-lock-screen false
+  set_gsetting org.gnome.desktop.session idle-delay 0
+  set_gsetting org.gnome.settings-daemon.plugins.power sleep-inactive-ac-type 'nothing'
+  set_gsetting org.gnome.settings-daemon.plugins.power sleep-inactive-battery-type 'nothing'
+  set_gsetting org.gnome.desktop.notifications show-banners false
+  set_gsetting org.gnome.desktop.notifications show-in-lock-screen false
+}
+
+configure_autologin() {
+  if [[ ! -d /etc/gdm3 ]]; then
+    warn "/etc/gdm3 fehlt - offenbar ist GDM nicht der Display-Manager. Autologin übersprungen; bitte von Hand einrichten."
+    return 0
+  fi
+
+  if [[ ! -f "$GDM_CONFIG" ]]; then
+    warn "${GDM_CONFIG} fehlt. Autologin übersprungen; bitte von Hand einrichten."
+    return 0
+  fi
+
+  info "Richte Autologin für ${TARGET_USER} ein"
+  sudo "${SCRIPT_DIR}/lib/gdm-autologin.sh" --file "$GDM_CONFIG" --user "$TARGET_USER"
+  success "Autologin gesetzt (wirkt nach einem Neustart)"
+}
+
+# Alle Eingriffe landen in benannten Drop-ins oder haben eine Sicherung, damit
+# sie sich einzeln zurücknehmen lassen; die Tabelle dazu steht in der README.
+harden_for_kiosk() {
+  info "Lege automatische Updates still"
+  sudo tee "$APT_HOLD_CONFIG" >/dev/null <<'EOF'
+// Theater-PC: keine unbeaufsichtigten Updates während einer Produktionsserie.
+APT::Periodic::Update-Package-Lists "0";
+APT::Periodic::Unattended-Upgrade "0";
+EOF
+  sudo systemctl disable --now apt-daily.timer apt-daily-upgrade.timer || \
+    warn "apt-daily-Timer konnten nicht deaktiviert werden; bitte prüfen."
+
+  # Ohne Hold aktualisiert sich das Spotify-Snap mitten in der Serie.
+  if sudo snap refresh --hold >/dev/null 2>&1; then
+    success "Snap-Updates angehalten"
+  else
+    warn "'snap refresh --hold' nicht verfügbar (snapd zu alt?); Snap-Updates bleiben aktiv."
+  fi
+
+  set_gsetting org.gnome.software download-updates false
+  set_gsetting org.gnome.software allow-updates false
+
+  info "Deaktiviere Crash-Dialoge (apport)"
+  sudo tee /etc/default/apport >/dev/null <<'EOF'
+# Theater-PC: keine Crash-Dialoge über dem Show-Fenster.
+enabled=0
+EOF
+  if systemctl list-unit-files apport.service >/dev/null 2>&1; then
+    sudo systemctl disable --now apport.service || \
+      warn "apport.service konnte nicht deaktiviert werden; bitte prüfen."
+  fi
+
+  info "Deaktiviere Sperrbildschirm und Bildschirmabdunklung"
+  set_gsetting org.gnome.desktop.screensaver lock-enabled false
+  set_gsetting org.gnome.desktop.screensaver idle-activation-enabled false
+  set_gsetting org.gnome.desktop.lockdown disable-lock-screen true
+  set_gsetting org.gnome.settings-daemon.plugins.power idle-dim false
+
+  info "Sichere gegen Fehlgriffe am Gerät ab"
+  set_gsetting org.gnome.settings-daemon.plugins.power power-button-action 'nothing'
+  sudo mkdir -p "$(dirname "$LOGIND_DROPIN")"
+  sudo tee "$LOGIND_DROPIN" >/dev/null <<'EOF'
+# Theater-PC: Einschaltknopf auch vor der Anmeldung ignorieren.
+[Login]
+HandlePowerKey=ignore
+EOF
+  # Super+Alt+S wird im Betrieb versehentlich getroffen und schaltet sonst
+  # mitten in der Vorstellung den Bildschirmleser ein.
+  set_gsetting org.gnome.desktop.a11y.applications screen-reader-enabled false
+  set_gsetting org.gnome.settings-daemon.plugins.media-keys screenreader "@as []"
+
+  info "Unterdrücke Fenster beim Anstecken von Datenträgern"
+  set_gsetting org.gnome.desktop.media-handling automount-open false
+  set_gsetting org.gnome.desktop.media-handling autorun-never true
+
+  success "Kiosk-Härtung abgeschlossen"
+}
+
+configure_player_autostart() {
+  local autostart_dir="${TARGET_HOME}/.config/autostart"
+
+  info "Richte Autostart für Linux Show Player ein"
+  run_as_target mkdir -p "$autostart_dir"
+  # Generierte Datei: wird bei jedem Lauf überschrieben. Ohne Showdatei - die
+  # wählt der Operator.
+  run_as_target tee "${autostart_dir}/${APP_ID}.desktop" >/dev/null <<EOF
+[Desktop Entry]
+Type=Application
+Name=Linux Show Player
+Exec=flatpak run ${APP_ID}
+X-GNOME-Autostart-enabled=true
+X-GNOME-Autostart-Delay=5
+EOF
+  success "Autostart eingerichtet"
 }
 
 TARGET_USER=""
@@ -198,6 +317,7 @@ UPGRADE_SYSTEM=false
 INSTALL_SCARLETT_GUI=false
 INSTALL_SPOTIFY=true
 SKIP_RELEASE_CHECK=false
+KIOSK_MODE=false
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -215,6 +335,7 @@ while [[ $# -gt 0 ]]; do
     --with-scarlett) INSTALL_SCARLETT_GUI=true; shift ;;
     --skip-spotify) INSTALL_SPOTIFY=false; shift ;;
     --skip-release-check) SKIP_RELEASE_CHECK=true; shift ;;
+    --kiosk) KIOSK_MODE=true; shift ;;
     -h|--help) usage; exit 0 ;;
     *) die "Unbekannte Option: $1" ;;
   esac
@@ -233,6 +354,11 @@ TARGET_HOME="$(getent passwd "$TARGET_USER" | cut -d: -f6)"
 
 [[ -x "${SCRIPT_DIR}/bin/midi-check.sh" ]] || \
   die "${SCRIPT_DIR}/bin/midi-check.sh fehlt oder ist nicht ausführbar."
+
+if [[ "$KIOSK_MODE" == true ]]; then
+  [[ -x "${SCRIPT_DIR}/lib/gdm-autologin.sh" ]] || \
+    die "${SCRIPT_DIR}/lib/gdm-autologin.sh fehlt oder ist nicht ausführbar."
+fi
 
 require_supported_release
 sudo -v
@@ -266,12 +392,25 @@ configure_midi
 create_project_tree
 configure_gnome_for_show
 
+if [[ "$KIOSK_MODE" == true ]]; then
+  configure_autologin
+  harden_for_kiosk
+  configure_player_autostart
+fi
+
 success "Theater-PC-Grundinstallation abgeschlossen"
 printf '\nNächste Schritte:\n'
-printf '%s\n' "  1. Lekato-Interface anschließen: amidi -l und aconnect -l"
-printf '%s\n' "  2. MIDI-Strecke testen: ${TARGET_HOME}/Theater/${PROJECT_NAME}/bin/midi-check.sh --list"
-printf '%s\n' "  3. Linux Show Player starten: flatpak run ${APP_ID}"
-printf '%s\n' "  4. Projektordner: ${TARGET_HOME}/Theater/${PROJECT_NAME}"
+step=1
+printf '%s\n' "  ${step}. Lekato-Interface anschließen: amidi -l und aconnect -l"; step=$((step + 1))
+printf '%s\n' "  ${step}. MIDI-Strecke testen: ${TARGET_HOME}/Theater/${PROJECT_NAME}/bin/midi-check.sh --list"; step=$((step + 1))
+printf '%s\n' "  ${step}. Linux Show Player starten: flatpak run ${APP_ID}"; step=$((step + 1))
+printf '%s\n' "  ${step}. Projektordner: ${TARGET_HOME}/Theater/${PROJECT_NAME}"; step=$((step + 1))
 if [[ "$INSTALL_SCARLETT_GUI" == true ]]; then
-  printf '%s\n' "  5. Scarlett-Routing prüfen: alsa-scarlett-gui"
+  printf '%s\n' "  ${step}. Scarlett-Routing prüfen: alsa-scarlett-gui"; step=$((step + 1))
+fi
+if [[ "$KIOSK_MODE" == true ]]; then
+  printf '%s\n' "  ${step}. Login-Keyring entsperren: in \"Passwörter und Schlüssel\" für den"
+  printf '%s\n' "     Login-Keyring ein leeres Passwort setzen, sonst erscheint beim"
+  printf '%s\n' "     Autologin ein Passwortdialog (Spotify legt dort seine Zugangsdaten ab)."; step=$((step + 1))
+  printf '%s\n' "  ${step}. Neu starten und prüfen, dass die Anmeldung ohne Eingabe durchläuft."
 fi
