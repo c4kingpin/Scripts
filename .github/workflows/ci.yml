@@ -44,3 +44,6 @@ jobs:
 
       - name: Run evcc regression tests
         run: bash evcc/tests/test-evcc.sh
+
+      - name: Run theater regression tests
+        run: bash theater/tests/test-theater.sh
