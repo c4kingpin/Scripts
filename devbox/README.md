@@ -13,7 +13,7 @@ Installation aus demselben Branch/Commit heruntergeladen und unverändert nach
 `/usr/local/bin/devbox` geschrieben — so bleiben Installer und Manager immer
 versionsgleich. Am dokumentierten Curl-Einzeiler ändert das nichts: `install.sh`
 lädt ohnehin schon während der Installation weitere Artefakte (Pakete, Node.js,
-Erlang/Elixir, Codex/Claude/Happy, Kisuke oder Multica) nach.
+Erlang/Elixir, Codex/Claude/Happy, Kisuke, Multica oder OpenChamber) nach.
 
 Betriebslogik, die `install.sh` erst nach seiner Bootstrap-Phase (Root-/OS-/
 Netzwerk-Check) braucht, wandert schrittweise in eigene, ebenfalls
@@ -22,7 +22,8 @@ nachgeladene Module unter [`lib/`](lib) und [`features/`](features):
 und [`lib/user.sh`](lib/user.sh) (Dev-User-Anlage) sind quer genutzte
 Bausteine; [`features/`](features) enthält je eine Datei pro
 Installationsphase (`base.sh`, `node.sh`, `postgres.sh`, `agents.sh`,
-`happy.sh`, `kisuke.sh`, `agent-notify.sh`, `tooling.sh`, `elixir.sh`). Jede Datei definiert nur Funktionen —
+`happy.sh`, `kisuke.sh`, `multica.sh`, `openchamber.sh`, `agent-notify.sh`,
+`tooling.sh`, `elixir.sh`). Jede Datei definiert nur Funktionen —
 `install.sh` ruft sie in derselben Reihenfolge auf, in der die Phasen früher
 inline standen. Die Bootstrap-Kette selbst bleibt bewusst in `install.sh`, da
 sie gebraucht wird, um diese Module überhaupt herunterzuladen. `bin/devbox.sh`
@@ -219,8 +220,8 @@ das Skript die zugehörige Frage:
    [Feature-Auswahl](#feature-auswahl)) — Standard, Minimal oder
    Custom-Auswahl einzelner Features.
 2. **Remote-Provider** (`DEVBOX_REMOTE`, siehe
-   [Remote-Provider](#remote-provider)) — Happy, Kisuke Connect, Multica oder kein
-   Remote-Zugriff.
+   [Remote-Provider](#remote-provider)) — Happy, Kisuke Connect, Multica,
+   OpenChamber oder kein Remote-Zugriff.
 3. **Agenten-Autonomie** (`DEVBOX_AUTONOMY`, siehe unten).
 
 Die Auswahl bei der Autonomie-Frage gilt für Codex und Claude gemeinsam —
@@ -411,8 +412,8 @@ curl -fsSL https://raw.githubusercontent.com/c4kingpin/Scripts/master/devbox/ins
   env DEVBOX_REMOTE=kisuke bash
 ```
 
-Ohne Remote-Provider installiert der Installer weder Happy, Kisuke noch Multica und
-richtet auch keinen zugehörigen Dienst ein; erreichbar bleibt die Box dann
+Ohne Remote-Provider installiert der Installer weder Happy, Kisuke, Multica
+noch OpenChamber und richtet auch keinen zugehörigen Dienst ein; erreichbar bleibt die Box dann
 über die Host-Konsole (`pct enter`, `lxc exec`, `incus exec`) und optional
 SSH:
 
@@ -546,12 +547,104 @@ Details zum Boot-Verhalten): der Befehl druckt eine URL, die auf einem
 anderen Gerät geöffnet wird, ein lokaler Browser ist auf der DevBox nicht
 nötig (vgl. [Anmeldung der Agenten](#anmeldung-der-agenten) oben).
 
+### OpenChamber
+
+[OpenChamber](https://openchamber.dev) ist ein selbst gehostetes
+Web-/PWA-Frontend für [OpenCode](https://opencode.ai). Anders als Happy,
+Kisuke und Multica steuert es **nicht** die Codex- und Claude-CLIs, sondern
+bringt mit OpenCode eine eigene Agenten-Laufzeit mit; Codex und Claude
+bleiben davon unberührt installiert und direkt nutzbar.
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/c4kingpin/Scripts/master/devbox/install.sh |
+  env DEVBOX_REMOTE=openchamber bash
+```
+
+Installiert werden zwei npm-Pakete, beide auf die in `devbox version`
+angezeigten Versionen gepinnt:
+
+| Paket | Binary | Rolle |
+| --- | --- | --- |
+| `@opencode/cli` | `opencode` | Agenten-Laufzeit (OpenCode 2.x) |
+| `@openchamber/web` | `openchamber` | Web-Server und Oberfläche |
+
+Das ältere Paket `opencode-ai` ist bewusst **nicht** gemeint: es endet bei
+1.19.x, OpenChamber 2.5 verlangt aber OpenCode 2.0.20 oder neuer, und beide
+Pakete beanspruchen denselben Binärnamen `opencode` (eine parallele
+Installation scheitert mit `EEXIST`).
+
+#### UI-Passwort und Erreichbarkeit
+
+OpenChamber kennt kein Benutzerkonto; die Oberfläche ist allein durch ein
+UI-Passwort geschützt. Der Installer erzeugt dieses Passwort einmalig
+(`openssl rand -hex 24`) und legt es zusammen mit Bind-Adresse und Port
+unter `~/.config/devbox/openchamber.env` ab (Besitzer `dev`, Modus `0600`).
+Bei einem erneuten Lauf von `install.sh`/`devbox update` bleibt ein bereits
+vorhandenes Passwort erhalten; ein manipulierter Wert wird verworfen und neu
+erzeugt. Anzeigen:
+
+```bash
+sed -n 's/^OPENCHAMBER_UI_PASSWORD=//p' ~/.config/devbox/openchamber.env
+```
+
+Der Server lauscht standardmäßig nur auf `127.0.0.1:3000`. Der Zugriff von
+außen läuft also über einen SSH-Tunnel oder einen vorgelagerten Reverse
+Proxy:
+
+```bash
+ssh -L 3000:127.0.0.1:3000 dev@<devbox-host>
+# Danach lokal im Browser: http://localhost:3000
+```
+
+Für automatisierte Installationen lassen sich alle drei Werte vorgeben:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/c4kingpin/Scripts/master/devbox/install.sh |
+  env DEVBOX_REMOTE=openchamber \
+    DEVBOX_OPENCHAMBER_HOST=127.0.0.1 \
+    DEVBOX_OPENCHAMBER_PORT=3000 \
+    DEVBOX_OPENCHAMBER_UI_PASSWORD='<PASSWORT>' \
+    bash
+```
+
+`DEVBOX_OPENCHAMBER_UI_PASSWORD` muss mindestens 12 Zeichen lang sein und
+darf keine Leer- oder Steuerzeichen enthalten (der Wert steht in einer
+`KEY=value`-Zeile der Env-Datei). Das Passwort nicht in ein Repository oder
+die Shell-Historie übernehmen — ohne die Variable erzeugt der Installer
+selbst ein starkes Passwort.
+
+Wird `DEVBOX_OPENCHAMBER_HOST` auf eine andere Adresse als `127.0.0.1`
+gesetzt, ist der Port direkt im Containernetz erreichbar; dann ist ein
+eigenes Passwort und ein vorgelagerter HTTPS-Proxy dringend zu empfehlen.
+
+#### Anmeldung
+
+```bash
+devbox auth login
+```
+
+führt für OpenChamber zwei Schritte aus:
+
+1. `opencode auth login` — OpenChamber hat kein eigenes Konto, seine Modelle
+   kommen von OpenCode. Dieser Schritt ist unabhängig von den Codex- und
+   Claude-Anmeldungen, die `devbox auth login` davor erledigt.
+2. `openchamber startup enable --host … --port … --ui-password …` mit den in
+   `openchamber.env` hinterlegten Werten — das schreibt und startet den
+   systemd-`--user`-Dienst `openchamber` (siehe
+   [OpenChamber-Dienst nach dem Booten](#openchamber-dienst-nach-dem-booten)).
+
+`devbox auth logout` nimmt den Startup-Dienst wieder zurück
+(`openchamber startup disable`) und meldet OpenCode ab. Das UI-Passwort
+bleibt dabei bestehen — es ist von DevBox verwaltete Infrastruktur, keine
+Benutzersitzung.
+
 ### Neuen Remote-Provider hinzufügen
 
-Happy und Kisuke sind als Provider-Module implementiert, nicht als fest
-verdrahtete Sonderfälle. Welche Provider-Namen gültig sind, steht an einer
+Happy, Kisuke, Multica und OpenChamber sind als Provider-Module
+implementiert, nicht als fest verdrahtete Sonderfälle. Welche Provider-Namen gültig sind, steht an einer
 einzigen Stelle: der Konstante `DEVBOX_REMOTE_PROVIDERS` (in `install.sh`,
-aktuell `"happy kisuke"`). Ein neuer Provider `<name>` braucht:
+aktuell `"happy kisuke multica openchamber"`). Ein neuer Provider `<name>`
+braucht:
 
 1. Ein Eintrag in `DEVBOX_REMOTE_PROVIDERS` — das reicht, damit
    `devbox/features/<name>.sh` beim Installieren automatisch heruntergeladen
@@ -687,6 +780,41 @@ selbst hochkommt (`systemctl --user start kisuke`).
 installiert und aktiviert ist; die Authentifizierungsprüfung selbst läuft
 über `kisuke whoami`, da Kisukes Datenformat unter `~/.kisuke` — anders als
 bei Happy — nicht dokumentiert ist.
+
+## OpenChamber-Dienst nach dem Booten
+
+Nur relevant, wenn OpenChamber als Remote-Provider aktiv ist
+(`DEVBOX_REMOTE=openchamber`). Wie bei Kisuke schreibt DevBox hier **keinen**
+eigenen systemd-Dienst: OpenChamber verwaltet seinen Server selbst, über
+einen systemd-`--user`-Dienst namens `openchamber`, den
+`openchamber startup enable` beim ersten `devbox auth login` anlegt und
+startet:
+
+```bash
+systemctl --user status openchamber
+```
+
+Die Unit startet `openchamber serve --foreground --port … --host …` mit
+`Restart=always` und liest ihre Umgebung aus
+`~/.config/openchamber/startup.env` — dort landet unter anderem das
+UI-Passwort, das `devbox auth login` übergeben hat.
+
+Damit dieser `--user`-Dienst ohne interaktives Login starten kann, gilt
+exakt dieselbe Logik wie bei Kisuke: Der Installer setzt
+`loginctl enable-linger dev`, startet `user@<uid>.service` explizit und
+wartet bis zu 15 Sekunden auf den Bus-Socket unter `/run/user/<uid>/bus`
+(ausführliche Begründung siehe
+[Kisuke-Daemon nach dem Booten](#kisuke-daemon-nach-dem-booten); auch der
+`XDG_RUNTIME_DIR`-Fix in `/etc/profile.d/devbox.sh` gilt unverändert). Die
+`.bashrc` von `dev` enthält zusätzlich einen Fallback, der den Dienst aus
+einer interaktiven Shell heraus anstößt, falls er in einem Boot einmal nicht
+von selbst hochkommt.
+
+Eine frisch installierte, noch nicht angemeldete Box hat erwartungsgemäß
+noch gar keine `openchamber`-Unit — das ist kein Fehler. `devbox auth
+status` und `devbox doctor` melden diesen Zustand entsprechend als Hinweis
+und nicht als Defekt; das fehlende UI-Passwort wäre dagegen ein echter
+Defekt, weil DevBox dieses selbst erzeugt.
 
 ## Push-Benachrichtigung bei Claude-/Codex-Limit
 
@@ -908,8 +1036,8 @@ DevBox trennt persistenten Zustand nach Zuständigkeit:
 | Bereich | Ort | Inhalt |
 | --- | --- | --- |
 | Root-State | `/var/lib/devbox/` | aktive Version (`version`), aktiver/vorheriger Ref (`active-ref`, `previous-ref`), installierter Commit (`commit`), gewählte optionale Features (`installed-features`), konfigurierter Remote-Provider (`remote-provider`), Installationsmetadaten (`install-state.json`) |
-| User-State | `~/.config/devbox/` | Onboarding-Marker, OpenRouter-Konfiguration, benutzerbezogene Einstellungen |
-| Fremdverwaltete Credentials | `~/.codex`, `~/.claude`, `~/.happy`, `~/.kisuke`, `~/.config/gh`, `~/.ssh` | jeweils ausschließlich vom zugehörigen Tool verwaltet |
+| User-State | `~/.config/devbox/` | Onboarding-Marker, OpenRouter-Konfiguration, OpenChamber-Zugangsdaten (`openchamber.env`), benutzerbezogene Einstellungen |
+| Fremdverwaltete Credentials | `~/.codex`, `~/.claude`, `~/.happy`, `~/.kisuke`, `~/.config/openchamber`, `~/.config/gh`, `~/.ssh` | jeweils ausschließlich vom zugehörigen Tool verwaltet |
 
 Root-State wird ausschließlich von `install.sh`/`devbox update`/
 `devbox rollback` (alle als `root`) geschrieben, ist aber für `dev` lesbar —
@@ -920,7 +1048,8 @@ Root-State zur laufenden Manager-Version passt.
 
 Alle aktiv verwalteten Tool-Versionen sind zentral in
 [`versions.env`](versions.env) definiert (DevBox selbst, Node.js,
-Erlang/OTP, Elixir, Phoenix, Codex CLI, Claude Code, Happy, Kisuke).
+Erlang/OTP, Elixir, Phoenix, Codex CLI, Claude Code, Happy, Kisuke, Multica,
+OpenCode, OpenChamber).
 `install.sh`
 bleibt ein einzelnes, per `curl | bash` ausführbares Skript und trägt dieselben
 Werte als eingebettete Defaults; ein Regressionstest stellt sicher, dass beide
@@ -1009,5 +1138,7 @@ gh workflow run lxc-integration.yml
 - [Claude Code: Berechtigungsmodi](https://code.claude.com/docs/en/permission-modes)
 - [Claude Code: settings.json](https://code.claude.com/docs/en/settings)
 - [ChatGPT Remote connections](https://learn.chatgpt.com/docs/remote-connections)
+- [OpenChamber](https://docs.openchamber.dev/install/)
+- [OpenCode CLI](https://opencode.ai/docs/cli/)
 - [Erlang/OTP Builds (hex.pm)](https://builds.hex.pm/)
 - [Phoenix installation](https://hexdocs.pm/phoenix/installation.html)
