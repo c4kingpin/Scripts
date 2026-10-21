@@ -106,6 +106,7 @@ readonly CLOUDCLI_VERSION="1.37.5"
 readonly PLAYWRIGHT_VERSION="1.64.1"
 readonly TASKMASTER_VERSION="0.43.1"
 readonly CODE_SERVER_VERSION="4.141.0"
+readonly PROJECTATLAS_VERSION="0.4.5"
 
 readonly PACKAGE_NAME_PATTERN='^[a-z0-9][a-z0-9+.-]*$'
 
@@ -671,6 +672,7 @@ CloudCLI:      ${CLOUDCLI_VERSION}
 Playwright:    ${PLAYWRIGHT_VERSION}
 Task Master:   ${TASKMASTER_VERSION}
 code-server:   ${CODE_SERVER_VERSION}
+ProjectAtlas:  ${PROJECTATLAS_VERSION}
 EOF
 }
 
@@ -694,6 +696,7 @@ show_version_json() {
     --arg playwright "$PLAYWRIGHT_VERSION" \
     --arg taskmaster "$TASKMASTER_VERSION" \
     --arg code_server "$CODE_SERVER_VERSION" \
+    --arg projectatlas "$PROJECTATLAS_VERSION" \
     '{
       devbox: $devbox,
       commit: $commit,
@@ -711,7 +714,8 @@ show_version_json() {
       cloudcli: $cloudcli,
       playwright: $playwright,
       taskmaster: $taskmaster,
-      code_server: $code_server
+      code_server: $code_server,
+      projectatlas: $projectatlas
     }'
 }
 
@@ -2450,7 +2454,7 @@ status() {
 
   printf 'Features:\n'
 
-  for feature in elixir postgres redis code-server; do
+  for feature in elixir postgres redis code-server projectatlas; do
     if feature_was_installed "$feature"; then
       printf '  %-18s enabled\n' "$feature"
     else
@@ -2595,6 +2599,10 @@ doctor() {
 
   if feature_was_installed code-server; then
     commands+=(code-server)
+  fi
+
+  if feature_was_installed projectatlas; then
+    commands+=(projectatlas)
   fi
 
   for command in "${commands[@]}"; do

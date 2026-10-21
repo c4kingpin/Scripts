@@ -243,6 +243,7 @@ CLOUDCLI_VERSION="${CLOUDCLI_VERSION:-1.37.5}"
 PLAYWRIGHT_VERSION="${PLAYWRIGHT_VERSION:-1.64.1}"
 TASKMASTER_VERSION="${TASKMASTER_VERSION:-0.43.1}"
 CODE_SERVER_VERSION="${CODE_SERVER_VERSION:-4.141.0}"
+PROJECTATLAS_VERSION="${PROJECTATLAS_VERSION:-0.4.5}"
 
 # Single source of truth for which remote/session providers exist. Each name
 # here must have a devbox/features/<name>.sh module that defines the four
@@ -320,6 +321,7 @@ declare -A DEVBOX_CHECKSUMS=(
   ["multica:0.4.32:arm64"]="44aa9debc7406feb08f0cc46e889e8a20079a9c853a7916c0721879c9678e459"
   ["code-server:4.141.0:amd64"]="f384beb4f3ba207e0bca27d0dbd36dd825d5aa909d78c6d4baa8703eaf6b77ba"
   ["code-server:4.141.0:arm64"]="0bca33a9b01180ad88f0b8969a8e34ae1c76417df471697e7cd65c20ef5dd60d"
+  ["projectatlas:0.4.5:amd64"]="e22ac7f9e37b1eb49929e4a8ad72c51affd2668731832652ee4783e20a8fabd9"
 )
 # shellcheck disable=SC2034 # read by features/elixir.sh after it's sourced
 readonly DEVBOX_CHECKSUMS
@@ -336,6 +338,7 @@ devbox_modules=(
   features/postgres.sh
   features/redis.sh
   features/code-server.sh
+  features/projectatlas.sh
   features/agents.sh
 )
 
@@ -367,7 +370,7 @@ msg_ok "Loaded DevBox modules"
 # elixir and postgres are the heavy, project-specific runtimes a box may not
 # need; redis (#10 P3) is a fully optional extra never on by default in
 # either built-in profile - opt in explicitly via DEVBOX_FEATURES.
-DEVBOX_ALL_OPTIONAL_FEATURES="elixir postgres redis code-server"
+DEVBOX_ALL_OPTIONAL_FEATURES="elixir postgres redis code-server projectatlas"
 
 # Only prompt when the caller left both knobs untouched - a genuinely fresh
 # interactive install. Any explicit DEVBOX_PROFILE/DEVBOX_FEATURES (manual
@@ -442,6 +445,10 @@ EOF
       read -r -p "Install code-server (VS Code in the browser)? [y/N] " reply
       [[ "${reply,,}" =~ ^(y|yes)$ ]] &&
         DEVBOX_FEATURES="${DEVBOX_FEATURES:+$DEVBOX_FEATURES,}code-server"
+
+      read -r -p "Install ProjectAtlas (repository map for agents, amd64 only)? [y/N] " reply
+      [[ "${reply,,}" =~ ^(y|yes)$ ]] &&
+        DEVBOX_FEATURES="${DEVBOX_FEATURES:+$DEVBOX_FEATURES,}projectatlas"
       ;;
     *) DEVBOX_PROFILE="default" ;;
   esac
@@ -808,6 +815,10 @@ if feature_enabled code-server; then
   install_code_server_package
   configure_code_server
   enable_code_server_service
+fi
+
+if feature_enabled projectatlas; then
+  install_projectatlas
 fi
 
 msg_info "Configuring Development Environment"
@@ -1420,6 +1431,11 @@ if feature_enabled redis; then
     redis-server.service
 
   redis-cli ping \
+    >/dev/null
+fi
+
+if feature_enabled projectatlas; then
+  run_as_dev projectatlas --version \
     >/dev/null
 fi
 

@@ -95,6 +95,7 @@ Die beiden schweren, projektspezifischen Laufzeiten lassen sich abwählen,
 | `postgres` | PostgreSQL-Paket, -Dienst, Dev-Rolle/-Datenbank | im `default`-Profil |
 | `redis` | Redis-Server, systemd-Dienst | nie — nur per `DEVBOX_FEATURES` |
 | `code-server` | VS Code im Browser, systemd-Dienst | nie — nur per `DEVBOX_FEATURES` |
+| `projectatlas` | Repository-Karte für Agenten (CLI + MCP), **nur amd64** | nie — nur per `DEVBOX_FEATURES` |
 
 In einem echten Terminal (nicht `curl | bash`) fragt der Installer diese
 Auswahl interaktiv ab, sofern weder `DEVBOX_PROFILE` noch `DEVBOX_FEATURES`
@@ -875,6 +876,51 @@ Leer- oder Steuerzeichen). Zugriff wieder über einen SSH-Tunnel:
 ssh -L 8888:127.0.0.1:8888 dev@<devbox-host>
 ```
 
+## ProjectAtlas
+
+[ProjectAtlas](https://github.com/styler-ai/ProjectAtlas) ist eine native
+Rust-CLI, die eine projektlokale Repository-Karte in einer SQLite-Datenbank
+unter `.projectatlas/` pflegt: Ordner, Zwecke, Zusammenfassungen, Symbole,
+Code-Graph. Agenten sollen damit erst eingrenzen, bevor sie breit Dateien
+lesen.
+
+Optionales, abwählbares Feature wie `redis` und `code-server`:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/c4kingpin/Scripts/master/devbox/install.sh |
+  env DEVBOX_FEATURES=elixir,postgres,projectatlas bash
+```
+
+Es ist bewusst **kein Dienst und kein Remote-Provider**: `projectatlas mcp`
+ist ein MCP-Server über stdio, den der Agent selbst startet, und der Index
+liegt neben dem jeweiligen Repository. Es gibt nichts, was an einen Port
+gebunden oder beim Booten gestartet würde — in `systemctl` und `ss` taucht
+ProjectAtlas deshalb nie auf.
+
+Pro Repository einmalig einrichten:
+
+```bash
+cd ~/workspace/<projekt>
+projectatlas init
+projectatlas mcp-config    # druckt die MCP-Konfiguration mit absoluten Pfaden
+```
+
+### Nur amd64
+
+Upstream veröffentlicht Linux-Binaries ausschließlich für x86_64 (daneben
+macOS für beide Architekturen), **kein `aarch64-unknown-linux-gnu`**. Auf
+einer arm64-DevBox bricht der Installer deshalb mit einer klaren Meldung ab,
+statt an einem 404 zu scheitern, und verweist auf den Bau aus den Quellen:
+
+```bash
+cargo install --git https://github.com/styler-ai/ProjectAtlas \
+  --tag v0.4.5 projectatlas-cli --locked
+```
+
+Das zieht eine vollständige Rust-Toolchain nach sich und ist deshalb nicht
+Teil des Installers. Aus demselben Grund steht in
+[`checksums.env`](checksums.env) bewusst kein arm64-Eintrag.
+
 ## Happy-Daemon nach dem Booten
 
 Nur relevant, wenn Happy als Remote-Provider aktiv ist (Standard). Happy
@@ -1247,7 +1293,8 @@ Root-State zur laufenden Manager-Version passt.
 Alle aktiv verwalteten Tool-Versionen sind zentral in
 [`versions.env`](versions.env) definiert (DevBox selbst, Node.js,
 Erlang/OTP, Elixir, Phoenix, Codex CLI, Claude Code, Happy, Kisuke, Multica,
-OpenCode, OpenChamber, CloudCLI, Playwright, code-server).
+OpenCode, OpenChamber, CloudCLI, Playwright, Task Master, code-server,
+ProjectAtlas).
 `install.sh`
 bleibt ein einzelnes, per `curl | bash` ausführbares Skript und trägt dieselben
 Werte als eingebettete Defaults; ein Regressionstest stellt sicher, dass beide
@@ -1370,6 +1417,7 @@ gh workflow run lxc-integration.yml
 - [OpenChamber](https://docs.openchamber.dev/install/)
 - [CloudCLI / Claude Code UI](https://github.com/siteboon/claudecodeui)
 - [code-server](https://coder.com/docs/code-server)
+- [ProjectAtlas](https://github.com/styler-ai/ProjectAtlas)
 - [OpenCode CLI](https://opencode.ai/docs/cli/)
 - [Erlang/OTP Builds (hex.pm)](https://builds.hex.pm/)
 - [Phoenix installation](https://hexdocs.pm/phoenix/installation.html)

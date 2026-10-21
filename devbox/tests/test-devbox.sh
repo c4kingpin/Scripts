@@ -20,6 +20,7 @@ readonly FEATURE_MULTICA="${PROJECT_ROOT}/features/multica.sh"
 readonly FEATURE_OPENCHAMBER="${PROJECT_ROOT}/features/openchamber.sh"
 readonly FEATURE_CLOUDCLI="${PROJECT_ROOT}/features/cloudcli.sh"
 readonly FEATURE_CODE_SERVER="${PROJECT_ROOT}/features/code-server.sh"
+readonly FEATURE_PROJECTATLAS="${PROJECT_ROOT}/features/projectatlas.sh"
 readonly FEATURE_AGENT_NOTIFY="${PROJECT_ROOT}/features/agent-notify.sh"
 readonly FEATURE_TOOLING="${PROJECT_ROOT}/features/tooling.sh"
 readonly FEATURE_ELIXIR="${PROJECT_ROOT}/features/elixir.sh"
@@ -87,6 +88,7 @@ readonly NORM_FEATURE_KISUKE="${TEST_TMP}/feature_kisuke.normalized"
 readonly NORM_FEATURE_OPENCHAMBER="${TEST_TMP}/feature_openchamber.normalized"
 readonly NORM_FEATURE_CLOUDCLI="${TEST_TMP}/feature_cloudcli.normalized"
 readonly NORM_FEATURE_CODE_SERVER="${TEST_TMP}/feature_code_server.normalized"
+readonly NORM_FEATURE_PROJECTATLAS="${TEST_TMP}/feature_projectatlas.normalized"
 readonly NORM_FEATURE_AGENT_NOTIFY="${TEST_TMP}/feature_agent_notify.normalized"
 readonly NORM_FEATURE_TOOLING="${TEST_TMP}/feature_tooling.normalized"
 readonly NORM_FEATURE_ELIXIR="${TEST_TMP}/feature_elixir.normalized"
@@ -107,6 +109,7 @@ scripts_have_valid_syntax() {
     "$FEATURE_OPENCHAMBER" \
     "$FEATURE_CLOUDCLI" \
     "$FEATURE_CODE_SERVER" \
+    "$FEATURE_PROJECTATLAS" \
     "$FEATURE_AGENT_NOTIFY" \
     "$FEATURE_TOOLING" \
     "$FEATURE_ELIXIR" \
@@ -999,6 +1002,7 @@ manager_expected = {
     "PLAYWRIGHT_VERSION": manifest["PLAYWRIGHT_VERSION"],
     "TASKMASTER_VERSION": manifest["TASKMASTER_VERSION"],
     "CODE_SERVER_VERSION": manifest["CODE_SERVER_VERSION"],
+    "PROJECTATLAS_VERSION": manifest["PROJECTATLAS_VERSION"],
     "OPENCODE_VERSION": manifest["OPENCODE_VERSION"],
     "OPENCHAMBER_VERSION": manifest["OPENCHAMBER_VERSION"],
 }
@@ -1026,6 +1030,7 @@ devbox_version_command_reports_the_manifest() {
     grep -Fq 'Playwright:' <<<"$output" &&
     grep -Fq 'Task Master:' <<<"$output" &&
     grep -Fq 'code-server:' <<<"$output" &&
+    grep -Fq 'ProjectAtlas:' <<<"$output" &&
     grep -Fq 'version:)' "$MANAGER" &&
     grep -Fq 'show_version' "$NORM_MANAGER"
 }
@@ -1039,7 +1044,7 @@ devbox_version_json_reports_the_manifest() {
   json_output="$("$MANAGER" version --json)"
   expected_devbox_version="$(awk -F': +' '/^DevBox:/ { print $2 }' <<<"$text_output")"
 
-  jq -e '.devbox and .node and .erlang and .elixir and .phoenix and .codex_cli and .claude_code and .happy and .kisuke and .multica and .opencode and .openchamber and .cloudcli and .code_server and .playwright and .taskmaster' \
+  jq -e '.devbox and .node and .erlang and .elixir and .phoenix and .codex_cli and .claude_code and .happy and .kisuke and .multica and .opencode and .openchamber and .cloudcli and .code_server and .playwright and .taskmaster and .projectatlas' \
     <<<"$json_output" >/dev/null &&
     [[ "$(jq -r '.devbox' <<<"$json_output")" == "$expected_devbox_version" ]] &&
     grep -Fq 'version:--json)' "$MANAGER" &&
@@ -1950,7 +1955,7 @@ shellcheck_exceptions_are_not_globally_disabled() {
 # feature_enabled/feature_was_installed, never on by default in either
 # built-in profile (opt in explicitly via DEVBOX_FEATURES).
 redis_is_a_separate_optional_feature_disabled_by_default() {
-  grep -Fq 'DEVBOX_ALL_OPTIONAL_FEATURES="elixir postgres redis code-server"' "$INSTALL_SCRIPT" &&
+  grep -Fq 'DEVBOX_ALL_OPTIONAL_FEATURES="elixir postgres redis code-server projectatlas"' "$INSTALL_SCRIPT" &&
     grep -Fq 'default) devbox_profile_features="elixir postgres" ;;' "$INSTALL_SCRIPT" &&
     grep -Fq 'minimal) devbox_profile_features="" ;;' "$INSTALL_SCRIPT" &&
     grep -Fq 'features/redis.sh' "$INSTALL_SCRIPT" &&
@@ -2132,7 +2137,7 @@ cloudcli_runs_as_a_devbox_owned_loopback_service() {
 # Its .deb is pinned and checksum-verified like every other binary
 # artifact, and its port avoids Multica's 8080.
 code_server_is_an_optional_checksum_verified_feature() {
-  grep -Fq 'DEVBOX_ALL_OPTIONAL_FEATURES="elixir postgres redis code-server"' "$INSTALL_SCRIPT" &&
+  grep -Fq 'DEVBOX_ALL_OPTIONAL_FEATURES="elixir postgres redis code-server projectatlas"' "$INSTALL_SCRIPT" &&
     ! grep -Fq 'code-server' <<<"$(grep -F 'DEVBOX_REMOTE_PROVIDERS=' "$INSTALL_SCRIPT")" &&
     grep -Fq 'features/code-server.sh' "$INSTALL_SCRIPT" &&
     grep -Fq 'if feature_enabled code-server; then' "$INSTALL_SCRIPT" &&
@@ -2176,7 +2181,7 @@ feature_selection_survives_a_reinstall() {
       msg_ok() { :; }
       msg_info() { :; }
       ROOT_STATE_DIR="'"$state"'"
-      DEVBOX_ALL_OPTIONAL_FEATURES="elixir postgres redis code-server"
+      DEVBOX_ALL_OPTIONAL_FEATURES="elixir postgres redis code-server projectatlas"
       '"$block"'
       printf "%s" "$devbox_selected_features"
     ' </dev/null
@@ -2321,6 +2326,26 @@ remote_provider_survives_a_direct_reinstall() {
   printf 'cloudcli\n' >"${state}/remote-provider"
   result="$(run_remote_resolution DEVBOX_REMOTE=happy)" || return 1
   [[ "$result" == "happy" ]]
+}
+
+# ProjectAtlas is an opt-in feature, not a provider and not a service: its
+# MCP server runs over stdio and its index lives beside each repository.
+# Upstream ships no Linux arm64 build, so that architecture must fail with
+# a usable message instead of a 404 at download time, and there must be no
+# arm64 checksum pretending otherwise.
+projectatlas_is_an_amd64_only_optional_feature() {
+  grep -Fq 'features/projectatlas.sh' "$INSTALL_SCRIPT" &&
+    grep -Fq 'if feature_enabled projectatlas; then' "$INSTALL_SCRIPT" &&
+    grep -Fq '["projectatlas:0.4.5:amd64"]=' "$INSTALL_SCRIPT" &&
+    ! grep -Fq 'projectatlas:0.4.5:arm64' "$INSTALL_SCRIPT" &&
+    ! grep -Fq 'projectatlas' <<<"$(grep -F 'DEVBOX_REMOTE_PROVIDERS=' "$INSTALL_SCRIPT")" &&
+    grep -Fq 'verify_checksum "${tmp_dir}/${archive}"' "$NORM_FEATURE_PROJECTATLAS" &&
+    grep -Fq 'publishes no Linux arm64 binary' "$FEATURE_PROJECTATLAS" &&
+    grep -Fq 'cargo install --git https://github.com/styler-ai/ProjectAtlas' "$FEATURE_PROJECTATLAS" &&
+    grep -Fq 'projectatlas/projectatlas' "$NORM_FEATURE_PROJECTATLAS" &&
+    grep -Fq 'feature_was_installed projectatlas' "$MANAGER" &&
+    # It is a CLI plus a stdio MCP server; nothing binds a port or boots.
+    ! grep -Eq '^[^#]*systemctl' "$FEATURE_PROJECTATLAS"
 }
 
 # No REMOTE_PROVIDER_FILE means the box predates #43, when Happy was
@@ -3028,6 +3053,7 @@ normalize_continuations "$FEATURE_KISUKE" >"$NORM_FEATURE_KISUKE"
 normalize_continuations "$FEATURE_OPENCHAMBER" >"$NORM_FEATURE_OPENCHAMBER"
 normalize_continuations "$FEATURE_CLOUDCLI" >"$NORM_FEATURE_CLOUDCLI"
 normalize_continuations "$FEATURE_CODE_SERVER" >"$NORM_FEATURE_CODE_SERVER"
+normalize_continuations "$FEATURE_PROJECTATLAS" >"$NORM_FEATURE_PROJECTATLAS"
 normalize_continuations "$FEATURE_AGENT_NOTIFY" >"$NORM_FEATURE_AGENT_NOTIFY"
 normalize_continuations "$FEATURE_TOOLING" >"$NORM_FEATURE_TOOLING"
 normalize_continuations "$FEATURE_ELIXIR" >"$NORM_FEATURE_ELIXIR"
@@ -3160,6 +3186,7 @@ run_test "install gates OpenChamber installation on the remote provider" install
 run_test "install gates CloudCLI installation on the remote provider" install_gates_cloudcli_installation_on_remote_provider
 run_test "CloudCLI runs as a DevBox-owned loopback service" cloudcli_runs_as_a_devbox_owned_loopback_service
 run_test "code-server is an optional, checksum-verified feature" code_server_is_an_optional_checksum_verified_feature
+run_test "ProjectAtlas is an amd64-only optional feature" projectatlas_is_an_amd64_only_optional_feature
 run_test "feature selection survives a reinstall" feature_selection_survives_a_reinstall
 run_test "remote provider survives a direct reinstall" remote_provider_survives_a_direct_reinstall
 run_test "bind addresses survive a reinstall" bind_addresses_survive_a_reinstall
