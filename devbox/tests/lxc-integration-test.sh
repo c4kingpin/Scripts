@@ -41,6 +41,7 @@ readonly DEVBOX_REPO_URL DEVBOX_REF
 # helpers below currently operate on.
 readonly CONTAINER_HAPPY="devbox-e2e-$$"
 readonly CONTAINER_OPENCHAMBER="devbox-e2e-oc-$$"
+readonly CONTAINER_CLOUDCLI="devbox-e2e-cc-$$"
 CONTAINER="$CONTAINER_HAPPY"
 
 readonly INSTALL_URL="${DEVBOX_REPO_URL%/}/${DEVBOX_REF}/devbox/install.sh"
@@ -49,6 +50,15 @@ readonly INSTALL_URL="${DEVBOX_REPO_URL%/}/${DEVBOX_REF}/devbox/install.sh"
 # it; the health probe runs inside the container.
 readonly OPENCHAMBER_PORT="3000"
 readonly OPENCHAMBER_HEALTH_URL="http://127.0.0.1:${OPENCHAMBER_PORT}/health"
+
+# CloudCLI's web UI and code-server (phase 3), both loopback-only. The two
+# run on one box in that phase on purpose: code-server is a feature, not a
+# provider, so it has to coexist with whatever DEVBOX_REMOTE is set - and
+# its DevBox default port (8888, not upstream's 8080) exists precisely to
+# keep that true next to Multica.
+readonly CLOUDCLI_PORT="3001"
+readonly CLOUDCLI_STATUS_URL="http://127.0.0.1:${CLOUDCLI_PORT}/api/auth/status"
+readonly CODE_SERVER_PORT="8888"
 
 log() {
   printf '\n==> %s\n' "$*"
@@ -62,6 +72,7 @@ fail() {
 cleanup() {
   lxc delete --force "$CONTAINER_HAPPY" >/dev/null 2>&1 || true
   lxc delete --force "$CONTAINER_OPENCHAMBER" >/dev/null 2>&1 || true
+  lxc delete --force "$CONTAINER_CLOUDCLI" >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
 
@@ -129,12 +140,21 @@ install_devbox() {
   local invocation="${1:-file}"
   local invoke_installer
   local profile_export=""
+  local features_export=""
 
-  # DEVBOX_REMOTE/DEVBOX_PROFILE come from the calling phase, not from a
-  # hardcoded value here, so both phases share this one invocation. An
-  # empty profile is left unset so the installer picks its own default.
+  # DEVBOX_REMOTE/DEVBOX_PROFILE/DEVBOX_FEATURES come from the calling
+  # phase, not from a hardcoded value here, so every phase shares this one
+  # invocation. Each is left unset when the phase did not ask for it, so
+  # the installer picks its own default. Note that DEVBOX_PROFILE only
+  # accepts "default" or "minimal" - an individual optional feature like
+  # code-server is selected through DEVBOX_FEATURES, which overrides the
+  # profile entirely.
   if [[ -n "${DEVBOX_E2E_PROFILE}" ]]; then
     profile_export="export DEVBOX_PROFILE='${DEVBOX_E2E_PROFILE}'"
+  fi
+
+  if [[ -n "${DEVBOX_E2E_FEATURES}" ]]; then
+    features_export="export DEVBOX_FEATURES='${DEVBOX_E2E_FEATURES}'"
   fi
 
   if [[ "$invocation" == "pipe" ]]; then
@@ -153,6 +173,7 @@ install_devbox() {
     export DEVBOX_AUTONOMY=balanced
     export DEVBOX_REMOTE='${DEVBOX_E2E_REMOTE}'
     ${profile_export}
+    ${features_export}
     ${invoke_installer}
   "
 }
@@ -219,6 +240,7 @@ wait_for_boot() {
 CONTAINER="$CONTAINER_HAPPY"
 DEVBOX_E2E_REMOTE="happy"
 DEVBOX_E2E_PROFILE=""
+DEVBOX_E2E_FEATURES=""
 
 launch_container
 
@@ -304,6 +326,7 @@ DEVBOX_E2E_REMOTE="openchamber"
 # elixir/postgres are phase 1's job; skipping them here keeps the second
 # container cheap (OpenCode alone unpacks a ~180 MB platform binary).
 DEVBOX_E2E_PROFILE="minimal"
+DEVBOX_E2E_FEATURES=""
 
 launch_container
 
@@ -456,6 +479,128 @@ log "devbox doctor (after reinstall)"
 as_dev devbox doctor
 
 log "Phase 2 (openchamber) passed"
+
+####################################################################
+# Phase 3: DEVBOX_REMOTE=cloudcli plus the code-server feature
+####################################################################
+
+CONTAINER="$CONTAINER_CLOUDCLI"
+DEVBOX_E2E_REMOTE="cloudcli"
+# A provider and an unrelated feature in one container on purpose: this is
+# the only place that proves the two can be installed together and do not
+# fight over a port. DEVBOX_FEATURES overrides the profile completely, so
+# this installs code-server and nothing else optional.
+DEVBOX_E2E_PROFILE=""
+DEVBOX_E2E_FEATURES="code-server"
+
+launch_container
+
+log "Installing DevBox from ${DEVBOX_REF} (DEVBOX_REMOTE=cloudcli, code-server)"
+install_devbox
+
+log "devbox doctor (cloudcli + code-server)"
+as_dev devbox doctor || fail "devbox doctor failed on a CloudCLI/code-server box"
+
+log "Checking the CloudCLI package and service"
+as_dev bash -c 'npm list --global --depth=0 @cloudcli-ai/cloudcli' ||
+  fail "@cloudcli-ai/cloudcli npm package missing"
+
+in_container systemctl is-enabled --quiet devbox-cloudcli.service ||
+  fail "devbox-cloudcli.service is not enabled"
+
+# CloudCLI has no pairing step, so unlike Happy's guard-wrapped unit this
+# one has to be genuinely running right after the install.
+in_container systemctl is-active --quiet devbox-cloudcli.service ||
+  fail "devbox-cloudcli.service is not active"
+
+# Polls CloudCLI's own status endpoint. "needsSetup": true is the expected
+# answer here - the single account is created in a browser, which CI
+# cannot do - so the assertion is that the server answers at all.
+wait_for_cloudcli() {
+  local waited=0
+  local status=""
+
+  while (( waited < 120 )); do
+    status="$(in_container curl -fsS --max-time 5 "$CLOUDCLI_STATUS_URL" 2>/dev/null || true)"
+
+    if [[ -n "$status" ]] &&
+      printf '%s' "$status" | jq -e 'has("needsSetup")' >/dev/null 2>&1; then
+
+      printf '%s' "$status"
+      return 0
+    fi
+
+    sleep 5
+    waited=$((waited + 5))
+  done
+
+  printf '%s' "$status"
+  return 1
+}
+
+log "Waiting for the CloudCLI server to answer"
+if ! cloudcli_status="$(wait_for_cloudcli)"; then
+  printf 'Last status response: %s\n' "${cloudcli_status:-<none>}" >&2
+  in_container journalctl -u devbox-cloudcli.service --no-pager -n 40 >&2 2>/dev/null || true
+  fail "CloudCLI did not answer on ${CLOUDCLI_STATUS_URL}"
+fi
+
+printf '%s' "$cloudcli_status" | jq -e '.needsSetup == true' >/dev/null ||
+  fail "A fresh CloudCLI should report needsSetup: true, got: ${cloudcli_status}"
+
+log "CloudCLI status: $(printf '%s' "$cloudcli_status" | jq -c .)"
+
+log "Checking code-server"
+as_dev bash -c 'code-server --version' || fail "code-server --version failed"
+
+in_container systemctl is-enabled --quiet "code-server@dev" ||
+  fail "code-server@dev is not enabled"
+in_container systemctl is-active --quiet "code-server@dev" ||
+  fail "code-server@dev is not active"
+
+# shellcheck disable=SC2016 # single-quoted on purpose: expands inside the nested `bash -c` shell, not here
+as_dev bash -c '
+  set -Eeuo pipefail
+  config="$HOME/.config/code-server/config.yaml"
+  [[ -f "$config" ]]
+  [[ "$(stat -c "%a" "$config")" == "600" ]]
+  grep -q "^bind-addr: 127.0.0.1:8888$" "$config"
+  grep -q "^auth: password$" "$config"
+  [[ "$(sed -n "s/^password: //p" "$config")" =~ ^[0-9a-f]{48}$ ]]
+' || fail "code-server config was not generated correctly"
+
+in_container curl -fsS --max-time 10 -o /dev/null "http://127.0.0.1:${CODE_SERVER_PORT}/" ||
+  fail "code-server does not answer on port ${CODE_SERVER_PORT}"
+
+log "Rebooting to verify both come back"
+lxc restart "$CONTAINER"
+wait_for_boot devbox-cloudcli.service
+
+in_container systemctl is-active --quiet devbox-cloudcli.service ||
+  fail "devbox-cloudcli.service is not active after a reboot"
+in_container systemctl is-active --quiet "code-server@dev" ||
+  fail "code-server@dev is not active after a reboot"
+
+log "Checking that a re-install keeps the code-server password"
+# shellcheck disable=SC2016 # single-quoted on purpose: expands inside the nested `bash -c` shell, not here
+cs_password_before="$(
+  as_dev bash -c 'sed -n "s/^password: //p" "$HOME/.config/code-server/config.yaml"'
+)"
+
+install_devbox pipe
+
+# shellcheck disable=SC2016 # single-quoted on purpose: expands inside the nested `bash -c` shell, not here
+cs_password_after="$(
+  as_dev bash -c 'sed -n "s/^password: //p" "$HOME/.config/code-server/config.yaml"'
+)"
+
+[[ -n "$cs_password_before" && "$cs_password_before" == "$cs_password_after" ]] ||
+  fail "The code-server password changed across a re-install"
+
+log "devbox doctor (after reinstall)"
+as_dev devbox doctor
+
+log "Phase 3 (cloudcli + code-server) passed"
 
 log "All checks passed"
 

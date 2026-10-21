@@ -214,6 +214,16 @@ readonly DEV_HOME="/home/${DEV_USER}"
 # ${DEV_HOME}/.config/devbox (onboarding marker, OpenRouter config, etc.).
 readonly ROOT_STATE_DIR="/var/lib/devbox"
 
+# Created here, not only in the "Recording DevBox state" phase much further
+# down: feature modules write their own state into it during installation
+# (features/cloudcli.sh, features/code-server.sh record the bind address
+# they were installed with), and those run long before that phase. The
+# later `install -d` is idempotent, so both can stay.
+install \
+  -d \
+  -m 0755 \
+  "$ROOT_STATE_DIR"
+
 # Central version manifest (mirrors devbox/versions.env; see header
 # comment). DEVBOX_VERSION itself is defined and shown at the very top of
 # this file, before the root/OS checks.
@@ -229,6 +239,11 @@ KISUKE_VERSION="${KISUKE_VERSION:-1.2.20}"
 MULTICA_VERSION="${MULTICA_VERSION:-0.4.32}"
 OPENCODE_VERSION="${OPENCODE_VERSION:-2.1.2}"
 OPENCHAMBER_VERSION="${OPENCHAMBER_VERSION:-2.5.0}"
+CLOUDCLI_VERSION="${CLOUDCLI_VERSION:-1.37.5}"
+PLAYWRIGHT_VERSION="${PLAYWRIGHT_VERSION:-1.64.1}"
+TASKMASTER_VERSION="${TASKMASTER_VERSION:-0.43.1}"
+CODE_SERVER_VERSION="${CODE_SERVER_VERSION:-4.141.0}"
+PROJECTATLAS_VERSION="${PROJECTATLAS_VERSION:-0.4.5}"
 
 # Single source of truth for which remote/session providers exist. Each name
 # here must have a devbox/features/<name>.sh module that defines the four
@@ -237,7 +252,7 @@ OPENCHAMBER_VERSION="${OPENCHAMBER_VERSION:-2.5.0}"
 # devbox/README.md, "Neuen Remote-Provider hinzufügen"). "none" is always a
 # valid DEVBOX_REMOTE value but deliberately not listed here - it has no
 # module and no hooks to call.
-readonly DEVBOX_REMOTE_PROVIDERS="happy kisuke multica openchamber"
+readonly DEVBOX_REMOTE_PROVIDERS="happy kisuke multica openchamber cloudcli"
 DEVBOX_REMOTE_INTERACTIVE_SELECTION=0
 
 DEVBOX_REPO_URL="${DEVBOX_REPO_URL:-https://raw.githubusercontent.com/c4kingpin/Scripts}"
@@ -304,6 +319,9 @@ declare -A DEVBOX_CHECKSUMS=(
   ["elixir:1.20.3:29"]="51f799b78374d569a5df659bdedeb0dd9ef8251230bcdaef00c533019086e625"
   ["multica:0.4.32:amd64"]="c2c1c0ddcd6b1fb8fd5178b2037c19b781b1fd0c880c2df2ab2f3522f8eb889f"
   ["multica:0.4.32:arm64"]="44aa9debc7406feb08f0cc46e889e8a20079a9c853a7916c0721879c9678e459"
+  ["code-server:4.141.0:amd64"]="f384beb4f3ba207e0bca27d0dbd36dd825d5aa909d78c6d4baa8703eaf6b77ba"
+  ["code-server:4.141.0:arm64"]="0bca33a9b01180ad88f0b8969a8e34ae1c76417df471697e7cd65c20ef5dd60d"
+  ["projectatlas:0.4.5:amd64"]="e22ac7f9e37b1eb49929e4a8ad72c51affd2668731832652ee4783e20a8fabd9"
 )
 # shellcheck disable=SC2034 # read by features/elixir.sh after it's sourced
 readonly DEVBOX_CHECKSUMS
@@ -319,6 +337,8 @@ devbox_modules=(
   features/node.sh
   features/postgres.sh
   features/redis.sh
+  features/code-server.sh
+  features/projectatlas.sh
   features/agents.sh
 )
 
@@ -350,15 +370,36 @@ msg_ok "Loaded DevBox modules"
 # elixir and postgres are the heavy, project-specific runtimes a box may not
 # need; redis (#10 P3) is a fully optional extra never on by default in
 # either built-in profile - opt in explicitly via DEVBOX_FEATURES.
-DEVBOX_ALL_OPTIONAL_FEATURES="elixir postgres redis"
+DEVBOX_ALL_OPTIONAL_FEATURES="elixir postgres redis code-server projectatlas"
 
 # Only prompt when the caller left both knobs untouched - a genuinely fresh
 # interactive install. Any explicit DEVBOX_PROFILE/DEVBOX_FEATURES (manual
 # override, or update_devbox() re-running this script with the box's
 # persisted selection) is respected as-is and never second-guessed with a
 # prompt.
+# The optional features a box was installed with are recorded in
+# ROOT_STATE_DIR/installed-features. devbox update re-runs this installer
+# *without* DEVBOX_FEATURES, so without reading that back an update would
+# silently fall back to the default profile: every opt-in feature (redis,
+# code-server) would be dropped while its service stayed behind, and
+# elixir/postgres would appear on a box that never asked for them. This
+# mirrors how the remote provider is already carried over.
+devbox_persisted_features=""
+devbox_has_persisted_features=0
+
+if [[ -r "${ROOT_STATE_DIR}/installed-features" ]]; then
+  devbox_persisted_features="$(<"${ROOT_STATE_DIR}/installed-features")"
+  devbox_has_persisted_features=1
+fi
+
 select_features() {
   if [[ -n "${DEVBOX_PROFILE+set}" || -n "${DEVBOX_FEATURES+set}" ]]; then
+    return
+  fi
+
+  # An already-installed box has its answer on disk; re-asking on every
+  # update would be noise, and ignoring the answer would be a regression.
+  if (( devbox_has_persisted_features )); then
     return
   fi
 
@@ -400,12 +441,26 @@ EOF
       read -r -p "Install Redis? [y/N] " reply
       [[ "${reply,,}" =~ ^(y|yes)$ ]] &&
         DEVBOX_FEATURES="${DEVBOX_FEATURES:+$DEVBOX_FEATURES,}redis"
+
+      read -r -p "Install code-server (VS Code in the browser)? [y/N] " reply
+      [[ "${reply,,}" =~ ^(y|yes)$ ]] &&
+        DEVBOX_FEATURES="${DEVBOX_FEATURES:+$DEVBOX_FEATURES,}code-server"
+
+      read -r -p "Install ProjectAtlas (repository map for agents, amd64 only)? [y/N] " reply
+      [[ "${reply,,}" =~ ^(y|yes)$ ]] &&
+        DEVBOX_FEATURES="${DEVBOX_FEATURES:+$DEVBOX_FEATURES,}projectatlas"
       ;;
     *) DEVBOX_PROFILE="default" ;;
   esac
 }
 
 select_features
+
+# Captured before the default below turns "unset" into "default": only an
+# explicit profile (env var, or the interactive prompt above) may override
+# the persisted selection.
+devbox_profile_explicit=0
+[[ -n "${DEVBOX_PROFILE+set}" ]] && devbox_profile_explicit=1
 
 DEVBOX_PROFILE="${DEVBOX_PROFILE:-default}"
 
@@ -423,6 +478,24 @@ esac
 # falling back on emptiness.
 if [[ -n "${DEVBOX_FEATURES+set}" ]]; then
   devbox_selected_features="${DEVBOX_FEATURES//,/ }"
+
+elif (( devbox_has_persisted_features && ! devbox_profile_explicit )); then
+  # A plain re-run (devbox update) on an installed box: keep what it has.
+  # Unknown names are dropped with a warning rather than aborting - a
+  # feature that existed when the box was installed but no longer does
+  # must not make the box un-updatable.
+  devbox_selected_features=""
+
+  for devbox_feature in $devbox_persisted_features; do
+    if [[ " $DEVBOX_ALL_OPTIONAL_FEATURES " == *" $devbox_feature "* ]]; then
+      devbox_selected_features+="${devbox_selected_features:+ }${devbox_feature}"
+    else
+      msg_error "Dropping unknown persisted feature: ${devbox_feature}"
+    fi
+  done
+
+  msg_ok "Reusing this box's feature selection: ${devbox_selected_features:-none}"
+
 else
   devbox_selected_features="$devbox_profile_features"
 fi
@@ -446,8 +519,26 @@ feature_enabled() {
 # passes the box's persisted provider through, so a plain re-run of this
 # script (no DEVBOX_REMOTE set) only happens on a genuinely fresh install,
 # where "happy" is the correct default.
+# This box's configured provider, if it has one. Same reasoning as the
+# persisted feature selection above: install.sh records the choice but used
+# to never read it back, so re-running the installer directly (rather than
+# through devbox update, which passes DEVBOX_REMOTE explicitly) silently
+# fell through to the "happy" default - installing Happy and its service on
+# a box that had deliberately chosen another provider.
+devbox_persisted_remote=""
+
+if [[ -r "${ROOT_STATE_DIR}/remote-provider" ]]; then
+  devbox_persisted_remote="$(<"${ROOT_STATE_DIR}/remote-provider")"
+fi
+
 select_remote() {
   if [[ -n "${DEVBOX_REMOTE+set}" ]]; then
+    return
+  fi
+
+  # An already-installed box has its answer on disk; re-asking would be
+  # noise and ignoring it would be a regression.
+  if [[ -n "$devbox_persisted_remote" ]]; then
     return
   fi
 
@@ -463,7 +554,8 @@ Which remote/session provider should this DevBox use?
   2) Kisuke - Kisuke Connect (kisuke.dev), phone/tablet terminal+editor+chat
   3) Multica - self-hostable agent workspace and daemon (multica.ai)
   4) OpenChamber - self-hosted OpenCode web/PWA workspace (openchamber.dev)
-  5) None   - host console/SSH only, no remote provider
+  5) CloudCLI - self-hosted web/mobile UI for Claude Code and Codex (cloudcli.ai)
+  6) None   - host console/SSH only, no remote provider
 
 EOF
 
@@ -477,7 +569,8 @@ EOF
     2) DEVBOX_REMOTE="kisuke" ;;
     3) DEVBOX_REMOTE="multica" ;;
     4) DEVBOX_REMOTE="openchamber" ;;
-    5) DEVBOX_REMOTE="none" ;;
+    5) DEVBOX_REMOTE="cloudcli" ;;
+    6) DEVBOX_REMOTE="none" ;;
     *) DEVBOX_REMOTE="happy" ;;
   esac
 
@@ -485,6 +578,13 @@ EOF
 }
 
 select_remote
+
+# Precedence: explicit environment variable, then this box's persisted
+# choice, then the default for a genuinely fresh install.
+if [[ -z "${DEVBOX_REMOTE+set}" && -n "$devbox_persisted_remote" ]]; then
+  DEVBOX_REMOTE="$devbox_persisted_remote"
+  msg_ok "Reusing this box's remote provider: ${DEVBOX_REMOTE}"
+fi
 
 DEVBOX_REMOTE="${DEVBOX_REMOTE:-happy}"
 
@@ -709,6 +809,16 @@ fi
 if feature_enabled redis; then
   install_redis_package
   enable_redis_service
+fi
+
+if feature_enabled code-server; then
+  install_code_server_package
+  configure_code_server
+  enable_code_server_service
+fi
+
+if feature_enabled projectatlas; then
+  install_projectatlas
 fi
 
 msg_info "Configuring Development Environment"
@@ -1322,6 +1432,24 @@ if feature_enabled redis; then
 
   redis-cli ping \
     >/dev/null
+fi
+
+if feature_enabled projectatlas; then
+  run_as_dev projectatlas --version \
+    >/dev/null
+fi
+
+if feature_enabled code-server; then
+  systemctl is-enabled \
+    --quiet \
+    "code-server@${DEV_USER}"
+
+  [[ "$(stat -c '%a' "$CODE_SERVER_CONFIG_FILE")" == "600" ]]
+
+  grep \
+    -q \
+    '^password: .' \
+    "$CODE_SERVER_CONFIG_FILE"
 fi
 
 # Validate both the installer and generated manager before success.

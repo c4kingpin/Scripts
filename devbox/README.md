@@ -13,7 +13,8 @@ Installation aus demselben Branch/Commit heruntergeladen und unverändert nach
 `/usr/local/bin/devbox` geschrieben — so bleiben Installer und Manager immer
 versionsgleich. Am dokumentierten Curl-Einzeiler ändert das nichts: `install.sh`
 lädt ohnehin schon während der Installation weitere Artefakte (Pakete, Node.js,
-Erlang/Elixir, Codex/Claude/Happy, Kisuke, Multica oder OpenChamber) nach.
+Erlang/Elixir, Codex/Claude/Happy, Kisuke, Multica, OpenChamber oder
+CloudCLI) nach.
 
 Betriebslogik, die `install.sh` erst nach seiner Bootstrap-Phase (Root-/OS-/
 Netzwerk-Check) braucht, wandert schrittweise in eigene, ebenfalls
@@ -22,8 +23,9 @@ nachgeladene Module unter [`lib/`](lib) und [`features/`](features):
 und [`lib/user.sh`](lib/user.sh) (Dev-User-Anlage) sind quer genutzte
 Bausteine; [`features/`](features) enthält je eine Datei pro
 Installationsphase (`base.sh`, `node.sh`, `postgres.sh`, `agents.sh`,
-`happy.sh`, `kisuke.sh`, `multica.sh`, `openchamber.sh`, `agent-notify.sh`,
-`tooling.sh`, `elixir.sh`). Jede Datei definiert nur Funktionen —
+`happy.sh`, `kisuke.sh`, `multica.sh`, `openchamber.sh`, `cloudcli.sh`,
+`code-server.sh`, `agent-notify.sh`, `tooling.sh`, `elixir.sh`). Jede Datei
+definiert nur Funktionen —
 `install.sh` ruft sie in derselben Reihenfolge auf, in der die Phasen früher
 inline standen. Die Bootstrap-Kette selbst bleibt bewusst in `install.sh`, da
 sie gebraucht wird, um diese Module überhaupt herunterzuladen. `bin/devbox.sh`
@@ -44,6 +46,25 @@ Netzwerk, Template und Ressourcen des Containers müssen vor dem Aufruf bereits
 | Workspace | `/home/dev/workspace` |
 | Agenten-Autonomie | ausgewogen |
 | Remote-Provider | `happy` |
+
+### Zusätzliche OS-Pakete
+
+`dev` hat kein generisches sudo — kein `apt-get`, kein `dpkg`. Für Pakete,
+die ein Projekt braucht, gibt es einen eng gefassten Weg, der ohne Passwort
+funktioniert:
+
+```bash
+sudo devbox packages install build-essential cmake libpq-dev
+```
+
+Der Paketname wird gegen `^[a-z0-9][a-z0-9+.-]*$` geprüft, bevor `apt-get`
+ihn zu sehen bekommt. Alles andere — Dienste neu starten, Units bearbeiten,
+beliebige Pakete entfernen — bleibt root vorbehalten.
+
+Das `dev`-Konto hat übrigens **kein bekanntes Passwort**: der Installer setzt
+ein Zufallspasswort und verwirft es sofort wieder. Ein `sudo` außerhalb der
+drei erlaubten Befehle fragt deshalb nach einem Passwort, das niemand hat —
+in dem Fall gehört der Befehl als root ausgeführt.
 
 Rein lesende Hilfsbefehle für den Workspace (kein Branch-Wechsel, keine
 Commits, kein Löschen, kein automatisches Anlegen von `.env`):
@@ -73,6 +94,8 @@ Die beiden schweren, projektspezifischen Laufzeiten lassen sich abwählen,
 | `elixir` | Erlang/OTP, Elixir, Phoenix | im `default`-Profil |
 | `postgres` | PostgreSQL-Paket, -Dienst, Dev-Rolle/-Datenbank | im `default`-Profil |
 | `redis` | Redis-Server, systemd-Dienst | nie — nur per `DEVBOX_FEATURES` |
+| `code-server` | VS Code im Browser, systemd-Dienst | nie — nur per `DEVBOX_FEATURES` |
+| `projectatlas` | Repository-Karte für Agenten (CLI + MCP), **nur amd64** | nie — nur per `DEVBOX_FEATURES` |
 
 In einem echten Terminal (nicht `curl | bash`) fragt der Installer diese
 Auswahl interaktiv ab, sofern weder `DEVBOX_PROFILE` noch `DEVBOX_FEATURES`
@@ -104,9 +127,16 @@ curl -fsSL https://raw.githubusercontent.com/c4kingpin/Scripts/master/devbox/ins
   env DEVBOX_FEATURES=elixir,postgres,redis bash
 ```
 
-Die getroffene Auswahl landet in
-`~/.config/devbox/features` und wird von `devbox doctor` gelesen, damit dort
-keine falschen Warnungen für bewusst nicht installierte Features auftauchen.
+Die getroffene Auswahl landet in `/var/lib/devbox/installed-features`. Sie
+wird von `devbox doctor` gelesen, damit dort keine falschen Warnungen für
+bewusst nicht installierte Features auftauchen — und bei jedem erneuten Lauf
+des Installers **zurückgelesen**: `devbox update` ruft `install.sh` ohne
+`DEVBOX_FEATURES` auf, würde ohne diese Rückkopplung also auf das
+Standardprofil zurückfallen und jedes abgewählte Feature wieder einbauen
+bzw. jedes zusätzlich gewählte (`redis`, `code-server`) stillschweigend
+entfernen. Ein explizit gesetztes `DEVBOX_PROFILE` oder `DEVBOX_FEATURES`
+hat weiterhin Vorrang; ein inzwischen nicht mehr bekannter Eintrag wird mit
+einer Meldung verworfen, statt das Update abzubrechen.
 
 Erlang/OTP und Elixir werden **ohne Versionsmanager** systemweit unter
 `/opt/devbox` installiert und über einfache Symlinks in `/usr/local/bin`
@@ -221,7 +251,7 @@ das Skript die zugehörige Frage:
    Custom-Auswahl einzelner Features.
 2. **Remote-Provider** (`DEVBOX_REMOTE`, siehe
    [Remote-Provider](#remote-provider)) — Happy, Kisuke Connect, Multica,
-   OpenChamber oder kein Remote-Zugriff.
+   OpenChamber, CloudCLI oder kein Remote-Zugriff.
 3. **Agenten-Autonomie** (`DEVBOX_AUTONOMY`, siehe unten).
 
 Die Auswahl bei der Autonomie-Frage gilt für Codex und Claude gemeinsam —
@@ -412,8 +442,8 @@ curl -fsSL https://raw.githubusercontent.com/c4kingpin/Scripts/master/devbox/ins
   env DEVBOX_REMOTE=kisuke bash
 ```
 
-Ohne Remote-Provider installiert der Installer weder Happy, Kisuke, Multica
-noch OpenChamber und richtet auch keinen zugehörigen Dienst ein; erreichbar bleibt die Box dann
+Ohne Remote-Provider installiert der Installer weder Happy, Kisuke, Multica,
+OpenChamber noch CloudCLI und richtet auch keinen zugehörigen Dienst ein; erreichbar bleibt die Box dann
 über die Host-Konsole (`pct enter`, `lxc exec`, `incus exec`) und optional
 SSH:
 
@@ -530,8 +560,13 @@ angemeldet.
 
 Die getroffene Auswahl landet in `/var/lib/devbox/remote-provider`,
 erscheint in `devbox status` und `devbox doctor --json`
-(`remote_provider`), und `devbox update` übernimmt sie automatisch —
-ein Update ändert den konfigurierten Provider nicht. Bestehende
+(`remote_provider`), und wird bei **jedem** weiteren Lauf des Installers
+zurückgelesen — sowohl über `devbox update` als auch bei einem direkten
+Aufruf von `install.sh` ohne `DEVBOX_REMOTE`. Ohne diese Rückkopplung
+fiele ein direkter Re-Install stillschweigend auf den Standard `happy`
+zurück und richtete Happy samt Boot-Dienst auf einer Box ein, die sich
+bewusst für einen anderen Provider entschieden hat. Ein explizit gesetztes
+`DEVBOX_REMOTE` wechselt den Provider weiterhin. Bestehende
 Installationen ohne gespeicherte Auswahl (vor diesem Feature) werden beim
 nächsten Update automatisch als `happy` interpretiert; Happy-Pairing,
 -Credentials und -Dienst bleiben dabei unverändert erhalten.
@@ -641,13 +676,112 @@ führt für OpenChamber zwei Schritte aus:
 bleibt dabei bestehen — es ist von DevBox verwaltete Infrastruktur, keine
 Benutzersitzung.
 
+### CloudCLI
+
+[CloudCLI](https://cloudcli.ai) (Open Source als „Claude Code UI",
+[siteboon/claudecodeui](https://github.com/siteboon/claudecodeui), AGPL-3.0)
+ist eine selbst gehostete Web- und Mobile-Oberfläche, die **genau die
+Agenten-CLIs steuert, die DevBox ohnehin installiert** — Claude Code, Codex
+und Cursor CLI. Anders als OpenChamber bringt es also keine eigene
+Agenten-Laufzeit mit und nutzt die Anmeldungen, die `devbox auth login`
+bereits erledigt hat.
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/c4kingpin/Scripts/master/devbox/install.sh |
+  env DEVBOX_REMOTE=cloudcli bash
+```
+
+Installiert wird das npm-Paket `@cloudcli-ai/cloudcli` (Binary `cloudcli`),
+auf die in `devbox version` angezeigte Version gepinnt. Der gehostete Dienst
+auf cloudcli.ai ist bewusst nicht Teil davon — dort gibt es nichts zu
+installieren.
+
+CloudCLI bringt keine eigene Dienstverwaltung mit, deshalb schreibt DevBox
+die systemd-Unit selbst (wie bei Happy, nicht wie bei Kisuke):
+
+```bash
+systemctl status devbox-cloudcli.service
+```
+
+#### Erreichbarkeit
+
+Standardmäßig lauscht der Server nur auf `127.0.0.1:3001`; Zugriff von außen
+dann über einen SSH-Tunnel oder einen Reverse Proxy:
+
+```bash
+ssh -L 3001:127.0.0.1:3001 dev@<devbox-host>
+# Danach lokal im Browser: http://localhost:3001
+```
+
+Das ist eine Voreinstellung, keine Sperre. CloudCLI ist faktisch
+Shell-Zugriff als Benutzer `dev`, und der Verkehr ist unverschlüsseltes
+HTTP — deshalb veröffentlicht der Installer den Port nicht von sich aus.
+Auf einem vertrauenswürdigen Netz direkt erreichbar machen:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/c4kingpin/Scripts/master/devbox/install.sh |
+  env DEVBOX_REMOTE=cloudcli DEVBOX_CLOUDCLI_HOST=0.0.0.0 bash
+```
+
+Die Wahl landet in `/var/lib/devbox/cloudcli.env` und wird bei jedem
+weiteren Lauf des Installers zurückgelesen — ein `devbox update` zieht eine
+bewusst geöffnete Box also **nicht** wieder auf Loopback zurück. Der Port
+lässt sich mit `DEVBOX_CLOUDCLI_PORT` ändern.
+
+#### Task Master
+
+CloudCLI bietet eine Integration für
+[Task Master](https://www.npmjs.com/package/task-master-ai) (PRD-Analyse,
+Aufgabenzerlegung, Workflow-Automatisierung), liefert das Werkzeug selbst
+aber nicht mit. Der Installer zieht es deshalb gepinnt nach — Paket
+`task-master-ai`, Binaries `task-master`, `task-master-mcp` und
+`task-master-ai`. Die Version steht in `devbox version`.
+
+#### Browser Use
+
+CloudCLIs „Browser Use" steuert ein von Playwright verwaltetes Chromium. Sein
+eingebauter Installer funktioniert auf einer DevBox **nicht**: er ruft
+`playwright install-deps chromium` auf, das per `apt` Systembibliotheken
+nachzieht und damit root braucht — der CloudCLI-Dienst läuft aber als `dev`,
+und `dev` hat hier bewusst kein generisches sudo. Der Versuch endet mit
+`Failed to install browser runtime`.
+
+Der Installer erledigt deshalb beide Hälften selbst, jeweils als der
+Benutzer, der sie überhaupt ausführen kann: npm-Paket und apt-Abhängigkeiten
+als root, das ~170 MB große Chromium als `dev`, damit es in dem Cache landet,
+den der Dienst ausliest (`~/.cache/ms-playwright`).
+
+Das kostet insgesamt rund 500 MB. Wer darauf verzichten will:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/c4kingpin/Scripts/master/devbox/install.sh |
+  env DEVBOX_REMOTE=cloudcli DEVBOX_CLOUDCLI_BROWSER=0 bash
+```
+
+Der Rest von CloudCLI funktioniert ohne Browser-Runtime; nur „Browser Use"
+bleibt dann nicht verfügbar. `devbox doctor` meldet den Zustand, behandelt
+ihn aber als Hinweis, nicht als Fehler.
+
+#### Anmeldung
+
+CloudCLI ist ein **Single-User-System**: Beim ersten Aufruf der Oberfläche
+erscheint ein Registrierungsformular, das das eine Konto anlegt; jede
+weitere Registrierung wird abgelehnt. Es gibt dafür keinen CLI-Weg, und
+DevBox liest die CloudCLI-Datenbank nicht an.
+
+`devbox auth login` meldet deshalb Codex und Claude an — die Konten, die
+CloudCLI tatsächlich benutzt — und stellt anschließend sicher, dass der
+Server läuft. `devbox auth status` und `devbox doctor` fragen CloudCLIs
+eigenen Endpunkt `/api/auth/status` ab und melden, ob das Konto schon
+existiert (`needsSetup`).
+
 ### Neuen Remote-Provider hinzufügen
 
-Happy, Kisuke, Multica und OpenChamber sind als Provider-Module
+Happy, Kisuke, Multica, OpenChamber und CloudCLI sind als Provider-Module
 implementiert, nicht als fest verdrahtete Sonderfälle. Welche Provider-Namen gültig sind, steht an einer
 einzigen Stelle: der Konstante `DEVBOX_REMOTE_PROVIDERS` (in `install.sh`,
-aktuell `"happy kisuke multica openchamber"`). Ein neuer Provider `<name>`
-braucht:
+aktuell `"happy kisuke multica openchamber cloudcli"`). Ein neuer Provider
+`<name>` braucht:
 
 1. Ein Eintrag in `DEVBOX_REMOTE_PROVIDERS` — das reicht, damit
    `devbox/features/<name>.sh` beim Installieren automatisch heruntergeladen
@@ -679,6 +813,113 @@ Providern (z. B. sind Happys Prüfungen fatal, Kisukes informativ, weil
 `kisuke connect` sein Setup selbst über mehrere Schritte verteilt) und sein
 JSON-Schema (`doctor --json`) hat pro Provider eigene, flache Feldnamen. Ein
 neuer Provider braucht dort weiterhin einen expliziten `if`/`elif`-Block.
+
+## code-server
+
+[code-server](https://github.com/coder/code-server) bringt VS Code in den
+Browser. Es ist **kein Remote-Provider**, sondern ein optionales Feature:
+ein Editor, keine Agenten-Sitzungsschicht. Es läuft deshalb neben jedem
+`DEVBOX_REMOTE` (auch `none`) statt an dessen Stelle, und ist wie `redis`
+in keinem Profil voreingestellt:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/c4kingpin/Scripts/master/devbox/install.sh |
+  env DEVBOX_FEATURES=elixir,postgres,code-server bash
+```
+
+Installiert wird das offizielle Release-`.deb`, auf die in `devbox version`
+angezeigte Version gepinnt und vor `dpkg` gegen
+[`checksums.env`](checksums.env) geprüft — dieselbe Behandlung wie
+Erlang/OTP, Elixir und Multica. Der Dienst ist die mitgelieferte
+Template-Unit:
+
+```bash
+systemctl status code-server@dev
+```
+
+### Port und Passwort
+
+Der Standardport ist **8888**, nicht code-servers eigene 8080: Multicas
+Backend belegt bereits `127.0.0.1:8080`, und beide müssen auf einer Box
+nebeneinander laufen können. Überschreibbar mit `DEVBOX_CODE_SERVER_PORT`,
+die Bind-Adresse mit `DEVBOX_CODE_SERVER_HOST`.
+
+Auch hier ist `127.0.0.1` nur die Voreinstellung — code-server bringt ein
+Terminal mit, ist also ebenfalls Shell-Zugriff als `dev` über
+unverschlüsseltes HTTP. Für direkten Zugriff im vertrauenswürdigen Netz:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/c4kingpin/Scripts/master/devbox/install.sh |
+  env DEVBOX_FEATURES=code-server DEVBOX_CODE_SERVER_HOST=0.0.0.0 bash
+```
+
+Die Wahl landet in `/var/lib/devbox/code-server.env` und überlebt
+`devbox update`; ohne diese Persistenz würde der nächste Lauf die
+`config.yaml` wieder auf Loopback zurückschreiben.
+
+code-server würde sich beim ersten Start selbst ein Zufallspasswort
+schreiben. DevBox erzeugt es stattdessen vorab (`openssl rand -hex 24`), so
+dass es existiert, bevor der Dienst je erreichbar ist, und eine
+Neuinstallation es nicht stillschweigend austauscht — derselbe Vertrag wie
+beim PostgreSQL- und beim OpenChamber-Passwort. Es steht in
+`~/.config/code-server/config.yaml` (Besitzer `dev`, Modus `0600`):
+
+```bash
+sed -n 's/^password: //p' ~/.config/code-server/config.yaml
+```
+
+Ein eigenes Passwort lässt sich beim Installieren über
+`DEVBOX_CODE_SERVER_PASSWORD` vorgeben (mindestens 12 Zeichen, keine
+Leer- oder Steuerzeichen). Zugriff wieder über einen SSH-Tunnel:
+
+```bash
+ssh -L 8888:127.0.0.1:8888 dev@<devbox-host>
+```
+
+## ProjectAtlas
+
+[ProjectAtlas](https://github.com/styler-ai/ProjectAtlas) ist eine native
+Rust-CLI, die eine projektlokale Repository-Karte in einer SQLite-Datenbank
+unter `.projectatlas/` pflegt: Ordner, Zwecke, Zusammenfassungen, Symbole,
+Code-Graph. Agenten sollen damit erst eingrenzen, bevor sie breit Dateien
+lesen.
+
+Optionales, abwählbares Feature wie `redis` und `code-server`:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/c4kingpin/Scripts/master/devbox/install.sh |
+  env DEVBOX_FEATURES=elixir,postgres,projectatlas bash
+```
+
+Es ist bewusst **kein Dienst und kein Remote-Provider**: `projectatlas mcp`
+ist ein MCP-Server über stdio, den der Agent selbst startet, und der Index
+liegt neben dem jeweiligen Repository. Es gibt nichts, was an einen Port
+gebunden oder beim Booten gestartet würde — in `systemctl` und `ss` taucht
+ProjectAtlas deshalb nie auf.
+
+Pro Repository einmalig einrichten:
+
+```bash
+cd ~/workspace/<projekt>
+projectatlas init
+projectatlas mcp-config    # druckt die MCP-Konfiguration mit absoluten Pfaden
+```
+
+### Nur amd64
+
+Upstream veröffentlicht Linux-Binaries ausschließlich für x86_64 (daneben
+macOS für beide Architekturen), **kein `aarch64-unknown-linux-gnu`**. Auf
+einer arm64-DevBox bricht der Installer deshalb mit einer klaren Meldung ab,
+statt an einem 404 zu scheitern, und verweist auf den Bau aus den Quellen:
+
+```bash
+cargo install --git https://github.com/styler-ai/ProjectAtlas \
+  --tag v0.4.5 projectatlas-cli --locked
+```
+
+Das zieht eine vollständige Rust-Toolchain nach sich und ist deshalb nicht
+Teil des Installers. Aus demselben Grund steht in
+[`checksums.env`](checksums.env) bewusst kein arm64-Eintrag.
 
 ## Happy-Daemon nach dem Booten
 
@@ -1038,7 +1279,7 @@ DevBox trennt persistenten Zustand nach Zuständigkeit:
 
 | Bereich | Ort | Inhalt |
 | --- | --- | --- |
-| Root-State | `/var/lib/devbox/` | aktive Version (`version`), aktiver/vorheriger Ref (`active-ref`, `previous-ref`), installierter Commit (`commit`), gewählte optionale Features (`installed-features`), konfigurierter Remote-Provider (`remote-provider`), Installationsmetadaten (`install-state.json`) |
+| Root-State | `/var/lib/devbox/` | aktive Version (`version`), aktiver/vorheriger Ref (`active-ref`, `previous-ref`), installierter Commit (`commit`), gewählte optionale Features (`installed-features`), konfigurierter Remote-Provider (`remote-provider`), Bind-Adressen von CloudCLI und code-server (`cloudcli.env`, `code-server.env`), Installationsmetadaten (`install-state.json`) |
 | User-State | `~/.config/devbox/` | Onboarding-Marker, OpenRouter-Konfiguration, OpenChamber-Zugangsdaten (`openchamber.env`), benutzerbezogene Einstellungen |
 | Fremdverwaltete Credentials | `~/.codex`, `~/.claude`, `~/.happy`, `~/.kisuke`, `~/.config/openchamber`, `~/.config/gh`, `~/.ssh` | jeweils ausschließlich vom zugehörigen Tool verwaltet |
 
@@ -1052,7 +1293,8 @@ Root-State zur laufenden Manager-Version passt.
 Alle aktiv verwalteten Tool-Versionen sind zentral in
 [`versions.env`](versions.env) definiert (DevBox selbst, Node.js,
 Erlang/OTP, Elixir, Phoenix, Codex CLI, Claude Code, Happy, Kisuke, Multica,
-OpenCode, OpenChamber).
+OpenCode, OpenChamber, CloudCLI, Playwright, Task Master, code-server,
+ProjectAtlas).
 `install.sh`
 bleibt ein einzelnes, per `curl | bash` ausführbares Skript und trägt dieselben
 Werte als eingebettete Defaults; ein Regressionstest stellt sicher, dass beide
@@ -1144,6 +1386,16 @@ lingernde User-Session ist aktiv, und OpenChamber kommt nach einem Reboot
 ohne interaktives Login von selbst wieder hoch. Elixir und PostgreSQL
 bleiben hier außen vor — die deckt Phase 1 bereits ab.
 
+**Phase 3 (`DEVBOX_REMOTE=cloudcli` plus Feature `code-server`)** ist die
+einzige Stelle, die belegt, dass ein Remote-Provider und ein davon
+unabhängiges Feature sich eine Box teilen können: CloudCLIs Server und
+code-server müssen beide hochkommen, antworten und einen Reboot überleben,
+ohne sich um einen Port zu streiten. Geprüft werden außerdem CloudCLIs
+eigener Statusendpunkt (`needsSetup: true` auf einer frischen Box — das
+Konto entsteht im Browser, was CI nicht kann), die generierte
+code-server-Konfiguration samt Modus `0600` und Bind-Adresse, und dass das
+code-server-Passwort eine Neuinstallation unverändert übersteht.
+
 Braucht ein funktionierendes LXD auf dem ausführenden Host (`lxc launch`
 muss funktionieren) und Root. Läuft nicht bei jedem Push/PR mit (dauert
 durch echte Downloads/Installationen deutlich länger), sondern über
@@ -1163,6 +1415,9 @@ gh workflow run lxc-integration.yml
 - [Claude Code: settings.json](https://code.claude.com/docs/en/settings)
 - [ChatGPT Remote connections](https://learn.chatgpt.com/docs/remote-connections)
 - [OpenChamber](https://docs.openchamber.dev/install/)
+- [CloudCLI / Claude Code UI](https://github.com/siteboon/claudecodeui)
+- [code-server](https://coder.com/docs/code-server)
+- [ProjectAtlas](https://github.com/styler-ai/ProjectAtlas)
 - [OpenCode CLI](https://opencode.ai/docs/cli/)
 - [Erlang/OTP Builds (hex.pm)](https://builds.hex.pm/)
 - [Phoenix installation](https://hexdocs.pm/phoenix/installation.html)

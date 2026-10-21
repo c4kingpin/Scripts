@@ -21,10 +21,11 @@ jobs:
   lxc-e2e:
     name: LXC end-to-end (Ubuntu 24.04, amd64)
     runs-on: ubuntu-24.04
-    # Two containers now: the default Happy profile, plus an OpenChamber one
+    # Three containers now: the default Happy profile, an OpenChamber one
     # that unpacks OpenCode's ~180 MB platform binary and waits for its
-    # managed server to report healthy.
-    timeout-minutes: 70
+    # managed server to report healthy, and a CloudCLI one that also pulls
+    # code-server's ~245 MB .deb.
+    timeout-minutes: 100
 
     steps:
       - name: Check out repository
