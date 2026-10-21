@@ -52,7 +52,7 @@ msg_error() { printf '%b\n' "${RD}✗ $*${CL}" >&2; }
 # installer version that produced it. The rest of the version manifest
 # (Node.js, Erlang, agent CLIs, ...) is defined further down, where it's
 # actually used.
-readonly DEVBOX_VERSION="${DEVBOX_VERSION:-1.4.1}"
+readonly DEVBOX_VERSION="${DEVBOX_VERSION:-1.6.0-RC1}"
 
 msg_info "DevBox installer v${DEVBOX_VERSION}"
 
@@ -227,6 +227,8 @@ CLAUDE_VERSION="${CLAUDE_VERSION:-2.1.233}"
 HAPPY_VERSION="${HAPPY_VERSION:-1.2.0}"
 KISUKE_VERSION="${KISUKE_VERSION:-1.2.20}"
 MULTICA_VERSION="${MULTICA_VERSION:-0.4.32}"
+OPENCODE_VERSION="${OPENCODE_VERSION:-2.1.2}"
+OPENCHAMBER_VERSION="${OPENCHAMBER_VERSION:-2.5.0}"
 
 # Single source of truth for which remote/session providers exist. Each name
 # here must have a devbox/features/<name>.sh module that defines the four
@@ -235,7 +237,8 @@ MULTICA_VERSION="${MULTICA_VERSION:-0.4.32}"
 # devbox/README.md, "Neuen Remote-Provider hinzufügen"). "none" is always a
 # valid DEVBOX_REMOTE value but deliberately not listed here - it has no
 # module and no hooks to call.
-readonly DEVBOX_REMOTE_PROVIDERS="happy kisuke multica"
+readonly DEVBOX_REMOTE_PROVIDERS="happy kisuke multica openchamber"
+DEVBOX_REMOTE_INTERACTIVE_SELECTION=0
 
 DEVBOX_REPO_URL="${DEVBOX_REPO_URL:-https://raw.githubusercontent.com/c4kingpin/Scripts}"
 DEVBOX_GITHUB_REPO="${DEVBOX_GITHUB_REPO:-c4kingpin/Scripts}"
@@ -459,7 +462,8 @@ Which remote/session provider should this DevBox use?
   1) Happy  - happy / happy claude / happy codex remote session layer (recommended)
   2) Kisuke - Kisuke Connect (kisuke.dev), phone/tablet terminal+editor+chat
   3) Multica - self-hostable agent workspace and daemon (multica.ai)
-  4) None   - host console/SSH only, no remote provider
+  4) OpenChamber - self-hosted OpenCode web/PWA workspace (openchamber.dev)
+  5) None   - host console/SSH only, no remote provider
 
 EOF
 
@@ -472,9 +476,12 @@ EOF
   case "${choice:-1}" in
     2) DEVBOX_REMOTE="kisuke" ;;
     3) DEVBOX_REMOTE="multica" ;;
-    4) DEVBOX_REMOTE="none" ;;
+    4) DEVBOX_REMOTE="openchamber" ;;
+    5) DEVBOX_REMOTE="none" ;;
     *) DEVBOX_REMOTE="happy" ;;
   esac
+
+  DEVBOX_REMOTE_INTERACTIVE_SELECTION=1
 }
 
 select_remote
@@ -487,6 +494,119 @@ if [[ "$DEVBOX_REMOTE" != "none" &&
   msg_error "Invalid DEVBOX_REMOTE: ${DEVBOX_REMOTE} (expected none or one of: ${DEVBOX_REMOTE_PROVIDERS})"
   exit 1
 fi
+
+select_multica_reverse_proxy() {
+  local choice=""
+
+  # Environment variables are the non-interactive interface. Ask only during
+  # a fresh, interactive provider selection, never while devbox update reruns
+  # the installer for an already configured Multica box.
+  [[ "$DEVBOX_REMOTE" == "multica" && "$DEVBOX_REMOTE_INTERACTIVE_SELECTION" -eq 1 ]] || return 0
+
+  cat <<'EOF'
+
+Multica runs locally by default (127.0.0.1 only).
+EOF
+  read -r -p "Use an external reverse proxy on another host? [y/N]: " choice
+
+  case "${choice,,}" in
+    y | yes)
+      read -r -p "Public Multica app URL (e.g. https://multica.example.com): " DEVBOX_MULTICA_APP_URL
+      read -r -p "Public Multica API URL (e.g. https://api.multica.example.com): " DEVBOX_MULTICA_SERVER_URL
+      read -r -p "Reverse-proxy IPv4 CIDR (e.g. 203.0.113.10/32): " DEVBOX_MULTICA_PROXY_CIDR
+      read -r -p "Reverse-proxy IPv4 address for /etc/hosts: " DEVBOX_MULTICA_PROXY_HOST_IP
+
+      [[ -n "$DEVBOX_MULTICA_APP_URL" && -n "$DEVBOX_MULTICA_SERVER_URL" && -n "$DEVBOX_MULTICA_PROXY_CIDR" && -n "$DEVBOX_MULTICA_PROXY_HOST_IP" ]] || {
+        msg_error "All reverse-proxy values are required when external access is enabled."
+        exit 1
+      }
+      ;;
+    "" | n | no)
+      ;;
+    *)
+      msg_error "Please answer y or n."
+      exit 1
+      ;;
+  esac
+}
+
+select_multica_reverse_proxy
+
+select_multica_smtp() {
+  local choice=""
+
+  [[ "$DEVBOX_REMOTE" == "multica" && "$DEVBOX_REMOTE_INTERACTIVE_SELECTION" -eq 1 ]] || return 0
+
+  read -r -p "Configure SMTP delivery for Multica login codes? [y/N]: " choice
+  case "${choice,,}" in
+    y | yes)
+      read -r -p "SMTP host: " DEVBOX_MULTICA_SMTP_HOST
+      read -r -p "SMTP port [465]: " DEVBOX_MULTICA_SMTP_PORT
+      DEVBOX_MULTICA_SMTP_PORT="${DEVBOX_MULTICA_SMTP_PORT:-465}"
+      read -r -p "SMTP username: " DEVBOX_MULTICA_SMTP_USERNAME
+      read -r -s -p "SMTP password: " DEVBOX_MULTICA_SMTP_PASSWORD
+      echo
+      read -r -p "SMTP sender address: " DEVBOX_MULTICA_SMTP_FROM_EMAIL
+      # shellcheck disable=SC2034 # consumed by features/multica.sh after source.
+      DEVBOX_MULTICA_SMTP_TLS="implicit"
+
+      [[ -n "$DEVBOX_MULTICA_SMTP_HOST" && -n "$DEVBOX_MULTICA_SMTP_USERNAME" && -n "$DEVBOX_MULTICA_SMTP_PASSWORD" && -n "$DEVBOX_MULTICA_SMTP_FROM_EMAIL" ]] || {
+        msg_error "All SMTP values are required when SMTP delivery is enabled."
+        exit 1
+      }
+      ;;
+    "" | n | no)
+      ;;
+    *)
+      msg_error "Please answer y or n."
+      exit 1
+      ;;
+  esac
+}
+
+select_multica_smtp
+
+select_multica_github() {
+  local choice=""
+  local line=""
+
+  [[ "$DEVBOX_REMOTE" == "multica" && "$DEVBOX_REMOTE_INTERACTIVE_SELECTION" -eq 1 ]] || return 0
+
+  cat <<'EOF'
+
+GitHub integration links pull requests and can display CI status in Multica.
+It requires a public HTTPS API URL and a GitHub App.
+EOF
+  read -r -p "Configure GitHub App integration for Multica? [y/N]: " choice
+
+  case "${choice,,}" in
+    y | yes)
+      read -r -p "GitHub App slug: " DEVBOX_MULTICA_GITHUB_APP_SLUG
+      read -r -p "GitHub App ID: " DEVBOX_MULTICA_GITHUB_APP_ID
+      read -r -s -p "GitHub webhook secret: " DEVBOX_MULTICA_GITHUB_WEBHOOK_SECRET
+      echo
+      echo "Paste the GitHub App private-key PEM. Finish with a line containing only END."
+      DEVBOX_MULTICA_GITHUB_APP_PRIVATE_KEY=""
+      while IFS= read -r line; do
+        [[ "$line" == "END" ]] && break
+        DEVBOX_MULTICA_GITHUB_APP_PRIVATE_KEY+="${line}"$'\n'
+      done
+
+      [[ -n "$DEVBOX_MULTICA_GITHUB_APP_SLUG" && -n "$DEVBOX_MULTICA_GITHUB_APP_ID" && -n "$DEVBOX_MULTICA_GITHUB_WEBHOOK_SECRET" && -n "$DEVBOX_MULTICA_GITHUB_APP_PRIVATE_KEY" ]] || {
+        msg_error "All GitHub App values are required when GitHub integration is enabled."
+        exit 1
+      }
+      ;;
+    "" | n | no)
+      ;;
+    *)
+      msg_error "Please answer y or n."
+      exit 1
+      ;;
+  esac
+}
+
+select_multica_github
 
 msg_ok "DevBox profile: ${DEVBOX_PROFILE} (optional features: ${devbox_selected_features:-none})"
 

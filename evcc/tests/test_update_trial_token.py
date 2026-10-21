@@ -1,0 +1,648 @@
+#!/usr/bin/env python3
+"""Regressionstests fuer evcc/update-trial-token.py.
+
+Ohne Netzwerk und ohne systemd: HTTP-Zugriffe und `systemctl` werden durch
+Attrappen ersetzt. Mit EVCC_LIVE_TEST=1 wird zusaetzlich die echte
+evcc-Dokumentation abgefragt.
+"""
+
+from __future__ import annotations
+
+import base64
+import contextlib
+import importlib.util
+import io
+import json
+import os
+import stat
+import subprocess
+import sys
+import tempfile
+import time
+from pathlib import Path
+
+SRC = Path(__file__).resolve().parent.parent / "update-trial-token.py"
+
+
+def load_module():
+    spec = importlib.util.spec_from_file_location("upd", SRC)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+m = load_module()
+failures: list[str] = []
+passed = 0
+
+
+def check(name: str, condition: bool, detail: str = "") -> None:
+    global passed
+    print(("PASS " if condition else "FAIL ") + name +
+          (f" :: {detail}" if detail and not condition else ""))
+    if condition:
+        passed += 1
+    else:
+        failures.append(name)
+
+
+def b64(obj) -> str:
+    raw = json.dumps(obj, separators=(",", ":")).encode()
+    return base64.urlsafe_b64encode(raw).decode().rstrip("=")
+
+
+def jwt(payload: dict | list) -> str:
+    return f'{b64({"alg": "RS256", "typ": "JWT"})}.{b64(payload)}.sigxabc_123'
+
+
+TRIAL_OLD = jwt({"iss": "evcc.io", "sub": "trial", "exp": 2000})
+TRIAL_NEW = jwt({"iss": "evcc.io", "sub": "trial", "exp": 9000})
+SPONSOR = jwt({"iss": "evcc.io", "sub": "sponsor", "exp": 9000})
+EXPIRED = jwt({"iss": "evcc.io", "sub": "trial", "exp": 100})
+
+
+def yml(line: str) -> str:
+    return "site:\n  title: Home\n" + line + "\nloadpoints: []\n"
+
+
+# --- JWT-Auswertung -------------------------------------------------------
+
+check("JWT-Muster erkennt Testtoken", m.JWT_RE.fullmatch(TRIAL_OLD) is not None)
+check("trial_expiry liest exp", m.trial_expiry(TRIAL_OLD) == 2000)
+
+for desc, token in [("Sponsor-Token", SPONSOR), ("Unsinn", "not.a.jwt"),
+                    ("exp als bool", jwt({"iss": "evcc.io", "sub": "trial", "exp": True})),
+                    ("Payload kein Objekt", jwt(["a"]))]:
+    try:
+        m.trial_expiry(token)
+        check(f"abgelehnt: {desc}", False)
+    except m.UpdaterError:
+        check(f"abgelehnt: {desc}", True)
+
+# --- YAML-Zeilenerkennung -------------------------------------------------
+
+for desc, line, expected in [
+    ("einfach", f"sponsortoken: {TRIAL_OLD}", True),
+    ("einfache Anfuehrungszeichen", f"sponsortoken: '{TRIAL_OLD}'", True),
+    ("doppelte Anfuehrungszeichen", f'sponsortoken: "{TRIAL_OLD}"', True),
+    ("mit Kommentar", f"sponsortoken: {TRIAL_OLD}  # trial", True),
+    ("ohne Leerzeichen", f"sponsortoken:{TRIAL_OLD}", True),
+    ("eingerueckt", f"  sponsortoken: {TRIAL_OLD}", False),
+    ("leerer Wert", "sponsortoken:", False),
+]:
+    try:
+        m.find_yaml_token(yml(line))
+        found = True
+    except m.UpdaterError:
+        found = False
+    check(f"YAML {desc}", found == expected)
+
+try:
+    m.find_yaml_token(yml(f"sponsortoken: {TRIAL_OLD}") + f"sponsortoken: {TRIAL_NEW}\n")
+    check("doppelter Eintrag abgelehnt", False)
+except m.UpdaterError as exc:
+    check("doppelter Eintrag abgelehnt", "Mehrere" in str(exc), str(exc))
+
+_, _, match, ending = m.find_yaml_token(
+    f"site:\r\nsponsortoken: {TRIAL_OLD}\r\nloadpoints: []\r\n")
+check("CRLF bleibt erhalten", ending == "\r\n" and match.group("token") == TRIAL_OLD)
+
+
+# --- Attrappen fuer systemd und HTTP --------------------------------------
+
+class Fake:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, ...]] = []
+        self.active = True
+        self.charging = False
+        self.restart_ok = True
+        self.doc_tokens = [TRIAL_NEW]
+        self.api_keys: list[str | None] = []
+
+    def systemctl(self, *args: str, timeout: int = 30, require_ok: bool = True) -> bool:
+        self.calls.append(args)
+        if args[0] == "is-active":
+            return self.active
+        if args[0] == "restart":
+            if not self.restart_ok:
+                self.active = False
+                if require_ok:
+                    raise m.UpdaterError("systemctl restart fehlgeschlagen: Attrappe")
+                return False
+            self.active = True
+        return True
+
+    def fetch_url(self, url: str, *, api_key: str | None = None, max_bytes: int = 0) -> bytes:
+        if url == m.DOCS_URL:
+            return ("<p>Testtoken</p>" + " ".join(self.doc_tokens)).encode()
+        self.api_keys.append(api_key)
+        power = 11000 if self.charging else 0
+        return json.dumps({"result": {"loadpoints": [
+            {"charging": self.charging, "chargePower": power}]}}).encode()
+
+
+def setup(fake: Fake, content: str) -> Path:
+    directory = Path(tempfile.mkdtemp())
+    config = directory / "evcc.yaml"
+    config.write_text(content)
+    os.chmod(config, 0o640)
+    m.systemctl = fake.systemctl
+    m.fetch_url = fake.fetch_url
+    return config
+
+
+# Trockenlauf aendert nichts
+fake = Fake()
+config = setup(fake, yml(f"sponsortoken: {TRIAL_OLD}  # trial"))
+before = config.read_text()
+check("Trockenlauf Rueckgabewert 0",
+      m.run(config, m.DEFAULT_STATE_URL, None, True, now=1000) == 0)
+check("Trockenlauf schreibt nicht", config.read_text() == before)
+check("Trockenlauf ruehrt systemd nicht an", fake.calls == [], str(fake.calls))
+
+# Echte Aktualisierung
+fake = Fake()
+original = yml(f"sponsortoken: {TRIAL_OLD}  # trial")
+config = setup(fake, original)
+check("Aktualisierung Rueckgabewert 0",
+      m.run(config, m.DEFAULT_STATE_URL, None, False, now=1000) == 0)
+result = config.read_text()
+check("Token getauscht", TRIAL_NEW in result and TRIAL_OLD not in result)
+check("Kommentar erhalten", "# trial" in result)
+check("uebrige YAML unveraendert", result.replace(TRIAL_NEW, TRIAL_OLD) == original)
+check("evcc neu gestartet", ("restart", "evcc") in fake.calls)
+backup = config.with_name(config.name + ".trial-updater.bak")
+check("Backup enthaelt altes Token", backup.exists() and TRIAL_OLD in backup.read_text())
+check("Backup mit 0600", stat.S_IMODE(backup.stat().st_mode) == 0o600,
+      oct(stat.S_IMODE(backup.stat().st_mode)))
+check("Dateirechte erhalten", stat.S_IMODE(config.stat().st_mode) == 0o640,
+      oct(stat.S_IMODE(config.stat().st_mode)))
+check("keine Temporaerdateien zurueck",
+      [p.name for p in config.parent.iterdir() if p.name.startswith(".evcc")] == [])
+
+# Sponsor-Token wird nie ersetzt
+fake = Fake()
+config = setup(fake, yml(f"sponsortoken: {SPONSOR}"))
+before = config.read_text()
+check("Sponsor-Token bleibt unangetastet",
+      m.run(config, m.DEFAULT_STATE_URL, None, False, now=1000) == 0
+      and config.read_text() == before and fake.calls == [])
+
+# Kein neueres Token
+fake = Fake()
+fake.doc_tokens = [TRIAL_OLD]
+config = setup(fake, yml(f"sponsortoken: {TRIAL_OLD}"))
+before = config.read_text()
+check("gleiches Token, keine Aenderung",
+      m.run(config, m.DEFAULT_STATE_URL, None, False, now=1000) == 0
+      and config.read_text() == before and fake.calls == [])
+
+# Nur abgelaufene Tokens auf der Seite
+fake = Fake()
+fake.doc_tokens = [EXPIRED]
+config = setup(fake, yml(f"sponsortoken: {TRIAL_OLD}"))
+try:
+    m.run(config, m.DEFAULT_STATE_URL, None, False, now=1000)
+    check("abgelaufenes Dokumenten-Token fuehrt zu Fehler", False)
+except m.UpdaterError as exc:
+    check("abgelaufenes Dokumenten-Token fuehrt zu Fehler",
+          "kein noch gueltiges" in str(exc), str(exc))
+
+# Aktiver Ladevorgang blockiert
+fake = Fake()
+fake.charging = True
+config = setup(fake, yml(f"sponsortoken: {TRIAL_OLD}"))
+before = config.read_text()
+try:
+    m.run(config, m.DEFAULT_STATE_URL, None, False, now=1000)
+    check("Ladevorgang blockiert", False)
+except m.UpdaterError as exc:
+    check("Ladevorgang blockiert", "laedt derzeit" in str(exc), str(exc))
+check("Ladevorgang: Datei unveraendert", config.read_text() == before)
+
+# Dienst nicht aktiv
+fake = Fake()
+fake.active = False
+config = setup(fake, yml(f"sponsortoken: {TRIAL_OLD}"))
+before = config.read_text()
+try:
+    m.run(config, m.DEFAULT_STATE_URL, None, False, now=1000)
+    check("inaktiver Dienst blockiert", False)
+except m.UpdaterError as exc:
+    check("inaktiver Dienst blockiert", "nicht aktiv" in str(exc), str(exc))
+check("inaktiver Dienst: Datei unveraendert", config.read_text() == before)
+
+# Neustartfehler -> Ruecknahme
+fake = Fake()
+fake.restart_ok = False
+config = setup(fake, yml(f"sponsortoken: {TRIAL_OLD}  # trial"))
+before = config.read_text()
+try:
+    m.run(config, m.DEFAULT_STATE_URL, None, False, now=1000)
+    check("Neustartfehler fuehrt zu Fehler", False)
+except m.UpdaterError:
+    check("Neustartfehler fuehrt zu Fehler", True)
+check("Ruecknahme stellt Original wieder her", config.read_text() == before,
+      config.read_text()[:200])
+
+# Nicht-lokale API wird abgelehnt
+fake = Fake()
+config = setup(fake, yml(f"sponsortoken: {TRIAL_OLD}"))
+try:
+    m.run(config, "https://evil.example/api/state", None, False, now=1000)
+    check("entfernte API abgelehnt", False)
+except m.UpdaterError as exc:
+    check("entfernte API abgelehnt", "lokale HTTP-API" in str(exc), str(exc))
+
+# Symlink wird abgelehnt
+fake = Fake()
+config = setup(fake, yml(f"sponsortoken: {TRIAL_OLD}"))
+link = config.with_name("link.yaml")
+link.symlink_to(config)
+try:
+    m.run(link, m.DEFAULT_STATE_URL, None, True, now=1000)
+    check("Symlink abgelehnt", False)
+except m.UpdaterError as exc:
+    check("Symlink abgelehnt", "Symlinks" in str(exc), str(exc))
+
+# Fehlender Eintrag bei festgelegtem YAML-Modus
+fake = Fake()
+config = setup(fake, "site:\n  title: Home\n")
+try:
+    m.run(config, m.DEFAULT_STATE_URL, None, True, mode="yaml", now=1000)
+    check("fehlender Eintrag fuehrt zu Fehler", False)
+except m.UpdaterError as exc:
+    check("fehlender Eintrag fuehrt zu Fehler", "oberste" in str(exc), str(exc))
+
+# API-Key wird weitergereicht
+fake = Fake()
+config = setup(fake, yml(f"sponsortoken: {TRIAL_OLD}"))
+key_file = config.with_name("api.key")
+key_file.write_text("evcc_geheim\n")
+m.run(config, m.DEFAULT_STATE_URL, key_file, False, now=1000)
+check("API-Key wird gesendet", fake.api_keys and all(k == "evcc_geheim" for k in fake.api_keys),
+      str(fake.api_keys))
+
+# Ungueltiger API-Key wird abgelehnt
+fake = Fake()
+config = setup(fake, yml(f"sponsortoken: {TRIAL_OLD}"))
+key_file = config.with_name("api.key")
+key_file.write_text("falsch\n")
+try:
+    m.run(config, m.DEFAULT_STATE_URL, key_file, False, now=1000)
+    check("ungueltiger API-Key abgelehnt", False)
+except m.UpdaterError as exc:
+    check("ungueltiger API-Key abgelehnt", "evcc_" in str(exc), str(exc))
+
+# Weiterleitung auf fremden Host (echte fetch_url-Implementierung)
+isolated = load_module()
+
+
+class FakeResponse:
+    def geturl(self) -> str:
+        return "https://evil.example/x"
+
+    def read(self, _n: int) -> bytes:
+        return b"{}"
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_a):
+        return False
+
+
+isolated.urlopen = lambda req, timeout=0: FakeResponse()
+try:
+    isolated.fetch_url(isolated.DOCS_URL)
+    check("Weiterleitung auf fremden Host abgelehnt", False)
+except isolated.UpdaterError as exc:
+    check("Weiterleitung auf fremden Host abgelehnt", "fremden Host" in str(exc), str(exc))
+
+# Logausgaben enthalten nie ein Token
+fake = Fake()
+config = setup(fake, yml(f"sponsortoken: {TRIAL_OLD}"))
+buffer = io.StringIO()
+with contextlib.redirect_stdout(buffer):
+    m.run(config, m.DEFAULT_STATE_URL, None, False, now=1000)
+printed = buffer.getvalue()
+check("keine Tokens in der Logausgabe",
+      TRIAL_OLD not in printed and TRIAL_NEW not in printed, printed)
+
+# --------------------------------------------------------------------------
+# Datenbankmodus
+# --------------------------------------------------------------------------
+# Die Attrappe bildet das an evcc 0.317.1 gemessene Verhalten nach: eigene
+# INFO-Zeilen auf stdout zwischen den Nutzdaten, `set` verlangt -f, Exitcode 1
+# bei Fehlern.
+STUB = r"""#!/usr/bin/env bash
+store=""
+args=()
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --database) store="$2.settings"; shift 2 ;;
+    -f) shift ;;
+    *) args+=("$1"); shift ;;
+  esac
+done
+echo "[main  ] INFO 2026/01/01 00:00:00 config file not found, database-only mode"
+echo "[main  ] INFO 2026/01/01 00:00:00 using sqlite database: ${store%.settings}?_pragma=x"
+case "${args[0]}:${args[1]}" in
+  settings:get)
+    echo 'eebus: {"port":4712}'
+    [ -s "$store" ] && sed -E 's/^([^=]+)=(.*)$/\1: \2/' "$store"
+    exit 0 ;;
+  settings:set)
+    # Schluessel werden exakt abgelegt, wie evcc es tut.
+    tmp="$store.tmp"; : > "$tmp"
+    [ -s "$store" ] && grep -v "^${args[2]}=" "$store" >> "$tmp"
+    printf '%s=%s\n' "${args[2]}" "${args[3]}" >> "$tmp"
+    mv "$tmp" "$store"
+    exit 0 ;;
+  *) echo "Error: unexpected ${args[*]}" >&2; exit 1 ;;
+esac
+"""
+
+
+def setup_db(fake: Fake, token: str | None) -> tuple[Path, str]:
+    """Legt eine Stub-CLI samt Datenbankdatei an und verdrahtet die Attrappen."""
+    directory = Path(tempfile.mkdtemp())
+    stub = directory / "evcc-stub"
+    stub.write_text(STUB)
+    stub.chmod(0o755)
+    database = directory / "evcc.db"
+    database.write_bytes(b"SQLite format 3\x00")
+    if token is not None:
+        (directory / "evcc.db.settings").write_text(f"{m.SETTING_KEY}={token}\n")
+    m.systemctl = fake.systemctl
+    m.fetch_url = fake.fetch_url
+    return database, str(stub)
+
+
+def db_settings(database: Path) -> dict[str, str]:
+    side = database.with_name(database.name + ".settings")
+    if not side.exists():
+        return {}
+    return dict(line.split("=", 1) for line in side.read_text().splitlines() if line)
+
+
+def db_token(database: Path) -> str | None:
+    return db_settings(database).get(m.SETTING_KEY)
+
+
+def db_run(database: Path, stub: str, **kwargs):
+    options = dict(mode="db", database=database, evcc_bin=stub,
+                   service_user=None, now=1000)
+    dry_run = kwargs.pop("dry_run", False)
+    options.update(kwargs)
+    return m.run(Path("/nonexistent/evcc.yaml"), m.DEFAULT_STATE_URL, None,
+                 dry_run, **options)
+
+
+# Token wird in der Datenbank getauscht
+fake = Fake()
+database, stub = setup_db(fake, TRIAL_OLD)
+check("DB: Rueckgabewert 0", db_run(database, stub) == 0)
+check("DB: Token getauscht", db_token(database) == TRIAL_NEW,
+      str(db_token(database))[:40])
+check("DB: evcc neu gestartet", ("restart", "evcc") in fake.calls)
+
+# Logzeilen der CLI werden nicht als Wert missverstanden, Token nicht geloggt
+fake = Fake()
+database, stub = setup_db(fake, TRIAL_OLD)
+buffer = io.StringIO()
+with contextlib.redirect_stdout(buffer):
+    db_run(database, stub)
+printed = buffer.getvalue()
+check("DB: keine Tokens in der Logausgabe",
+      TRIAL_OLD not in printed and TRIAL_NEW not in printed, printed[:200])
+check("DB: Quelle wird benannt", "evcc-Datenbank" in printed, printed[:200])
+
+# Trockenlauf schreibt nicht
+fake = Fake()
+database, stub = setup_db(fake, TRIAL_OLD)
+check("DB: Trockenlauf schreibt nicht",
+      db_run(database, stub, dry_run=True) == 0
+      and db_token(database) == TRIAL_OLD and fake.calls == [])
+
+# Sponsor-Token wird auch hier nie ersetzt
+fake = Fake()
+database, stub = setup_db(fake, SPONSOR)
+check("DB: Sponsor-Token bleibt unangetastet",
+      db_run(database, stub) == 0 and db_token(database) == SPONSOR
+      and fake.calls == [])
+
+# Kein Token in der Datenbank
+fake = Fake()
+database, stub = setup_db(fake, None)
+try:
+    db_run(database, stub)
+    check("DB: fehlendes Token fuehrt zu Fehler", False)
+except m.UpdaterError as exc:
+    check("DB: fehlendes Token fuehrt zu Fehler",
+          "kein 'sponsortoken' gesetzt" in str(exc).lower(), str(exc))
+
+# Fehlende Datenbankdatei
+fake = Fake()
+database, stub = setup_db(fake, TRIAL_OLD)
+database.unlink()
+try:
+    db_run(database, stub)
+    check("DB: fehlende Datei fuehrt zu Fehler", False)
+except m.UpdaterError as exc:
+    check("DB: fehlende Datei fuehrt zu Fehler",
+          "Keine evcc-Datenbank" in str(exc), str(exc))
+
+# Aktiver Ladevorgang blockiert auch im Datenbankmodus
+fake = Fake()
+fake.charging = True
+database, stub = setup_db(fake, TRIAL_OLD)
+try:
+    db_run(database, stub)
+    check("DB: Ladevorgang blockiert", False)
+except m.UpdaterError as exc:
+    check("DB: Ladevorgang blockiert", "laedt derzeit" in str(exc), str(exc))
+check("DB: Ladevorgang laesst Token unveraendert", db_token(database) == TRIAL_OLD)
+
+# Neustartfehler -> alter Wert wird zurueckgeschrieben
+fake = Fake()
+fake.restart_ok = False
+database, stub = setup_db(fake, TRIAL_OLD)
+try:
+    db_run(database, stub)
+    check("DB: Neustartfehler fuehrt zu Fehler", False)
+except m.UpdaterError:
+    check("DB: Neustartfehler fuehrt zu Fehler", True)
+check("DB: alter Token zurueckgeschrieben", db_token(database) == TRIAL_OLD,
+      str(db_token(database))[:40])
+
+# Der Rueckrollanker uebersteht ein erneutes read_current()
+fake = Fake()
+database, stub = setup_db(fake, TRIAL_OLD)
+backend = m.DatabaseBackend(database, stub, None)
+backend.read_current()
+backend.apply(TRIAL_NEW)
+backend.read_current()
+backend.restore()
+check("DB: Anker uebersteht erneutes Lesen", db_token(database) == TRIAL_OLD,
+      str(db_token(database))[:40])
+
+fake = Fake()
+config = setup(fake, yml(f"sponsortoken: {TRIAL_OLD}"))
+ybackend = m.YamlBackend(config)
+ybackend.read_current()
+ybackend.apply(TRIAL_NEW)
+ybackend.read_current()
+ybackend.restore()
+check("YAML: Anker uebersteht erneutes Lesen",
+      ybackend.current_value() == TRIAL_OLD, str(ybackend.current_value())[:40])
+
+# Der kanonische Schluessel ist camelCase -- evcc vergleicht exakt.
+check("Schluessel ist sponsorToken", m.SETTING_KEY == "sponsorToken", m.SETTING_KEY)
+
+fake = Fake()
+database, stub = setup_db(fake, TRIAL_OLD)
+db_run(database, stub)
+check("DB: schreibt in den kanonischen Schluessel",
+      list(db_settings(database)) == ["sponsorToken"], str(list(db_settings(database))))
+
+# Nur ein Eintrag mit falscher Schreibweise: wirkungslos, muss benannt werden
+fake = Fake()
+database, stub = setup_db(fake, None)
+database.with_name(database.name + ".settings").write_text(f"sponsortoken={TRIAL_OLD}\n")
+try:
+    db_run(database, stub)
+    check("DB: falsche Schreibweise wird erkannt", False)
+except m.UpdaterError as exc:
+    check("DB: falsche Schreibweise wird erkannt",
+          "sponsortoken" in str(exc) and "wirkungslos" in str(exc), str(exc))
+
+# Richtiger Schluessel plus Altlast: Warnung, aber Arbeit geht weiter
+fake = Fake()
+database, stub = setup_db(fake, TRIAL_OLD)
+side = database.with_name(database.name + ".settings")
+side.write_text(f"{m.SETTING_KEY}={TRIAL_OLD}\nsponsortoken={SPONSOR}\n")
+buffer = io.StringIO()
+with contextlib.redirect_stdout(buffer):
+    db_run(database, stub)
+printed = buffer.getvalue()
+check("DB: Altlast wird gemeldet, blockiert aber nicht",
+      "WARNUNG" in printed and db_settings(database)[m.SETTING_KEY] == TRIAL_NEW,
+      printed[:200])
+check("DB: Altlast wird nicht angefasst",
+      db_settings(database).get("sponsortoken") == SPONSOR)
+
+
+# Nicht vorhandene CLI
+fake = Fake()
+database, stub = setup_db(fake, TRIAL_OLD)
+try:
+    db_run(database, "/nonexistent/evcc")
+    check("DB: fehlende CLI fuehrt zu Fehler", False)
+except m.UpdaterError as exc:
+    check("DB: fehlende CLI fuehrt zu Fehler", "--evcc-bin" in str(exc), str(exc))
+
+
+# --------------------------------------------------------------------------
+# Modusauswahl
+# --------------------------------------------------------------------------
+fake = Fake()
+config = setup(fake, yml(f"sponsortoken: {TRIAL_OLD}"))
+check("auto waehlt YAML bei vorhandenem Eintrag",
+      isinstance(m.choose_backend("auto", config, None, "evcc", None), m.YamlBackend))
+
+check("auto waehlt DB ohne YAML-Datei",
+      isinstance(m.choose_backend("auto", Path("/nonexistent/evcc.yaml"),
+                                  Path("/tmp/x.db"), "evcc", None),
+                 m.DatabaseBackend))
+
+fake = Fake()
+config = setup(fake, "site:\n  title: Home\n")
+check("auto waehlt DB bei YAML ohne Token",
+      isinstance(m.choose_backend("auto", config, Path("/tmp/x.db"), "evcc", None),
+                 m.DatabaseBackend))
+
+# Ein Symlink darf nicht still zum Datenbankmodus fuehren
+fake = Fake()
+config = setup(fake, yml(f"sponsortoken: {TRIAL_OLD}"))
+link = config.with_name("link.yaml")
+link.symlink_to(config)
+try:
+    m.choose_backend("auto", link, Path("/tmp/x.db"), "evcc", None)
+    check("auto: Symlink abgelehnt statt umgangen", False)
+except m.UpdaterError as exc:
+    check("auto: Symlink abgelehnt statt umgangen", "Symlinks" in str(exc), str(exc))
+
+
+# --------------------------------------------------------------------------
+# Hilfsfunktionen
+# --------------------------------------------------------------------------
+check("scrub entfernt JWTs",
+      TRIAL_OLD not in m.scrub(f"Fehler bei {TRIAL_OLD}")
+      and "<token>" in m.scrub(f"Fehler bei {TRIAL_OLD}"))
+check("privilege_prefix ohne Nutzer ist leer", m.privilege_prefix(None) == [])
+if os.geteuid() != 0:
+    check("privilege_prefix ohne root ist leer", m.privilege_prefix("evcc") == [])
+
+m.systemctl_run = lambda *a, **k: subprocess.CompletedProcess(
+    a, 0, "Environment=EVCC_DATABASE_DSN=/var/lib/evcc/evcc.db OTHER=1\n", "")
+check("DB-Pfad aus der systemd-Unit",
+      m.service_database() == Path("/var/lib/evcc/evcc.db"), str(m.service_database()))
+m.systemctl_run = lambda *a, **k: subprocess.CompletedProcess(a, 0, "Environment=\n", "")
+check("ohne DSN in der Unit kein Pfad", m.service_database() is None)
+m.systemctl_run = lambda *a, **k: subprocess.CompletedProcess(
+    a, 0, "Environment=EVCC_DATABASE_DSN=/x/y.db?_pragma=busy_timeout(5000)\n", "")
+check("DSN-Parameter werden abgeschnitten",
+      m.service_database() == Path("/x/y.db"), str(m.service_database()))
+
+
+# --------------------------------------------------------------------------
+# Optional: gegen eine echte evcc-Binary (EVCC_REAL_BIN=/pfad/zu/evcc)
+# --------------------------------------------------------------------------
+real_bin = os.environ.get("EVCC_REAL_BIN")
+if real_bin:
+    directory = Path(tempfile.mkdtemp())
+    database = directory / "evcc.db"
+    backend = m.DatabaseBackend(database, real_bin, None)
+    try:
+        subprocess.run([real_bin, "settings", "set", "--database", str(database),
+                        "-f", m.SETTING_KEY, TRIAL_OLD],
+                       capture_output=True, check=True, timeout=120)
+        check("REAL: Token wird korrekt gelesen", backend.read_current() == TRIAL_OLD)
+        backend.apply(TRIAL_NEW)
+        check("REAL: Token wird korrekt geschrieben",
+              backend.current_value() == TRIAL_NEW)
+        check("REAL: Aenderung wird erkannt", backend.is_applied())
+        backend.restore()
+        check("REAL: Rueckschreiben funktioniert", backend.current_value() == TRIAL_OLD)
+        # Der Anker darf durch erneutes Lesen nicht verlorengehen.
+        backend.read_current()
+        backend.apply(TRIAL_NEW)
+        backend.read_current()
+        backend.restore()
+        check("REAL: Anker uebersteht erneutes Lesen",
+              backend.current_value() == TRIAL_OLD, str(backend.current_value())[:40])
+        # Die echte CLI muss den kanonischen Schluessel zurueckmelden.
+        keys = list(backend._all_settings())
+        check("REAL: kanonischer Schluessel in der Datenbank",
+              "sponsorToken" in keys and "sponsortoken" not in keys, str(keys))
+    except Exception as exc:  # noqa: BLE001 - Diagnose im Testlauf
+        check("REAL: Durchlauf gegen echte Binary", False,
+              f"{type(exc).__name__}: {exc}")
+
+
+# Optional: echte evcc-Dokumentation
+if os.environ.get("EVCC_LIVE_TEST") == "1":
+    live = load_module()
+    try:
+        _token, expiry = live.fetch_official_trial(now=int(time.time()))
+        print(f"LIVE: Testtoken gefunden, gueltig bis {live.date_utc(expiry)}")
+        check("LIVE: Testtoken auf docs.evcc.io gefunden", True)
+    except live.UpdaterError as exc:
+        check("LIVE: Testtoken auf docs.evcc.io gefunden", False, str(exc))
+
+print()
+if failures:
+    print(f"FEHLGESCHLAGEN ({len(failures)}): " + ", ".join(failures))
+    sys.exit(1)
+print(f"Alle {passed} Tests bestanden.")

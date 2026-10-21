@@ -67,6 +67,12 @@ jobs:
             echo "via [Happy](https://happy.engineering)"
           } >"$notes_file"
 
+          release_flags=()
+          if [[ "$version" == *-* ]]; then
+            release_flags+=(--prerelease)
+          fi
+
           gh release create "$tag" \
             --title "DevBox ${tag}" \
-            --notes-file "$notes_file"
+            --notes-file "$notes_file" \
+            "${release_flags[@]}"

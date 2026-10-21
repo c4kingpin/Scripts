@@ -51,6 +51,17 @@ readonly MULTICA_SERVICE="devbox-multica-daemon.service"
 readonly MULTICA_SERVICE_UNIT="/etc/systemd/system/${MULTICA_SERVICE}"
 readonly MULTICA_SELF_HOST_URL="http://127.0.0.1:3000"
 readonly MULTICA_SELF_HOST_HEALTH_URL="http://127.0.0.1:8080/healthz"
+readonly MULTICA_PUBLIC_CONFIG_FILE="${ROOT_STATE_DIR}/multica-public.env"
+
+# OpenChamber (DEVBOX_REMOTE=openchamber): a self-hosted web/PWA workspace
+# for OpenCode. Like Kisuke it ships its own boot-time service - a systemd
+# --user unit named "openchamber", written by `openchamber startup enable`
+# (run from openchamber_auth_login below), not by DevBox. DevBox owns only
+# the UI password, generated at install time by
+# devbox/features/openchamber.sh and stored in OPENCHAMBER_ENV_FILE.
+readonly OPENCHAMBER_HOME="${DEV_HOME}/.config/openchamber"
+readonly OPENCHAMBER_SERVICE="openchamber"
+readonly OPENCHAMBER_ENV_FILE="${STATE_DIR}/openchamber.env"
 
 readonly OPENROUTER_ENV="${STATE_DIR}/openrouter.env"
 readonly OPENROUTER_PROFILE="${DEV_HOME}/.codex/openrouter.config.toml"
@@ -60,7 +71,7 @@ readonly LEGACY_OPENROUTER_WRAPPER="${DEV_HOME}/.local/bin/codex"
 readonly NODE_MAJOR="24"
 
 # Mirrors the version manifest embedded in install.sh / devbox/versions.env.
-readonly DEVBOX_VERSION="1.4.1"
+readonly DEVBOX_VERSION="1.6.0-RC1"
 readonly ERLANG_VERSION="29.0.5"
 readonly ELIXIR_VERSION="1.20.3"
 readonly PHOENIX_VERSION="1.8.9"
@@ -69,6 +80,8 @@ readonly CLAUDE_VERSION="2.1.233"
 readonly HAPPY_VERSION="1.2.0"
 readonly KISUKE_VERSION="1.2.20"
 readonly MULTICA_VERSION="0.4.32"
+readonly OPENCODE_VERSION="2.1.2"
+readonly OPENCHAMBER_VERSION="2.5.0"
 
 readonly PACKAGE_NAME_PATTERN='^[a-z0-9][a-z0-9+.-]*$'
 
@@ -628,6 +641,8 @@ Claude Code:   ${CLAUDE_VERSION}
 Happy:         ${HAPPY_VERSION}
 Kisuke:        ${KISUKE_VERSION}
 Multica:       ${MULTICA_VERSION}
+OpenCode:      ${OPENCODE_VERSION}
+OpenChamber:   ${OPENCHAMBER_VERSION}
 EOF
 }
 
@@ -645,6 +660,8 @@ show_version_json() {
     --arg happy "$HAPPY_VERSION" \
     --arg kisuke "$KISUKE_VERSION" \
     --arg multica "$MULTICA_VERSION" \
+    --arg opencode "$OPENCODE_VERSION" \
+    --arg openchamber "$OPENCHAMBER_VERSION" \
     '{
       devbox: $devbox,
       commit: $commit,
@@ -656,7 +673,9 @@ show_version_json() {
       claude_code: $claude_code,
       happy: $happy,
       kisuke: $kisuke,
-      multica: $multica
+      multica: $multica,
+      opencode: $opencode,
+      openchamber: $openchamber
     }'
 }
 
@@ -966,7 +985,13 @@ kisuke_auth_logout() {
 # Remote-provider hooks for Multica. Its documented CLI is the authority for
 # authentication and daemon state; DevBox never reads its token files.
 multica_is_authenticated() {
-  multica auth status >/dev/null 2>&1
+  local auth_status
+
+  # Multica 0.4.x returns success for `auth status` once a server URL is
+  # configured, even when no token exists. Inspect its documented status text
+  # so `devbox auth login` still enters the headless token flow.
+  auth_status="$(multica auth status 2>&1)" || return 1
+  [[ "$auth_status" != *"Not authenticated"* && "$auth_status" == *"Authenticated"* ]]
 }
 
 multica_daemon_service_is_installed() {
@@ -978,7 +1003,12 @@ multica_daemon_service_is_enabled() {
 }
 
 multica_daemon_is_running() {
-  multica daemon status >/dev/null 2>&1
+  local daemon_status
+
+  # Like `auth status`, Multica 0.4.x exits successfully for a stopped
+  # daemon. Use its JSON state instead of the process exit code.
+  daemon_status="$(multica daemon status --output json 2>/dev/null)" || return 1
+  [[ "$daemon_status" == *'"status": "running"'* ]]
 }
 
 multica_self_host_is_running() {
@@ -990,8 +1020,28 @@ harden_multica_state() {
   chmod 0700 "$MULTICA_HOME"
 }
 
+multica_configure_public_urls() {
+  local app_url=""
+  local server_url=""
+
+  [[ -r "$MULTICA_PUBLIC_CONFIG_FILE" ]] || return 1
+  app_url="$(awk -F= '$1 == "MULTICA_APP_URL" { print substr($0, index($0, "=") + 1) }' "$MULTICA_PUBLIC_CONFIG_FILE")"
+  server_url="$(awk -F= '$1 == "MULTICA_SERVER_URL" { print substr($0, index($0, "=") + 1) }' "$MULTICA_PUBLIC_CONFIG_FILE")"
+  [[ -n "$app_url" && -n "$server_url" ]] || return 1
+
+  multica config set server_url "$server_url"
+  multica config set app_url "$app_url"
+}
+
+multica_public_app_url() {
+  [[ -r "$MULTICA_PUBLIC_CONFIG_FILE" ]] || return 1
+  awk -F= '$1 == "MULTICA_APP_URL" { print substr($0, index($0, "=") + 1) }' "$MULTICA_PUBLIC_CONFIG_FILE"
+}
+
 multica_auth_status() {
-  local status=0
+  local status=0 self_host_url="$MULTICA_SELF_HOST_URL"
+
+  self_host_url="$(multica_public_app_url || printf '%s' "$MULTICA_SELF_HOST_URL")"
 
   if multica_is_authenticated; then
     ok "Multica is authenticated and this DevBox is registered"
@@ -1007,7 +1057,7 @@ multica_auth_status() {
   fi
 
   if multica_self_host_is_running; then
-    ok "Multica self-hosted server is running (${MULTICA_SELF_HOST_URL})"
+    ok "Multica self-hosted server is running (${self_host_url})"
   else
     warn "Multica self-hosted server is not running"
   fi
@@ -1022,12 +1072,25 @@ multica_auth_status() {
 }
 
 multica_auth_login() {
+  local public_urls_configured=0
+
+  # Reapply public endpoints even when a local session already exists. A
+  # reverse-proxy migration must not require deleting a valid token first.
+  if multica_configure_public_urls; then
+    public_urls_configured=1
+  fi
+
   if multica_is_authenticated; then
     ok "Multica is already authenticated"
   else
-    info "Configuring the self-hosted Multica server"
-    info "Use an SSH tunnel to open ${MULTICA_SELF_HOST_URL} locally if this DevBox has no browser."
-    multica setup self-host
+    if (( public_urls_configured )); then
+      info "Open the reverse-proxied Multica web UI, create a personal API token, then paste it here."
+      multica login --token
+    else
+      info "Configuring the self-hosted Multica server"
+      info "Use an SSH tunnel to open ${MULTICA_SELF_HOST_URL} locally if this DevBox has no browser."
+      multica setup self-host
+    fi
   fi
 
   harden_multica_state
@@ -1051,6 +1114,215 @@ multica_auth_logout() {
     multica auth logout || warn "Multica logout reported an error"
   else
     ok "Multica is already signed out"
+  fi
+}
+
+# Remote-provider hooks for OpenChamber. OpenChamber has no account to sign
+# in to: its web UI is guarded by a UI password that the DevBox installer
+# generated (devbox/features/openchamber.sh) and stored in
+# OPENCHAMBER_ENV_FILE. "Authenticated" therefore means two things here -
+# the OpenCode runtime behind it has at least one model provider configured,
+# and OpenChamber's own systemd --user service is installed and enabled.
+openchamber_env_value() {
+  local key="$1"
+
+  [[ -r "$OPENCHAMBER_ENV_FILE" ]] || return 1
+
+  run_as_dev \
+    sed \
+    -n \
+    "s/^${key}=//p" \
+    "$OPENCHAMBER_ENV_FILE"
+}
+
+openchamber_ui_password() {
+  local password
+
+  password="$(openchamber_env_value OPENCHAMBER_UI_PASSWORD)" || return 1
+  [[ -n "$password" ]] || return 1
+
+  printf '%s' "$password"
+}
+
+openchamber_bind_host() {
+  openchamber_env_value OPENCHAMBER_HOST 2>/dev/null | grep . || printf '127.0.0.1'
+}
+
+openchamber_bind_port() {
+  openchamber_env_value OPENCHAMBER_PORT 2>/dev/null | grep . || printf '3000'
+}
+
+openchamber_url() {
+  printf 'http://%s:%s' "$(openchamber_bind_host)" "$(openchamber_bind_port)"
+}
+
+# OpenCode 2.x keeps provider credentials in its own database rather than a
+# documented file, so this asks its CLI instead: `auth list --format json`
+# prints a JSON array of configured integrations ("[]" when none). An empty
+# list means `opencode auth login` has never completed and the OpenChamber
+# UI would come up without a usable model.
+openchamber_opencode_is_authenticated() {
+  local integrations
+
+  integrations="$(
+    run_as_dev \
+      opencode auth list \
+      --format json \
+      2>/dev/null
+  )" || return 1
+
+  printf '%s' "$integrations" \
+    | jq -e 'type == "array" and length > 0' \
+      >/dev/null 2>&1
+}
+
+# `systemctl list-unit-files` exits 0 with an empty result for an unknown
+# unit name, so this uses `cat` instead - the same reasoning as
+# kisuke_daemon_service_is_installed() above.
+# shellcheck disable=SC2016 # single-quoted on purpose: expands inside the nested `bash -lc` shell, not here
+openchamber_service_is_installed() {
+  run_as_dev \
+    bash \
+    -lc \
+    'systemctl --user cat "$1" >/dev/null 2>&1' \
+    _ \
+    "${OPENCHAMBER_SERVICE}.service"
+}
+
+# shellcheck disable=SC2016 # single-quoted on purpose: expands inside the nested `bash -lc` shell, not here
+openchamber_service_is_enabled() {
+  run_as_dev \
+    bash \
+    -lc \
+    'systemctl --user is-enabled --quiet "$1" 2>/dev/null' \
+    _ \
+    "$OPENCHAMBER_SERVICE"
+}
+
+# shellcheck disable=SC2016 # single-quoted on purpose: expands inside the nested `bash -lc` shell, not here
+openchamber_server_is_running() {
+  run_as_dev \
+    bash \
+    -lc \
+    'systemctl --user is-active --quiet "$1" 2>/dev/null' \
+    _ \
+    "$OPENCHAMBER_SERVICE"
+}
+
+openchamber_is_authenticated() {
+  openchamber_opencode_is_authenticated &&
+    openchamber_service_is_installed
+}
+
+# OpenChamber manages the permissions of its own state files; DevBox only
+# tightens the directory, the same defense-in-depth it applies to ~/.happy
+# and ~/.kisuke.
+harden_openchamber_state() {
+  install \
+    -d \
+    -m 0700 \
+    "$OPENCHAMBER_HOME"
+
+  chmod \
+    0700 \
+    "$OPENCHAMBER_HOME"
+}
+
+# Remote-provider hook (DEVBOX_REMOTE=openchamber), dispatched generically by
+# agents_auth_status(). Returns non-zero only for "not authenticated",
+# matching the status semantics agents_auth_status() folds into its own exit
+# code; the service/UI-password checks below are informational.
+openchamber_auth_status() {
+  local status=0
+
+  if openchamber_opencode_is_authenticated; then
+    ok "OpenCode has at least one model provider configured"
+  else
+    warn "OpenCode has no model provider configured (run: devbox auth login)"
+    status=1
+  fi
+
+  if openchamber_ui_password >/dev/null 2>&1; then
+    ok "OpenChamber UI password is stored (value hidden) in ${OPENCHAMBER_ENV_FILE}"
+  else
+    warn "OpenChamber UI password is missing; run 'devbox update' as root"
+  fi
+
+  if openchamber_server_is_running; then
+    ok "OpenChamber server is running ($(openchamber_url))"
+  else
+    warn "OpenChamber server is not running"
+  fi
+
+  if openchamber_service_is_installed &&
+    openchamber_service_is_enabled; then
+
+    ok "OpenChamber starts automatically at boot (systemd --user, lingering session)"
+  else
+    warn "OpenChamber startup service is not installed yet; run: devbox auth login"
+  fi
+
+  return "$status"
+}
+
+# Remote-provider hook: configures OpenChamber during `devbox auth login`.
+#
+# Two steps, both idempotent: sign OpenCode in to a model provider (the
+# agent runtime OpenChamber drives - DevBox's own Codex/Claude logins do not
+# cover it), then hand OpenChamber's own `startup enable` the stored UI
+# password, bind address and port so it writes and starts its systemd --user
+# unit. Re-running it after an update simply rewrites that unit.
+openchamber_auth_login() {
+  local ui_password=""
+
+  if openchamber_opencode_is_authenticated; then
+    ok "OpenCode already has a model provider configured"
+  else
+    info "Signing OpenCode in to a model provider (OpenChamber runs on top of it)"
+
+    opencode auth login \
+      || warn "OpenCode login reported an error; run: opencode auth login"
+  fi
+
+  if ! ui_password="$(openchamber_ui_password)"; then
+    warn "No OpenChamber UI password found at ${OPENCHAMBER_ENV_FILE}; run 'devbox update' as root"
+    return 0
+  fi
+
+  info "Enabling the OpenChamber startup service"
+
+  if openchamber startup enable \
+    --host "$(openchamber_bind_host)" \
+    --port "$(openchamber_bind_port)" \
+    --ui-password "$ui_password"; then
+
+    ok "OpenChamber is served at $(openchamber_url)"
+  else
+    warn "OpenChamber startup service could not be enabled; run: openchamber startup enable"
+  fi
+
+  harden_openchamber_state
+
+  info "UI password: ${ui_password}"
+  info "Reach the UI from another machine with: ssh -L $(openchamber_bind_port):127.0.0.1:$(openchamber_bind_port) ${DEV_USER}@<devbox-host>"
+}
+
+# Remote-provider hook: signs OpenChamber out during `devbox auth logout`.
+# The UI password stays on disk - it is DevBox-managed infrastructure, not a
+# user session, and is regenerated only by the installer.
+openchamber_auth_logout() {
+  if openchamber_service_is_installed; then
+    openchamber startup disable \
+      || warn "OpenChamber startup service could not be disabled"
+  else
+    ok "OpenChamber startup service is already removed"
+  fi
+
+  if openchamber_opencode_is_authenticated; then
+    opencode auth logout \
+      || warn "OpenCode logout reported an error"
+  else
+    ok "OpenCode is already signed out"
   fi
 }
 
@@ -1730,6 +2002,66 @@ unauthenticated DevBox leaves the service idle instead of failing.
 EOF
 }
 
+openchamber_remote_info() {
+  cat <<EOF
+OpenChamber agent workspace
+
+  Browser / PWA / mobile app / VS Code extension
+                    |
+                    v
+          OpenChamber web server
+                    |
+                    v
+              OpenCode runtime
+                    |
+          /home/dev/workspace
+
+
+OpenChamber is a self-hosted web interface for OpenCode; it does not use the
+Codex or Claude CLIs. Its server is bound to $(openchamber_url) - use an SSH
+tunnel or a reverse proxy to open it from another machine:
+
+  ssh -L $(openchamber_bind_port):127.0.0.1:$(openchamber_bind_port) ${DEV_USER}@<devbox-host>
+
+The web UI is protected by a password DevBox generated at install time. Print
+it on this box with:
+
+  sed -n 's/^OPENCHAMBER_UI_PASSWORD=//p' ${OPENCHAMBER_ENV_FILE}
+
+
+Authentication:
+
+  devbox auth status
+  devbox auth login
+  devbox auth logout
+
+\`devbox auth login\` runs \`opencode auth login\` (OpenChamber has no account of
+its own; its models come from OpenCode) and then \`openchamber startup enable\`
+with the stored UI password, host and port.
+
+
+Boot behaviour:
+
+  systemctl --user status ${OPENCHAMBER_SERVICE}
+
+OpenChamber manages its own boot-time service (a systemd --user unit named
+"${OPENCHAMBER_SERVICE}", written by \`openchamber startup enable\` above). DevBox only
+enables a lingering session for user "${DEV_USER}" (\`loginctl enable-linger ${DEV_USER}\`)
+so it can start without an interactive login. A DevBox that hasn't been
+through \`devbox auth login\` yet simply has no "${OPENCHAMBER_SERVICE}" unit installed.
+
+
+SSH:
+
+  devbox ssh status
+  devbox ssh setup
+  devbox ssh disable
+
+DevBox SSH configuration applies only to user "${DEV_USER}" and does not intentionally
+change root/admin SSH policy.
+EOF
+}
+
 remote_info() {
   local remote_provider
   remote_provider="$(configured_remote_provider)"
@@ -1742,7 +2074,8 @@ remote_info() {
   cat <<'EOF'
 No remote provider configured (DEVBOX_REMOTE=none)
 
-This DevBox has no Happy, Kisuke or Multica remote-access layer installed. Reach it
+This DevBox has no Happy, Kisuke, Multica or OpenChamber remote-access layer
+installed. Reach it
 over SSH or the host console, and use Codex/Claude directly:
 
   claude
@@ -1911,6 +2244,7 @@ doctor() {
   local status=0
   local happy_version=""
   local kisuke_version=""
+  local openchamber_version=""
 
   # Captured alongside the checks below (unchanged) so --json can report a
   # structured summary without re-running or duplicating any of them.
@@ -2003,6 +2337,8 @@ doctor() {
     commands+=(kisuke)
   elif [[ "$remote_provider" == "multica" ]]; then
     commands+=(multica)
+  elif [[ "$remote_provider" == "openchamber" ]]; then
+    commands+=(openchamber opencode)
   fi
 
   if feature_was_installed elixir; then
@@ -2141,6 +2477,37 @@ doctor() {
       warn "Kisuke npm package is missing"
       status=1
     fi
+  fi
+
+  # Do not invoke `openchamber --version`/`opencode --version` for the same
+  # reason as `happy` above - validate the globally installed npm packages.
+  if [[ "$remote_provider" == "openchamber" ]]; then
+    local openchamber_package
+
+    for openchamber_package in @openchamber/web @opencode/cli; do
+      if run_as_dev npm list \
+        --global \
+        --depth=0 \
+        "$openchamber_package" \
+        >/dev/null 2>&1; then
+
+        openchamber_version="$(
+          run_as_dev npm list \
+            --global \
+            --depth=0 \
+            "$openchamber_package" \
+            2>/dev/null \
+          | grep -F "${openchamber_package}@" \
+          | head -n1 \
+          || true
+        )"
+
+        ok "${openchamber_version:-${openchamber_package} npm package}"
+      else
+        warn "${openchamber_package} npm package is missing"
+        status=1
+      fi
+    done
   fi
 
   if feature_was_installed elixir; then
@@ -2373,6 +2740,56 @@ doctor() {
       ok "Multica daemon service (${MULTICA_SERVICE})"
     else
       warn "Multica daemon service is not enabled; run: devbox update as root"
+      status=1
+    fi
+  elif [[ "$remote_provider" == "openchamber" ]]; then
+    # Like Kisuke's, OpenChamber's own systemd --user unit is written by its
+    # CLI during `devbox auth login`, not by install.sh - so "not set up
+    # yet" is informational here and must not fail the installer's own
+    # post-install doctor run. The UI password is the exception: DevBox
+    # generates and owns it, so a missing one is a real defect.
+    if openchamber_opencode_is_authenticated; then
+      ok "OpenCode has a model provider configured"
+    else
+      warn "OpenCode has no model provider configured (run: devbox auth login)"
+    fi
+
+    if openchamber_ui_password >/dev/null 2>&1; then
+      ok "OpenChamber UI password"
+    else
+      warn "OpenChamber UI password is missing from ${OPENCHAMBER_ENV_FILE}"
+      status=1
+    fi
+
+    if openchamber_server_is_running; then
+      ok "OpenChamber server"
+    else
+      warn "OpenChamber server is not running"
+    fi
+
+    if openchamber_service_is_installed; then
+      if openchamber_service_is_enabled; then
+        ok "OpenChamber startup service (${OPENCHAMBER_SERVICE})"
+      else
+        warn "${OPENCHAMBER_SERVICE} service is installed but not enabled (run: devbox auth login)"
+      fi
+    else
+      warn "${OPENCHAMBER_SERVICE} service is not installed yet; run: devbox auth login"
+    fi
+
+    # shellcheck disable=SC2016 # single-quoted on purpose: expands inside the nested `bash -lc` shell, not here
+    if run_as_dev \
+      bash \
+      -lc \
+      '
+        [[ ! -e "$HOME/.config/openchamber" ]] ||
+        [[ "$(stat -c "%a" "$HOME/.config/openchamber")" == "700" ]]
+      '; then
+
+      ok "OpenChamber data directory permissions"
+    else
+      # shellcheck disable=SC2088 # literal display text, not a path expansion
+      warn "~/.config/openchamber should have mode 0700"
       status=1
     fi
   fi
@@ -2847,6 +3264,7 @@ onboard() {
     happy) remote_step="Authenticate Codex and Claude and pair Happy" ;;
     kisuke) remote_step="Authenticate Codex, Claude and Kisuke Connect" ;;
     multica) remote_step="Authenticate Codex, Claude and Multica" ;;
+    openchamber) remote_step="Authenticate Codex, Claude and OpenCode, and enable OpenChamber" ;;
   esac
 
   cat <<EOF
@@ -2903,6 +3321,19 @@ Use Multica to create agents and assign them work on this DevBox once
 
 EOF
       ;;
+    openchamber)
+      cat <<'EOF'
+Agent commands after onboarding:
+
+  claude
+  codex
+
+OpenChamber serves its own OpenCode-based web workspace once
+'devbox auth login' has enabled it; reach it over an SSH tunnel and see
+'devbox remote-info' for the address and UI password.
+
+EOF
+      ;;
     *)
       cat <<'EOF'
 Agent commands after onboarding:
@@ -2933,6 +3364,7 @@ EOF
     happy) login_prompt="Sign in to Codex and Claude and pair Happy now?" ;;
     kisuke) login_prompt="Sign in to Codex, Claude and Kisuke Connect now?" ;;
     multica) login_prompt="Sign in to Codex, Claude and Multica now?" ;;
+    openchamber) login_prompt="Sign in to Codex, Claude and OpenCode, and enable OpenChamber now?" ;;
   esac
 
   if prompt_yes_no \

@@ -89,6 +89,7 @@ create_developer_user() {
     "${DEV_HOME}/.kisuke" \
     "${DEV_HOME}/.config" \
     "${DEV_HOME}/.config/devbox" \
+    "${DEV_HOME}/.config/openchamber" \
     "${DEV_HOME}/.cache" \
     "${DEV_HOME}/.local" \
     "${DEV_HOME}/.local/bin" \
@@ -109,6 +110,7 @@ create_developer_user() {
     "${DEV_HOME}/.kisuke" \
     "${DEV_HOME}/.config" \
     "${DEV_HOME}/.config/devbox" \
+    "${DEV_HOME}/.config/openchamber" \
     "${DEV_HOME}/.cache"
 
   install \
