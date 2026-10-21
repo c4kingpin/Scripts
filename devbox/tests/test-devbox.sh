@@ -17,6 +17,7 @@ readonly FEATURE_AGENTS="${PROJECT_ROOT}/features/agents.sh"
 readonly FEATURE_HAPPY="${PROJECT_ROOT}/features/happy.sh"
 readonly FEATURE_KISUKE="${PROJECT_ROOT}/features/kisuke.sh"
 readonly FEATURE_MULTICA="${PROJECT_ROOT}/features/multica.sh"
+readonly FEATURE_OPENCHAMBER="${PROJECT_ROOT}/features/openchamber.sh"
 readonly FEATURE_AGENT_NOTIFY="${PROJECT_ROOT}/features/agent-notify.sh"
 readonly FEATURE_TOOLING="${PROJECT_ROOT}/features/tooling.sh"
 readonly FEATURE_ELIXIR="${PROJECT_ROOT}/features/elixir.sh"
@@ -81,6 +82,7 @@ readonly NORM_FEATURE_BASE="${TEST_TMP}/feature_base.normalized"
 readonly NORM_FEATURE_POSTGRES="${TEST_TMP}/feature_postgres.normalized"
 readonly NORM_FEATURE_HAPPY="${TEST_TMP}/feature_happy.normalized"
 readonly NORM_FEATURE_KISUKE="${TEST_TMP}/feature_kisuke.normalized"
+readonly NORM_FEATURE_OPENCHAMBER="${TEST_TMP}/feature_openchamber.normalized"
 readonly NORM_FEATURE_AGENT_NOTIFY="${TEST_TMP}/feature_agent_notify.normalized"
 readonly NORM_FEATURE_TOOLING="${TEST_TMP}/feature_tooling.normalized"
 readonly NORM_FEATURE_ELIXIR="${TEST_TMP}/feature_elixir.normalized"
@@ -98,6 +100,7 @@ scripts_have_valid_syntax() {
     "$FEATURE_HAPPY" \
     "$FEATURE_KISUKE" \
     "$FEATURE_MULTICA" \
+    "$FEATURE_OPENCHAMBER" \
     "$FEATURE_AGENT_NOTIFY" \
     "$FEATURE_TOOLING" \
     "$FEATURE_ELIXIR"
@@ -161,7 +164,7 @@ install_script_loads_all_modules_after_bootstrap() {
     grep -Fq "$module" "$NORM_INSTALL" || return 1
   done
 
-  grep -Fq 'readonly DEVBOX_REMOTE_PROVIDERS="happy kisuke multica"' "$INSTALL_SCRIPT" &&
+  grep -Fq 'readonly DEVBOX_REMOTE_PROVIDERS="happy kisuke multica openchamber"' "$INSTALL_SCRIPT" &&
     grep -Fq 'devbox_modules+=("features/${devbox_remote_provider}.sh")' "$NORM_INSTALL" &&
     grep -Fq 'for devbox_remote_provider in $DEVBOX_REMOTE_PROVIDERS; do' "$INSTALL_SCRIPT" &&
     grep -Fq 'fetch_devbox_module "$devbox_module" "$devbox_module_tmp"' "$INSTALL_SCRIPT" &&
@@ -985,6 +988,8 @@ manager_expected = {
     "HAPPY_VERSION": manifest["HAPPY_VERSION"],
     "KISUKE_VERSION": manifest["KISUKE_VERSION"],
     "MULTICA_VERSION": manifest["MULTICA_VERSION"],
+    "OPENCODE_VERSION": manifest["OPENCODE_VERSION"],
+    "OPENCHAMBER_VERSION": manifest["OPENCHAMBER_VERSION"],
 }
 
 for key, value in manager_expected.items():
@@ -1004,6 +1009,8 @@ devbox_version_command_reports_the_manifest() {
     grep -Fq 'Happy:' <<<"$output" &&
     grep -Fq 'Kisuke:' <<<"$output" &&
     grep -Fq 'Multica:' <<<"$output" &&
+    grep -Fq 'OpenCode:' <<<"$output" &&
+    grep -Fq 'OpenChamber:' <<<"$output" &&
     grep -Fq 'version:)' "$MANAGER" &&
     grep -Fq 'show_version' "$NORM_MANAGER"
 }
@@ -1017,7 +1024,7 @@ devbox_version_json_reports_the_manifest() {
   json_output="$("$MANAGER" version --json)"
   expected_devbox_version="$(awk -F': +' '/^DevBox:/ { print $2 }' <<<"$text_output")"
 
-  jq -e '.devbox and .node and .erlang and .elixir and .phoenix and .codex_cli and .claude_code and .happy and .kisuke and .multica' \
+  jq -e '.devbox and .node and .erlang and .elixir and .phoenix and .codex_cli and .claude_code and .happy and .kisuke and .multica and .opencode and .openchamber' \
     <<<"$json_output" >/dev/null &&
     [[ "$(jq -r '.devbox' <<<"$json_output")" == "$expected_devbox_version" ]] &&
     grep -Fq 'version:--json)' "$MANAGER" &&
@@ -1959,7 +1966,7 @@ redis_validation_and_doctor_are_feature_aware() {
 # pattern install.sh already used for DEVBOX_ALL_OPTIONAL_FEATURES.
 devbox_remote_defaults_to_happy_and_validates_input() {
   grep -Fq 'DEVBOX_REMOTE="${DEVBOX_REMOTE:-happy}"' "$INSTALL_SCRIPT" &&
-    grep -Fq 'readonly DEVBOX_REMOTE_PROVIDERS="happy kisuke multica"' "$INSTALL_SCRIPT" &&
+    grep -Fq 'readonly DEVBOX_REMOTE_PROVIDERS="happy kisuke multica openchamber"' "$INSTALL_SCRIPT" &&
     grep -Fq '" $DEVBOX_REMOTE_PROVIDERS " != *" $DEVBOX_REMOTE "*' "$NORM_INSTALL" &&
     grep -Fq 'Invalid DEVBOX_REMOTE' "$INSTALL_SCRIPT"
 }
@@ -2001,6 +2008,75 @@ install_gates_kisuke_installation_on_remote_provider() {
     grep -Fq 'remote_install_kisuke() {' "$FEATURE_KISUKE" &&
     grep -Fq 'install_kisuke' "$NORM_FEATURE_KISUKE" &&
     grep -Fq 'enable_kisuke_user_linger' "$NORM_FEATURE_KISUKE"
+}
+
+install_gates_openchamber_installation_on_remote_provider() {
+  grep -Fq 'if [[ "$DEVBOX_REMOTE" != "none" ]]; then' "$NORM_INSTALL" &&
+    grep -Fq '"remote_install_${DEVBOX_REMOTE}"' "$INSTALL_SCRIPT" &&
+    grep -Fq 'remote_install_openchamber() {' "$FEATURE_OPENCHAMBER" &&
+    grep -Fq 'remote_bashrc_openchamber() {' "$FEATURE_OPENCHAMBER" &&
+    grep -Fq 'remote_validate_openchamber() {' "$FEATURE_OPENCHAMBER" &&
+    grep -Fq 'remote_banner_openchamber() {' "$FEATURE_OPENCHAMBER" &&
+    grep -Fq 'install_openchamber' "$NORM_FEATURE_OPENCHAMBER" &&
+    grep -Fq 'configure_openchamber_credentials' "$NORM_FEATURE_OPENCHAMBER" &&
+    grep -Fq 'enable_openchamber_user_linger' "$NORM_FEATURE_OPENCHAMBER"
+}
+
+# OpenChamber is a web front end for OpenCode, so both npm packages are
+# pinned to the manifest and installed together.
+#
+# The OpenCode package must be @opencode/cli (OpenCode 2.x), never the old
+# opencode-ai one: opencode-ai stopped at 1.19.x, which OpenChamber 2.5
+# refuses to drive ("requires OpenCode 2.0.20 or newer"), and both packages
+# claim the same `opencode` bin name, so having both fails with EEXIST.
+#
+# Unattended validation may print each binary's version (that is how a
+# skipped postinstall hook is caught) but must never run a subcommand that
+# starts a server or opens an interactive login.
+openchamber_installs_pinned_opencode_and_web_packages() {
+  grep -Fq 'npm install --global "@opencode/cli@${OPENCODE_VERSION}"' "$NORM_FEATURE_OPENCHAMBER" &&
+    grep -Fq 'npm install --global "@openchamber/web@${OPENCHAMBER_VERSION}"' "$NORM_FEATURE_OPENCHAMBER" &&
+    grep -Fq 'run_as_dev npm list --global --depth=0 @openchamber/web' "$NORM_FEATURE_OPENCHAMBER" &&
+    grep -Fq 'run_as_dev npm list --global --depth=0 @opencode/cli' "$NORM_FEATURE_OPENCHAMBER" &&
+    grep -Fq 'run_as_dev openchamber --version' "$NORM_FEATURE_OPENCHAMBER" &&
+    grep -Fq 'run_as_dev opencode --version' "$NORM_FEATURE_OPENCHAMBER" &&
+    ! grep -Eq '^[^#]*\bopencode-ai\b' "$NORM_FEATURE_OPENCHAMBER" &&
+    ! grep -Eq '^[^#]*\bopencode-ai\b' "$NORM_MANAGER" &&
+    ! grep -Eq '^[^#]*\b(openchamber|opencode)[[:space:]]+(serve|startup|auth)\b' "$NORM_FEATURE_OPENCHAMBER"
+}
+
+# OpenChamber has no account login - the UI password is the only thing
+# guarding a tunnelled/proxied port, so the installer always generates one,
+# stores it 0600 under the dev state directory, binds the server to
+# loopback by default, and refuses a tampered persisted value.
+openchamber_ui_password_is_generated_and_protected() {
+  grep -Fq 'OPENCHAMBER_ENV_FILE="${DEV_HOME}/.config/devbox/openchamber.env"' "$FEATURE_OPENCHAMBER" &&
+    grep -Fq 'OPENCHAMBER_BIND_HOST="${DEVBOX_OPENCHAMBER_HOST:-127.0.0.1}"' "$FEATURE_OPENCHAMBER" &&
+    grep -Fq 'OPENCHAMBER_BIND_PORT="${DEVBOX_OPENCHAMBER_PORT:-3000}"' "$FEATURE_OPENCHAMBER" &&
+    grep -Fq 'openssl rand -hex 24' "$FEATURE_OPENCHAMBER" &&
+    grep -Fq '[[ ! "$ui_password" =~ ^[0-9a-f]{48}$ ]]' "$FEATURE_OPENCHAMBER" &&
+    grep -Fq 'write_root_owned_file "$OPENCHAMBER_ENV_FILE" 0600' "$NORM_FEATURE_OPENCHAMBER" &&
+    grep -Fq 'DEVBOX_OPENCHAMBER_UI_PASSWORD must be at least 12 characters' "$FEATURE_OPENCHAMBER" &&
+    grep -Fq '"${DEV_HOME}/.config/openchamber"' "$LIB_USER"
+}
+
+# OpenChamber's boot-time service is its own systemd --user unit, written by
+# `openchamber startup enable` during `devbox auth login`. DevBox only
+# enables the lingering session that unit needs, and the manager hands the
+# stored password/host/port to that command.
+openchamber_boot_service_is_enabled_through_its_own_cli() {
+  grep -Fq 'loginctl enable-linger "$DEV_USER"' "$FEATURE_OPENCHAMBER" &&
+    grep -Fq '/run/user/${dev_uid}/bus' "$FEATURE_OPENCHAMBER" &&
+    grep -Fq 'loginctl show-user "$DEV_USER" --property=Linger --value' "$NORM_FEATURE_OPENCHAMBER" &&
+    grep -Fq 'openchamber startup enable --host "$(openchamber_bind_host)" --port "$(openchamber_bind_port)" --ui-password "$ui_password"' "$NORM_MANAGER" &&
+    grep -Fq 'opencode auth login' "$MANAGER" &&
+    grep -Fq 'opencode auth list --format json' "$NORM_MANAGER" &&
+    grep -Fq 'openchamber startup disable' "$MANAGER" &&
+    grep -Fq 'openchamber_auth_status() {' "$MANAGER" &&
+    grep -Fq 'openchamber_auth_login() {' "$MANAGER" &&
+    grep -Fq 'openchamber_auth_logout() {' "$MANAGER" &&
+    grep -Fq 'openchamber_remote_info() {' "$MANAGER" &&
+    grep -Fq 'elif [[ "$remote_provider" == "openchamber" ]]; then' "$NORM_MANAGER"
 }
 
 # No REMOTE_PROVIDER_FILE means the box predates #43, when Happy was
@@ -2705,6 +2781,7 @@ normalize_continuations "$FEATURE_BASE" >"$NORM_FEATURE_BASE"
 normalize_continuations "$FEATURE_POSTGRES" >"$NORM_FEATURE_POSTGRES"
 normalize_continuations "$FEATURE_HAPPY" >"$NORM_FEATURE_HAPPY"
 normalize_continuations "$FEATURE_KISUKE" >"$NORM_FEATURE_KISUKE"
+normalize_continuations "$FEATURE_OPENCHAMBER" >"$NORM_FEATURE_OPENCHAMBER"
 normalize_continuations "$FEATURE_AGENT_NOTIFY" >"$NORM_FEATURE_AGENT_NOTIFY"
 normalize_continuations "$FEATURE_TOOLING" >"$NORM_FEATURE_TOOLING"
 normalize_continuations "$FEATURE_ELIXIR" >"$NORM_FEATURE_ELIXIR"
@@ -2792,6 +2869,10 @@ run_test "redis is a separate optional feature, disabled by default" redis_is_a_
 run_test "redis validation and doctor are feature-aware" redis_validation_and_doctor_are_feature_aware
 run_test "DEVBOX_REMOTE defaults to happy and validates input" devbox_remote_defaults_to_happy_and_validates_input
 run_test "interactive Multica setup can collect reverse-proxy configuration" interactive_multica_setup_can_collect_reverse_proxy_configuration
+run_test "install gates OpenChamber installation on the remote provider" install_gates_openchamber_installation_on_remote_provider
+run_test "OpenChamber installs pinned OpenCode and web packages" openchamber_installs_pinned_opencode_and_web_packages
+run_test "OpenChamber UI password is generated and protected" openchamber_ui_password_is_generated_and_protected
+run_test "OpenChamber boot service is enabled through its own CLI" openchamber_boot_service_is_enabled_through_its_own_cli
 run_test "install gates Happy installation on remote provider" install_gates_happy_installation_on_remote_provider
 run_test "install gates Kisuke installation on remote provider" install_gates_kisuke_installation_on_remote_provider
 run_test "remote provider is persisted and migrated as happy" remote_provider_is_persisted_and_migrated_as_happy

@@ -227,6 +227,8 @@ CLAUDE_VERSION="${CLAUDE_VERSION:-2.1.233}"
 HAPPY_VERSION="${HAPPY_VERSION:-1.2.0}"
 KISUKE_VERSION="${KISUKE_VERSION:-1.2.20}"
 MULTICA_VERSION="${MULTICA_VERSION:-0.4.32}"
+OPENCODE_VERSION="${OPENCODE_VERSION:-2.1.2}"
+OPENCHAMBER_VERSION="${OPENCHAMBER_VERSION:-2.5.0}"
 
 # Single source of truth for which remote/session providers exist. Each name
 # here must have a devbox/features/<name>.sh module that defines the four
@@ -235,7 +237,7 @@ MULTICA_VERSION="${MULTICA_VERSION:-0.4.32}"
 # devbox/README.md, "Neuen Remote-Provider hinzufügen"). "none" is always a
 # valid DEVBOX_REMOTE value but deliberately not listed here - it has no
 # module and no hooks to call.
-readonly DEVBOX_REMOTE_PROVIDERS="happy kisuke multica"
+readonly DEVBOX_REMOTE_PROVIDERS="happy kisuke multica openchamber"
 DEVBOX_REMOTE_INTERACTIVE_SELECTION=0
 
 DEVBOX_REPO_URL="${DEVBOX_REPO_URL:-https://raw.githubusercontent.com/c4kingpin/Scripts}"
@@ -460,7 +462,8 @@ Which remote/session provider should this DevBox use?
   1) Happy  - happy / happy claude / happy codex remote session layer (recommended)
   2) Kisuke - Kisuke Connect (kisuke.dev), phone/tablet terminal+editor+chat
   3) Multica - self-hostable agent workspace and daemon (multica.ai)
-  4) None   - host console/SSH only, no remote provider
+  4) OpenChamber - self-hosted OpenCode web/PWA workspace (openchamber.dev)
+  5) None   - host console/SSH only, no remote provider
 
 EOF
 
@@ -473,7 +476,8 @@ EOF
   case "${choice:-1}" in
     2) DEVBOX_REMOTE="kisuke" ;;
     3) DEVBOX_REMOTE="multica" ;;
-    4) DEVBOX_REMOTE="none" ;;
+    4) DEVBOX_REMOTE="openchamber" ;;
+    5) DEVBOX_REMOTE="none" ;;
     *) DEVBOX_REMOTE="happy" ;;
   esac
 
