@@ -103,6 +103,7 @@ readonly MULTICA_VERSION="0.4.32"
 readonly OPENCODE_VERSION="2.1.2"
 readonly OPENCHAMBER_VERSION="2.5.0"
 readonly CLOUDCLI_VERSION="1.37.5"
+readonly PLAYWRIGHT_VERSION="1.64.1"
 readonly CODE_SERVER_VERSION="4.141.0"
 
 readonly PACKAGE_NAME_PATTERN='^[a-z0-9][a-z0-9+.-]*$'
@@ -666,6 +667,7 @@ Multica:       ${MULTICA_VERSION}
 OpenCode:      ${OPENCODE_VERSION}
 OpenChamber:   ${OPENCHAMBER_VERSION}
 CloudCLI:      ${CLOUDCLI_VERSION}
+Playwright:    ${PLAYWRIGHT_VERSION}
 code-server:   ${CODE_SERVER_VERSION}
 EOF
 }
@@ -687,6 +689,7 @@ show_version_json() {
     --arg opencode "$OPENCODE_VERSION" \
     --arg openchamber "$OPENCHAMBER_VERSION" \
     --arg cloudcli "$CLOUDCLI_VERSION" \
+    --arg playwright "$PLAYWRIGHT_VERSION" \
     --arg code_server "$CODE_SERVER_VERSION" \
     '{
       devbox: $devbox,
@@ -703,6 +706,7 @@ show_version_json() {
       opencode: $opencode,
       openchamber: $openchamber,
       cloudcli: $cloudcli,
+      playwright: $playwright,
       code_server: $code_server
     }'
 }
@@ -1455,8 +1459,12 @@ cloudcli_auth_login() {
   if ! cloudcli_server_is_running; then
     info "Starting the CloudCLI service"
 
+    # dev has no generic sudo on a DevBox (only `devbox ssh setup/disable`
+    # and `devbox packages install`), so this almost always falls through
+    # to the hint - which must therefore name a command dev can actually
+    # act on: run it as root, not via sudo.
     sudo -n systemctl start "$CLOUDCLI_SERVICE" 2>/dev/null ||
-      warn "CloudCLI could not be started; run: sudo systemctl start ${CLOUDCLI_SERVICE}"
+      warn "CloudCLI could not be started; as root, run: systemctl start ${CLOUDCLI_SERVICE}"
   fi
 
   if cloudcli_is_authenticated; then
@@ -1521,13 +1529,19 @@ agents_auth_login() {
   local remote_provider
   remote_provider="$(configured_remote_provider)"
 
+  # A failed or abandoned agent login must not abort the whole chain: the
+  # remote provider is configured at the end of this function, and on a
+  # CloudCLI or OpenChamber box it is the part the operator actually came
+  # for. Before this, pressing Ctrl-C at the Codex prompt left the provider
+  # unconfigured with no hint that anything had been skipped.
   if codex_is_authenticated; then
     ok "Codex CLI is already authenticated"
   else
     info "Signing in to Codex using the device-code flow"
 
     codex login \
-      --device-auth
+      --device-auth \
+      || warn "Codex sign-in did not complete; rerun: devbox auth login"
 
     if [[ -f "${HOME}/.codex/auth.json" ]]; then
       chmod \
@@ -1541,7 +1555,8 @@ agents_auth_login() {
   else
     info "Signing in to Claude"
 
-    claude auth login
+    claude auth login \
+      || warn "Claude sign-in did not complete; rerun: devbox auth login"
 
     if [[ -f "${HOME}/.claude/.credentials.json" ]]; then
       chmod \
@@ -3065,6 +3080,20 @@ doctor() {
       ok "CloudCLI account is configured"
     else
       warn "CloudCLI has no account yet; open $(cloudcli_url) and sign up"
+    fi
+
+    # Informational: Browser Use is an optional CloudCLI feature, and the
+    # installer can be told to skip its ~500 MB runtime
+    # (DEVBOX_CLOUDCLI_BROWSER=0). Everything else works without it.
+    # shellcheck disable=SC2016 # single-quoted on purpose: expands inside the nested `bash -lc` shell, not here
+    if run_as_dev \
+      bash \
+      -lc \
+      'compgen -G "$HOME/.cache/ms-playwright/chromium-*" >/dev/null'; then
+
+      ok "CloudCLI browser runtime"
+    else
+      warn "CloudCLI browser runtime is not installed; Browser Use stays unavailable"
     fi
   fi
 

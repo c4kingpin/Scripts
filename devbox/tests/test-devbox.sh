@@ -996,6 +996,7 @@ manager_expected = {
     "KISUKE_VERSION": manifest["KISUKE_VERSION"],
     "MULTICA_VERSION": manifest["MULTICA_VERSION"],
     "CLOUDCLI_VERSION": manifest["CLOUDCLI_VERSION"],
+    "PLAYWRIGHT_VERSION": manifest["PLAYWRIGHT_VERSION"],
     "CODE_SERVER_VERSION": manifest["CODE_SERVER_VERSION"],
     "OPENCODE_VERSION": manifest["OPENCODE_VERSION"],
     "OPENCHAMBER_VERSION": manifest["OPENCHAMBER_VERSION"],
@@ -1021,6 +1022,7 @@ devbox_version_command_reports_the_manifest() {
     grep -Fq 'OpenCode:' <<<"$output" &&
     grep -Fq 'OpenChamber:' <<<"$output" &&
     grep -Fq 'CloudCLI:' <<<"$output" &&
+    grep -Fq 'Playwright:' <<<"$output" &&
     grep -Fq 'code-server:' <<<"$output" &&
     grep -Fq 'version:)' "$MANAGER" &&
     grep -Fq 'show_version' "$NORM_MANAGER"
@@ -1035,7 +1037,7 @@ devbox_version_json_reports_the_manifest() {
   json_output="$("$MANAGER" version --json)"
   expected_devbox_version="$(awk -F': +' '/^DevBox:/ { print $2 }' <<<"$text_output")"
 
-  jq -e '.devbox and .node and .erlang and .elixir and .phoenix and .codex_cli and .claude_code and .happy and .kisuke and .multica and .opencode and .openchamber and .cloudcli and .code_server' \
+  jq -e '.devbox and .node and .erlang and .elixir and .phoenix and .codex_cli and .claude_code and .happy and .kisuke and .multica and .opencode and .openchamber and .cloudcli and .code_server and .playwright' \
     <<<"$json_output" >/dev/null &&
     [[ "$(jq -r '.devbox' <<<"$json_output")" == "$expected_devbox_version" ]] &&
     grep -Fq 'version:--json)' "$MANAGER" &&
@@ -2226,6 +2228,36 @@ bind_addresses_survive_a_reinstall() {
     ! grep -Fq 'CLOUDCLI_URL="http' "$MANAGER"
 }
 
+# CloudCLI's own Browser Use installer cannot work on a DevBox: it runs
+# `playwright install-deps chromium` (apt, root-only) from a service that
+# runs as dev, and dev has no generic sudo here. The installer does both
+# halves instead, each as the user that can perform it, and the whole thing
+# is skippable because the runtime is ~500 MB.
+cloudcli_browser_runtime_is_installed_by_the_installer() {
+  grep -Fq 'install_cloudcli_browser_runtime() {' "$FEATURE_CLOUDCLI" &&
+    grep -Fq 'install_cloudcli_browser_runtime' "$NORM_FEATURE_CLOUDCLI" &&
+    grep -Fq 'npm install --global "playwright@${PLAYWRIGHT_VERSION}"' "$NORM_FEATURE_CLOUDCLI" &&
+    grep -Fq 'silent playwright install-deps chromium' "$NORM_FEATURE_CLOUDCLI" &&
+    grep -Fq 'run_as_dev playwright install chromium' "$NORM_FEATURE_CLOUDCLI" &&
+    grep -Fq 'DEVBOX_CLOUDCLI_BROWSER:-1' "$FEATURE_CLOUDCLI" &&
+    grep -Fq 'ms-playwright/chromium-' "$MANAGER"
+}
+
+# A failed or abandoned Codex/Claude sign-in must not abort devbox auth
+# login before it reaches the remote provider - on a CloudCLI or
+# OpenChamber box that is the part the operator came for. Both calls run
+# under set -e, so each needs its own non-fatal guard.
+agent_sign_in_failures_do_not_abort_the_provider_setup() {
+  local login_fn
+  login_fn="$(sed -n '/^agents_auth_login() {/,/^}/p' "$NORM_MANAGER")"
+
+  [[ -n "$login_fn" ]] || return 1
+
+  grep -Fq 'codex login --device-auth || warn' <<<"$login_fn" &&
+    grep -Fq 'claude auth login || warn' <<<"$login_fn" &&
+    grep -Fq '"${remote_provider}_auth_login"' <<<"$login_fn"
+}
+
 # No REMOTE_PROVIDER_FILE means the box predates #43, when Happy was
 # unconditionally installed - migrating it as "happy" (not "unknown" or
 # erroring) is the whole backward-compatibility point.
@@ -3065,6 +3097,8 @@ run_test "CloudCLI runs as a DevBox-owned loopback service" cloudcli_runs_as_a_d
 run_test "code-server is an optional, checksum-verified feature" code_server_is_an_optional_checksum_verified_feature
 run_test "feature selection survives a reinstall" feature_selection_survives_a_reinstall
 run_test "bind addresses survive a reinstall" bind_addresses_survive_a_reinstall
+run_test "CloudCLI browser runtime is installed by the installer" cloudcli_browser_runtime_is_installed_by_the_installer
+run_test "agent sign-in failures do not abort provider setup" agent_sign_in_failures_do_not_abort_the_provider_setup
 run_test "OpenChamber installs pinned OpenCode and web packages" openchamber_installs_pinned_opencode_and_web_packages
 run_test "OpenChamber UI password is generated and protected" openchamber_ui_password_is_generated_and_protected
 run_test "OpenChamber boot service is enabled through its own CLI" openchamber_boot_service_is_enabled_through_its_own_cli

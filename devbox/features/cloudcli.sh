@@ -151,12 +151,54 @@ EOF
   msg_ok "Configured CloudCLI service"
 }
 
+# CloudCLI's "Browser Use" feature drives a Playwright-managed Chromium. Its
+# own in-app installer cannot work on a DevBox: it runs
+# `playwright install-deps chromium`, which shells out to apt and therefore
+# needs root, while the CloudCLI service runs as dev - and dev deliberately
+# has no generic sudo here. It also installs Playwright into the service's
+# working directory, which is not on the resolution path of
+# `require('playwright')` from CloudCLI's own global install.
+#
+# Both halves are done here instead, each as the user that can actually do
+# it: the npm package and the apt dependencies as root, the ~170 MB browser
+# itself as dev, so it lands in the cache the service reads
+# (~/.cache/ms-playwright).
+#
+# Set DEVBOX_CLOUDCLI_BROWSER=0 to skip it; the rest of CloudCLI works
+# without a browser runtime, only "Browser Use" stays unavailable.
+install_cloudcli_browser_runtime() {
+  if [[ "${DEVBOX_CLOUDCLI_BROWSER:-1}" == "0" ]]; then
+    msg_ok "Skipping the CloudCLI browser runtime (DEVBOX_CLOUDCLI_BROWSER=0)"
+    return 0
+  fi
+
+  msg_info "Installing the CloudCLI browser runtime (Playwright ${PLAYWRIGHT_VERSION} + Chromium)"
+
+  silent npm install \
+    --global \
+    "playwright@${PLAYWRIGHT_VERSION}"
+
+  # apt dependencies for Chromium; root-only, which is exactly the step
+  # CloudCLI's own in-app installer cannot perform.
+  silent playwright install-deps chromium
+
+  # The browser binary belongs to the user the service runs as, or
+  # executablePath() probes the wrong cache.
+  if ! run_as_dev playwright install chromium >>"$LOG_FILE" 2>&1; then
+    msg_error "Chromium could not be installed for ${DEV_USER}; CloudCLI's Browser Use will stay unavailable."
+    return 0
+  fi
+
+  msg_ok "Installed the CloudCLI browser runtime"
+}
+
 # Remote-provider hook (DEVBOX_REMOTE=cloudcli), called generically by
 # install.sh - see devbox/README.md, "Neuen Remote-Provider hinzufügen".
 # CloudCLI has no Happy-style push-notification integration, so
 # install_agent_limit_notify is deliberately not called here.
 remote_install_cloudcli() {
   install_cloudcli
+  install_cloudcli_browser_runtime
   install_cloudcli_service
 }
 

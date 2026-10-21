@@ -47,6 +47,25 @@ Netzwerk, Template und Ressourcen des Containers müssen vor dem Aufruf bereits
 | Agenten-Autonomie | ausgewogen |
 | Remote-Provider | `happy` |
 
+### Zusätzliche OS-Pakete
+
+`dev` hat kein generisches sudo — kein `apt-get`, kein `dpkg`. Für Pakete,
+die ein Projekt braucht, gibt es einen eng gefassten Weg, der ohne Passwort
+funktioniert:
+
+```bash
+sudo devbox packages install build-essential cmake libpq-dev
+```
+
+Der Paketname wird gegen `^[a-z0-9][a-z0-9+.-]*$` geprüft, bevor `apt-get`
+ihn zu sehen bekommt. Alles andere — Dienste neu starten, Units bearbeiten,
+beliebige Pakete entfernen — bleibt root vorbehalten.
+
+Das `dev`-Konto hat übrigens **kein bekanntes Passwort**: der Installer setzt
+ein Zufallspasswort und verwirft es sofort wieder. Ein `sudo` außerhalb der
+drei erlaubten Befehle fragt deshalb nach einem Passwort, das niemand hat —
+in dem Fall gehört der Befehl als root ausgeführt.
+
 Rein lesende Hilfsbefehle für den Workspace (kein Branch-Wechsel, keine
 Commits, kein Löschen, kein automatisches Anlegen von `.env`):
 
@@ -703,6 +722,31 @@ weiteren Lauf des Installers zurückgelesen — ein `devbox update` zieht eine
 bewusst geöffnete Box also **nicht** wieder auf Loopback zurück. Der Port
 lässt sich mit `DEVBOX_CLOUDCLI_PORT` ändern.
 
+#### Browser Use
+
+CloudCLIs „Browser Use" steuert ein von Playwright verwaltetes Chromium. Sein
+eingebauter Installer funktioniert auf einer DevBox **nicht**: er ruft
+`playwright install-deps chromium` auf, das per `apt` Systembibliotheken
+nachzieht und damit root braucht — der CloudCLI-Dienst läuft aber als `dev`,
+und `dev` hat hier bewusst kein generisches sudo. Der Versuch endet mit
+`Failed to install browser runtime`.
+
+Der Installer erledigt deshalb beide Hälften selbst, jeweils als der
+Benutzer, der sie überhaupt ausführen kann: npm-Paket und apt-Abhängigkeiten
+als root, das ~170 MB große Chromium als `dev`, damit es in dem Cache landet,
+den der Dienst ausliest (`~/.cache/ms-playwright`).
+
+Das kostet insgesamt rund 500 MB. Wer darauf verzichten will:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/c4kingpin/Scripts/master/devbox/install.sh |
+  env DEVBOX_REMOTE=cloudcli DEVBOX_CLOUDCLI_BROWSER=0 bash
+```
+
+Der Rest von CloudCLI funktioniert ohne Browser-Runtime; nur „Browser Use"
+bleibt dann nicht verfügbar. `devbox doctor` meldet den Zustand, behandelt
+ihn aber als Hinweis, nicht als Fehler.
+
 #### Anmeldung
 
 CloudCLI ist ein **Single-User-System**: Beim ersten Aufruf der Oberfläche
@@ -1189,7 +1233,7 @@ Root-State zur laufenden Manager-Version passt.
 Alle aktiv verwalteten Tool-Versionen sind zentral in
 [`versions.env`](versions.env) definiert (DevBox selbst, Node.js,
 Erlang/OTP, Elixir, Phoenix, Codex CLI, Claude Code, Happy, Kisuke, Multica,
-OpenCode, OpenChamber, CloudCLI, code-server).
+OpenCode, OpenChamber, CloudCLI, Playwright, code-server).
 `install.sh`
 bleibt ein einzelnes, per `curl | bash` ausführbares Skript und trägt dieselben
 Werte als eingebettete Defaults; ein Regressionstest stellt sicher, dass beide
