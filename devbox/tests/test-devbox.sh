@@ -103,7 +103,8 @@ scripts_have_valid_syntax() {
     "$FEATURE_OPENCHAMBER" \
     "$FEATURE_AGENT_NOTIFY" \
     "$FEATURE_TOOLING" \
-    "$FEATURE_ELIXIR"
+    "$FEATURE_ELIXIR" \
+    "$LXC_INTEGRATION_TEST"
 }
 
 standalone_no_proxmox_framework() {
@@ -2855,7 +2856,29 @@ run_test "ssh commands use symlink-safe writes" ssh_commands_use_symlink_safe_wr
 run_test "postgres/elixir writes use the symlink-safe helper" postgres_and_elixir_writes_use_symlink_safe_helper
 run_test "legacy previous-update state never executes file contents" migrate_legacy_previous_update_state_never_executes_file_contents
 run_test "update and rollback round trip restores the active ref" update_and_rollback_round_trip_restores_the_active_ref
+# The runtime compatibility between the two pinned OpenChamber packages is
+# invisible to every static check here: OpenChamber only refuses an
+# OpenCode older than 2.0.20 once its server starts, and `npm list` is
+# happy either way. Phase 2 of the LXC test is the only thing that catches
+# it, so make sure it keeps doing all of that - starting the real server
+# through OpenChamber's own systemd --user unit, confirming the managed
+# OpenCode came up, and surviving a reboot on the lingering session.
+lxc_integration_test_covers_the_openchamber_provider() {
+  grep -Fq 'DEVBOX_E2E_REMOTE="openchamber"' "$LXC_INTEGRATION_TEST" &&
+    grep -Fq 'export DEVBOX_REMOTE=' "$LXC_INTEGRATION_TEST" &&
+    grep -Fq 'npm list --global --depth=0 @opencode/cli' "$LXC_INTEGRATION_TEST" &&
+    grep -Fq 'npm list --global --depth=0 @openchamber/web' "$LXC_INTEGRATION_TEST" &&
+    grep -Fq 'opencode-ai is installed' "$LXC_INTEGRATION_TEST" &&
+    grep -Fq 'openchamber startup enable' "$LXC_INTEGRATION_TEST" &&
+    grep -Fq '.isOpenCodeReady == true' "$LXC_INTEGRATION_TEST" &&
+    grep -Fq 'XDG_RUNTIME_DIR="/run/user/$1"' "$LXC_INTEGRATION_TEST" &&
+    grep -Fq 'loginctl show-user dev --property=Linger --value' "$LXC_INTEGRATION_TEST" &&
+    grep -Fq 'The OpenChamber UI password changed across a re-install' "$LXC_INTEGRATION_TEST" &&
+    grep -Fq 'lxc restart "$CONTAINER"' "$LXC_INTEGRATION_TEST"
+}
+
 run_test "LXC integration test exercises the curl | bash path" lxc_integration_test_exercises_the_curl_pipe_path
+run_test "LXC integration test covers the OpenChamber provider" lxc_integration_test_covers_the_openchamber_provider
 run_test "install pins module fetches to a resolved commit" install_pins_module_fetches_to_a_resolved_commit
 run_test "install falls back to the ref when resolution fails" install_falls_back_to_the_ref_when_resolution_fails
 run_test "temp artifact downloads use unpredictable paths" temp_artifact_downloads_use_unpredictable_paths

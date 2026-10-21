@@ -1117,12 +1117,33 @@ realistisch simulieren lassen:
 sudo bash tests/lxc-integration-test.sh
 ```
 
-Installiert DevBox in einem frischen `ubuntu:24.04`-LXD-Container, prüft
-`devbox doctor`, die Agenten-CLIs, die PostgreSQL-Verbindung und ein echtes
-`mix phx.new`, führt den Installer ein zweites Mal aus und vergleicht
-danach Version, Feature-Auswahl, PostgreSQL-Passwort und eine vorhandene
-`~/.codex/config.toml` — der wichtigste Einzeltest ist Idempotenz: ein
-zweiter Lauf darf nichts verändern, was bereits korrekt eingerichtet ist.
+Der Test läuft in zwei Phasen, jede in einem eigenen Wegwerf-Container.
+
+**Phase 1 (`DEVBOX_REMOTE=happy`, Standardprofil)** installiert DevBox in
+einem frischen `ubuntu:24.04`-LXD-Container, prüft `devbox doctor`, die
+Agenten-CLIs, den Happy-Boot-Dienst über einen Reboot hinweg, die
+PostgreSQL-Verbindung und ein echtes `mix phx.new`, führt den Installer ein
+zweites Mal aus und vergleicht danach Version, Feature-Auswahl,
+PostgreSQL-Passwort und eine vorhandene `~/.codex/config.toml` — der
+wichtigste Einzeltest ist Idempotenz: ein zweiter Lauf darf nichts
+verändern, was bereits korrekt eingerichtet ist.
+
+**Phase 2 (`DEVBOX_REMOTE=openchamber`, `minimal`-Profil)** deckt die eine
+Fehlerklasse ab, die die statischen Tests prinzipiell nicht sehen können:
+ob die beiden gepinnten npm-Pakete zur Laufzeit *zusammen* funktionieren.
+OpenChamber verweigert die Arbeit mit einem OpenCode älter als 2.0.20 und
+sagt das erst beim Start seines Servers — für `npm list` und jede
+grep-basierte Prüfung sieht ein falscher Pin völlig gesund aus. Die Phase
+startet deshalb den echten Server über OpenChambers eigene
+systemd-`--user`-Unit und liest dessen `/health`-Endpunkt aus, der meldet,
+ob der verwaltete OpenCode hochgekommen ist. Zusätzlich geprüft: beide
+Binaries laufen wirklich (fängt einen übersprungenen `postinstall`-Hook),
+das abgelöste `opencode-ai` ist *nicht* installiert, das UI-Passwort
+existiert mit Modus `0600` und überlebt eine Neuinstallation, die
+lingernde User-Session ist aktiv, und OpenChamber kommt nach einem Reboot
+ohne interaktives Login von selbst wieder hoch. Elixir und PostgreSQL
+bleiben hier außen vor — die deckt Phase 1 bereits ab.
+
 Braucht ein funktionierendes LXD auf dem ausführenden Host (`lxc launch`
 muss funktionieren) und Root. Läuft nicht bei jedem Push/PR mit (dauert
 durch echte Downloads/Installationen deutlich länger), sondern über
