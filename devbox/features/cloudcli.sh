@@ -27,12 +27,45 @@ set -Eeuo pipefail
 CLOUDCLI_SERVICE="devbox-cloudcli.service"
 CLOUDCLI_SERVICE_UNIT="/etc/systemd/system/${CLOUDCLI_SERVICE}"
 
-# Loopback only, like Multica's and OpenChamber's web UIs: reachable over an
-# SSH tunnel or a reverse proxy, never published onto the container network
-# by the installer. 3001 is CloudCLI's own default and deliberately clear of
-# Multica (3000/8080) and OpenChamber (3000).
-CLOUDCLI_BIND_HOST="${DEVBOX_CLOUDCLI_HOST:-127.0.0.1}"
-CLOUDCLI_BIND_PORT="${DEVBOX_CLOUDCLI_PORT:-3001}"
+# Where this box's chosen bind address lives. devbox update re-runs the
+# installer without DEVBOX_CLOUDCLI_HOST/PORT, so without persisting them an
+# update would silently rewrite the unit back to loopback and cut off a box
+# that had deliberately been opened to the LAN. Root-owned, dev-readable,
+# the same treatment the remote-provider selection gets.
+CLOUDCLI_CONFIG_FILE="${ROOT_STATE_DIR}/cloudcli.env"
+
+# Resolution order: explicit environment variable, then this box's persisted
+# choice, then the default.
+devbox_cloudcli_persisted() {
+  local key="$1"
+
+  [[ -r "$CLOUDCLI_CONFIG_FILE" ]] || return 1
+
+  awk \
+    -F= \
+    -v key="$key" \
+    '$1 == key { print substr($0, index($0, "=") + 1) }' \
+    "$CLOUDCLI_CONFIG_FILE" \
+    | grep .
+}
+
+# Loopback by default, like Multica's and OpenChamber's web UIs: CloudCLI is
+# shell access as the dev user over plain HTTP, so publishing it onto the
+# container network is an explicit decision, not something the installer
+# does on its own. 3001 is CloudCLI's own default port and deliberately
+# clear of Multica (3000/8080) and OpenChamber (3000).
+CLOUDCLI_BIND_HOST="${DEVBOX_CLOUDCLI_HOST:-$(devbox_cloudcli_persisted CLOUDCLI_HOST || printf '127.0.0.1')}"
+CLOUDCLI_BIND_PORT="${DEVBOX_CLOUDCLI_PORT:-$(devbox_cloudcli_persisted CLOUDCLI_PORT || printf '3001')}"
+
+[[ "$CLOUDCLI_BIND_PORT" =~ ^[0-9]{1,5}$ ]] || {
+  msg_error "Invalid CloudCLI port: ${CLOUDCLI_BIND_PORT}"
+  exit 1
+}
+
+[[ "$CLOUDCLI_BIND_HOST" =~ ^[0-9a-zA-Z.:_-]+$ ]] || {
+  msg_error "Invalid CloudCLI bind address: ${CLOUDCLI_BIND_HOST}"
+  exit 1
+}
 
 install_cloudcli() {
   msg_info "Installing CloudCLI ${CLOUDCLI_VERSION}"
@@ -62,6 +95,15 @@ install_cloudcli() {
 # unit with Restart=on-failure, not a guard-script wrapper.
 install_cloudcli_service() {
   msg_info "Configuring CloudCLI service"
+
+  # Recorded before the unit is written, so the next devbox update finds it.
+  cat <<EOF >"$CLOUDCLI_CONFIG_FILE"
+# Managed by the DevBox installer; read back on every re-run.
+CLOUDCLI_HOST=${CLOUDCLI_BIND_HOST}
+CLOUDCLI_PORT=${CLOUDCLI_BIND_PORT}
+EOF
+
+  chmod 0644 "$CLOUDCLI_CONFIG_FILE"
 
   cat <<EOF >"$CLOUDCLI_SERVICE_UNIT"
 [Unit]
@@ -143,10 +185,21 @@ remote_validate_cloudcli() {
 
 # Remote-provider hook: final "how to use it" banner lines.
 remote_banner_cloudcli() {
-  echo -e "${YW}CloudCLI serves its web UI on ${CLOUDCLI_BIND_HOST}:${CLOUDCLI_BIND_PORT}. Open it through an${CL}"
-  echo -e "${YW}SSH tunnel and create the single account on first visit:${CL}"
-  echo
-  echo "  ssh -L ${CLOUDCLI_BIND_PORT}:127.0.0.1:${CLOUDCLI_BIND_PORT} dev@<devbox-host>"
+  echo -e "${YW}CloudCLI serves its web UI on ${CLOUDCLI_BIND_HOST}:${CLOUDCLI_BIND_PORT}.${CL}"
+
+  if [[ "$CLOUDCLI_BIND_HOST" == "127.0.0.1" || "$CLOUDCLI_BIND_HOST" == "localhost" ]]; then
+    echo -e "${YW}Open it through an SSH tunnel and create the single account on first visit:${CL}"
+    echo
+    echo "  ssh -L ${CLOUDCLI_BIND_PORT}:127.0.0.1:${CLOUDCLI_BIND_PORT} dev@<devbox-host>"
+    echo
+    echo -e "${YW}To reach it directly instead, reinstall with DEVBOX_CLOUDCLI_HOST=0.0.0.0${CL}"
+    echo -e "${YW}(plain HTTP - put a TLS reverse proxy in front of it on an untrusted network).${CL}"
+  else
+    echo -e "${YW}It is reachable from the network; create the single account on first visit.${CL}"
+    echo -e "${YW}Traffic is plain HTTP - put a TLS reverse proxy in front of it if the${CL}"
+    echo -e "${YW}network is not trusted.${CL}"
+  fi
+
   echo
   echo -e "${YW}It drives the Codex and Claude CLIs installed here, so sign those in:${CL}"
   echo

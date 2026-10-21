@@ -107,9 +107,16 @@ curl -fsSL https://raw.githubusercontent.com/c4kingpin/Scripts/master/devbox/ins
   env DEVBOX_FEATURES=elixir,postgres,redis bash
 ```
 
-Die getroffene Auswahl landet in
-`~/.config/devbox/features` und wird von `devbox doctor` gelesen, damit dort
-keine falschen Warnungen für bewusst nicht installierte Features auftauchen.
+Die getroffene Auswahl landet in `/var/lib/devbox/installed-features`. Sie
+wird von `devbox doctor` gelesen, damit dort keine falschen Warnungen für
+bewusst nicht installierte Features auftauchen — und bei jedem erneuten Lauf
+des Installers **zurückgelesen**: `devbox update` ruft `install.sh` ohne
+`DEVBOX_FEATURES` auf, würde ohne diese Rückkopplung also auf das
+Standardprofil zurückfallen und jedes abgewählte Feature wieder einbauen
+bzw. jedes zusätzlich gewählte (`redis`, `code-server`) stillschweigend
+entfernen. Ein explizit gesetztes `DEVBOX_PROFILE` oder `DEVBOX_FEATURES`
+hat weiterhin Vorrang; ein inzwischen nicht mehr bekannter Eintrag wird mit
+einer Meldung verworfen, statt das Update abzubrechen.
 
 Erlang/OTP und Elixir werden **ohne Versionsmanager** systemweit unter
 `/opt/devbox` installiert und über einfache Symlinks in `/usr/local/bin`
@@ -671,16 +678,30 @@ die systemd-Unit selbst (wie bei Happy, nicht wie bei Kisuke):
 systemctl status devbox-cloudcli.service
 ```
 
-Der Server lauscht nur auf `127.0.0.1:3001`; Zugriff von außen über einen
-SSH-Tunnel oder einen Reverse Proxy:
+#### Erreichbarkeit
+
+Standardmäßig lauscht der Server nur auf `127.0.0.1:3001`; Zugriff von außen
+dann über einen SSH-Tunnel oder einen Reverse Proxy:
 
 ```bash
 ssh -L 3001:127.0.0.1:3001 dev@<devbox-host>
 # Danach lokal im Browser: http://localhost:3001
 ```
 
-Bind-Adresse und Port lassen sich beim Installieren über
-`DEVBOX_CLOUDCLI_HOST` und `DEVBOX_CLOUDCLI_PORT` vorgeben.
+Das ist eine Voreinstellung, keine Sperre. CloudCLI ist faktisch
+Shell-Zugriff als Benutzer `dev`, und der Verkehr ist unverschlüsseltes
+HTTP — deshalb veröffentlicht der Installer den Port nicht von sich aus.
+Auf einem vertrauenswürdigen Netz direkt erreichbar machen:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/c4kingpin/Scripts/master/devbox/install.sh |
+  env DEVBOX_REMOTE=cloudcli DEVBOX_CLOUDCLI_HOST=0.0.0.0 bash
+```
+
+Die Wahl landet in `/var/lib/devbox/cloudcli.env` und wird bei jedem
+weiteren Lauf des Installers zurückgelesen — ein `devbox update` zieht eine
+bewusst geöffnete Box also **nicht** wieder auf Loopback zurück. Der Port
+lässt sich mit `DEVBOX_CLOUDCLI_PORT` ändern.
 
 #### Anmeldung
 
@@ -761,9 +782,21 @@ systemctl status code-server@dev
 
 Der Standardport ist **8888**, nicht code-servers eigene 8080: Multicas
 Backend belegt bereits `127.0.0.1:8080`, und beide müssen auf einer Box
-nebeneinander laufen können. Überschreibbar mit
-`DEVBOX_CODE_SERVER_PORT`, die Bind-Adresse mit `DEVBOX_CODE_SERVER_HOST`
-(Standard `127.0.0.1`).
+nebeneinander laufen können. Überschreibbar mit `DEVBOX_CODE_SERVER_PORT`,
+die Bind-Adresse mit `DEVBOX_CODE_SERVER_HOST`.
+
+Auch hier ist `127.0.0.1` nur die Voreinstellung — code-server bringt ein
+Terminal mit, ist also ebenfalls Shell-Zugriff als `dev` über
+unverschlüsseltes HTTP. Für direkten Zugriff im vertrauenswürdigen Netz:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/c4kingpin/Scripts/master/devbox/install.sh |
+  env DEVBOX_FEATURES=code-server DEVBOX_CODE_SERVER_HOST=0.0.0.0 bash
+```
+
+Die Wahl landet in `/var/lib/devbox/code-server.env` und überlebt
+`devbox update`; ohne diese Persistenz würde der nächste Lauf die
+`config.yaml` wieder auf Loopback zurückschreiben.
 
 code-server würde sich beim ersten Start selbst ein Zufallspasswort
 schreiben. DevBox erzeugt es stattdessen vorab (`openssl rand -hex 24`), so
@@ -1142,7 +1175,7 @@ DevBox trennt persistenten Zustand nach Zuständigkeit:
 
 | Bereich | Ort | Inhalt |
 | --- | --- | --- |
-| Root-State | `/var/lib/devbox/` | aktive Version (`version`), aktiver/vorheriger Ref (`active-ref`, `previous-ref`), installierter Commit (`commit`), gewählte optionale Features (`installed-features`), konfigurierter Remote-Provider (`remote-provider`), Installationsmetadaten (`install-state.json`) |
+| Root-State | `/var/lib/devbox/` | aktive Version (`version`), aktiver/vorheriger Ref (`active-ref`, `previous-ref`), installierter Commit (`commit`), gewählte optionale Features (`installed-features`), konfigurierter Remote-Provider (`remote-provider`), Bind-Adressen von CloudCLI und code-server (`cloudcli.env`, `code-server.env`), Installationsmetadaten (`install-state.json`) |
 | User-State | `~/.config/devbox/` | Onboarding-Marker, OpenRouter-Konfiguration, OpenChamber-Zugangsdaten (`openchamber.env`), benutzerbezogene Einstellungen |
 | Fremdverwaltete Credentials | `~/.codex`, `~/.claude`, `~/.happy`, `~/.kisuke`, `~/.config/openchamber`, `~/.config/gh`, `~/.ssh` | jeweils ausschließlich vom zugehörigen Tool verwaltet |
 

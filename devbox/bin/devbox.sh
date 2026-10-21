@@ -69,8 +69,11 @@ readonly OPENCHAMBER_ENV_FILE="${STATE_DIR}/openchamber.env"
 # and DevBox owns the boot-time unit (the Happy pattern, not Kisuke's).
 readonly CLOUDCLI_SERVICE="devbox-cloudcli.service"
 readonly CLOUDCLI_SERVICE_UNIT="/etc/systemd/system/${CLOUDCLI_SERVICE}"
-readonly CLOUDCLI_URL="http://127.0.0.1:3001"
-readonly CLOUDCLI_STATUS_URL="${CLOUDCLI_URL}/api/auth/status"
+# The bind address this box was installed with. Written by
+# devbox/features/cloudcli.sh so it survives a devbox update; the URL is
+# derived from it rather than hardcoded, or every message here would lie
+# about a box that was deliberately opened to the network.
+readonly CLOUDCLI_CONFIG_FILE="${ROOT_STATE_DIR}/cloudcli.env"
 
 # code-server: the optional "code-server" feature, not a remote provider.
 # The .deb ships the templated unit; DevBox only enables the dev instance
@@ -1355,6 +1358,41 @@ openchamber_auth_logout() {
 # single-user system whose one account is created in the browser on first
 # visit, and its own status endpoint is the authority on whether that has
 # happened. DevBox never reads its database.
+cloudcli_config_value() {
+  local key="$1"
+
+  [[ -r "$CLOUDCLI_CONFIG_FILE" ]] || return 1
+
+  awk -F= -v key="$key" '$1 == key { print substr($0, index($0, "=") + 1) }' \
+    "$CLOUDCLI_CONFIG_FILE" \
+    | grep .
+}
+
+cloudcli_bind_host() {
+  cloudcli_config_value CLOUDCLI_HOST 2>/dev/null || printf '127.0.0.1'
+}
+
+cloudcli_bind_port() {
+  cloudcli_config_value CLOUDCLI_PORT 2>/dev/null || printf '3001'
+}
+
+# A server bound to 0.0.0.0 is not reachable *at* 0.0.0.0, so probes and
+# printed URLs use loopback whenever the bind address is a wildcard.
+cloudcli_url() {
+  local host
+  host="$(cloudcli_bind_host)"
+
+  case "$host" in
+    0.0.0.0 | "::" | "*") host="127.0.0.1" ;;
+  esac
+
+  printf 'http://%s:%s' "$host" "$(cloudcli_bind_port)"
+}
+
+cloudcli_status_url() {
+  printf '%s/api/auth/status' "$(cloudcli_url)"
+}
+
 cloudcli_service_is_installed() {
   [[ -f "$CLOUDCLI_SERVICE_UNIT" ]]
 }
@@ -1364,7 +1402,7 @@ cloudcli_service_is_enabled() {
 }
 
 cloudcli_server_is_running() {
-  curl -fsS --max-time 5 "$CLOUDCLI_STATUS_URL" >/dev/null 2>&1
+  curl -fsS --max-time 5 "$(cloudcli_status_url)" >/dev/null 2>&1
 }
 
 # `needsSetup` is true until the single account exists, so a false value is
@@ -1372,7 +1410,7 @@ cloudcli_server_is_running() {
 cloudcli_is_authenticated() {
   local status
 
-  status="$(curl -fsS --max-time 5 "$CLOUDCLI_STATUS_URL" 2>/dev/null)" || return 1
+  status="$(curl -fsS --max-time 5 "$(cloudcli_status_url)" 2>/dev/null)" || return 1
 
   printf '%s' "$status" \
     | jq -e '.needsSetup == false' \
@@ -1387,15 +1425,15 @@ cloudcli_auth_status() {
   local status=0
 
   if cloudcli_server_is_running; then
-    ok "CloudCLI server is running (${CLOUDCLI_URL})"
+    ok "CloudCLI server is running ($(cloudcli_url))"
   else
-    warn "CloudCLI server is not reachable at ${CLOUDCLI_URL}"
+    warn "CloudCLI server is not reachable at $(cloudcli_url)"
   fi
 
   if cloudcli_is_authenticated; then
     ok "CloudCLI has its account configured"
   else
-    warn "CloudCLI has no account yet; open ${CLOUDCLI_URL} and sign up"
+    warn "CloudCLI has no account yet; open $(cloudcli_url) and sign up"
     status=1
   fi
 
@@ -1427,8 +1465,8 @@ cloudcli_auth_login() {
   fi
 
   info "CloudCLI has no account yet. Tunnel the UI and create it in the browser:"
-  info "  ssh -L 3001:127.0.0.1:3001 ${DEV_USER}@<devbox-host>"
-  info "  then open ${CLOUDCLI_URL} - the first visit offers the sign-up form."
+  info "  ssh -L $(cloudcli_bind_port):127.0.0.1:$(cloudcli_bind_port) ${DEV_USER}@<devbox-host>"
+  info "  then open $(cloudcli_url) - the first visit offers the sign-up form."
 }
 
 # Remote-provider hook: CloudCLI stores its single account in its own
@@ -1436,7 +1474,7 @@ cloudcli_auth_login() {
 # rather than pretending to sign anything out.
 cloudcli_auth_logout() {
   if cloudcli_is_authenticated; then
-    warn "CloudCLI's account lives in its own database; sign out in the web UI at ${CLOUDCLI_URL}"
+    warn "CloudCLI's account lives in its own database; sign out in the web UI at $(cloudcli_url)"
   else
     ok "CloudCLI has no account configured"
   fi
@@ -2197,10 +2235,14 @@ CloudCLI web and mobile workspace
 
 
 CloudCLI drives the Codex and Claude CLIs installed on this DevBox, so it
-uses whatever those are signed in to. Its server is bound to ${CLOUDCLI_URL};
+uses whatever those are signed in to. Its server is bound to $(cloudcli_url);
 use an SSH tunnel or a reverse proxy to open it from another machine:
 
-  ssh -L 3001:127.0.0.1:3001 ${DEV_USER}@<devbox-host>
+  ssh -L $(cloudcli_bind_port):127.0.0.1:$(cloudcli_bind_port) ${DEV_USER}@<devbox-host>
+
+A box installed with DEVBOX_CLOUDCLI_HOST=0.0.0.0 is reachable directly
+instead, without a tunnel; that choice is recorded in
+${CLOUDCLI_CONFIG_FILE} and survives a devbox update.
 
 CloudCLI is a single-user system. The first visit offers a sign-up form that
 creates the one account; it refuses any further registration afterwards.
@@ -3013,7 +3055,7 @@ doctor() {
     fi
 
     if cloudcli_server_is_running; then
-      ok "CloudCLI server (${CLOUDCLI_URL})"
+      ok "CloudCLI server ($(cloudcli_url))"
     else
       warn "CloudCLI server is not reachable"
       status=1
@@ -3022,7 +3064,7 @@ doctor() {
     if cloudcli_is_authenticated; then
       ok "CloudCLI account is configured"
     else
-      warn "CloudCLI has no account yet; open ${CLOUDCLI_URL} and sign up"
+      warn "CloudCLI has no account yet; open $(cloudcli_url) and sign up"
     fi
   fi
 

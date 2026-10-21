@@ -2109,8 +2109,8 @@ install_gates_cloudcli_installation_on_remote_provider() {
 # ExecStart line is the one legitimate mention, so it is excluded below.
 cloudcli_runs_as_a_devbox_owned_loopback_service() {
   grep -Fq 'npm install --global "@cloudcli-ai/cloudcli@${CLOUDCLI_VERSION}"' "$NORM_FEATURE_CLOUDCLI" &&
-    grep -Fq 'CLOUDCLI_BIND_HOST="${DEVBOX_CLOUDCLI_HOST:-127.0.0.1}"' "$FEATURE_CLOUDCLI" &&
-    grep -Fq 'CLOUDCLI_BIND_PORT="${DEVBOX_CLOUDCLI_PORT:-3001}"' "$FEATURE_CLOUDCLI" &&
+    grep -Fq "CLOUDCLI_BIND_HOST=\"\${DEVBOX_CLOUDCLI_HOST:-\$(devbox_cloudcli_persisted CLOUDCLI_HOST || printf '127.0.0.1')}\"" "$FEATURE_CLOUDCLI" &&
+    grep -Fq "CLOUDCLI_BIND_PORT=\"\${DEVBOX_CLOUDCLI_PORT:-\$(devbox_cloudcli_persisted CLOUDCLI_PORT || printf '3001')}\"" "$FEATURE_CLOUDCLI" &&
     grep -Fq 'CLOUDCLI_SERVICE="devbox-cloudcli.service"' "$FEATURE_CLOUDCLI" &&
     grep -Fq 'systemctl enable --now "$CLOUDCLI_SERVICE"' "$NORM_FEATURE_CLOUDCLI" &&
     grep -Fq 'run_as_dev npm list --global --depth=0 @cloudcli-ai/cloudcli' "$NORM_FEATURE_CLOUDCLI" &&
@@ -2136,10 +2136,94 @@ code_server_is_an_optional_checksum_verified_feature() {
     grep -Fq '["code-server:4.141.0:amd64"]=' "$INSTALL_SCRIPT" &&
     grep -Fq '["code-server:4.141.0:arm64"]=' "$INSTALL_SCRIPT" &&
     grep -Fq 'verify_checksum "${tmp_dir}/${package}"' "$NORM_FEATURE_CODE_SERVER" &&
-    grep -Fq 'CODE_SERVER_BIND_PORT="${DEVBOX_CODE_SERVER_PORT:-8888}"' "$FEATURE_CODE_SERVER" &&
+    grep -Fq "CODE_SERVER_BIND_PORT=\"\${DEVBOX_CODE_SERVER_PORT:-\$(devbox_code_server_persisted CODE_SERVER_PORT || printf '8888')}\"" "$FEATURE_CODE_SERVER" &&
     grep -Fq 'openssl rand -hex 24' "$FEATURE_CODE_SERVER" &&
     grep -Fq 'write_root_owned_file "$CODE_SERVER_CONFIG_FILE" 0600' "$NORM_FEATURE_CODE_SERVER" &&
     grep -Fq 'feature_was_installed code-server' "$MANAGER"
+}
+
+# An opt-in feature must survive devbox update. update_devbox() re-runs the
+# installer with only DEVBOX_REPO_URL/REF/REMOTE, so without reading
+# installed-features back the installer falls through to the default
+# profile: redis and code-server would be dropped (their services left
+# behind) and elixir/postgres would appear on a box that never asked for
+# them. Exercised against the real resolution block, not just grepped.
+feature_selection_survives_a_reinstall() {
+  local block state result
+  # Just the feature-resolution block: from the persisted-features comment
+  # up to (not including) the remote-provider section that follows it, so
+  # the extract stays independent of DEVBOX_REMOTE handling.
+  block="$(
+    awk '
+      /^# The optional features a box was installed with/ { capture = 1 }
+      /^# #43: the remote-access layer/ { capture = 0 }
+      capture { print }
+    ' "$INSTALL_SCRIPT"
+  )"
+
+  [[ -n "$block" ]] || return 1
+
+  state="${TEST_TMP}/feature-persistence"
+  mkdir -p "$state"
+
+  run_resolution() {
+    env -u DEVBOX_PROFILE -u DEVBOX_FEATURES "$@" bash -c '
+      msg_error() { echo "ERROR: $*" >&2; }
+      msg_ok() { :; }
+      msg_info() { :; }
+      ROOT_STATE_DIR="'"$state"'"
+      DEVBOX_ALL_OPTIONAL_FEATURES="elixir postgres redis code-server"
+      '"$block"'
+      printf "%s" "$devbox_selected_features"
+    ' </dev/null
+  }
+
+  # A plain re-run keeps the persisted selection ...
+  printf 'code-server\n' >"${state}/installed-features"
+  result="$(run_resolution)" || return 1
+  [[ "$result" == "code-server" ]] || return 1
+
+  # ... an explicit profile or feature list still overrides it ...
+  result="$(run_resolution DEVBOX_PROFILE=default)" || return 1
+  [[ "$result" == "elixir postgres" ]] || return 1
+
+  result="$(run_resolution DEVBOX_FEATURES=redis)" || return 1
+  [[ "$result" == "redis" ]] || return 1
+
+  # ... a feature that no longer exists is dropped, not fatal ...
+  printf 'code-server bogus redis\n' >"${state}/installed-features"
+  result="$(run_resolution)" || return 1
+  [[ "$result" == "code-server redis" ]] || return 1
+
+  # ... a deliberately empty selection stays empty ...
+  printf '\n' >"${state}/installed-features"
+  result="$(run_resolution)" || return 1
+  [[ -z "$result" ]] || return 1
+
+  # ... and a fresh box still gets the default profile.
+  rm -f "${state}/installed-features"
+  result="$(run_resolution)" || return 1
+  [[ "$result" == "elixir postgres" ]]
+}
+
+# Same class of bug for the bind address: devbox update does not pass
+# DEVBOX_CLOUDCLI_HOST/DEVBOX_CODE_SERVER_HOST through, so a box that was
+# deliberately opened to the LAN would be pulled back onto loopback by the
+# next update unless the choice is recorded in root state and read back.
+bind_addresses_survive_a_reinstall() {
+  grep -Fq 'CLOUDCLI_CONFIG_FILE="${ROOT_STATE_DIR}/cloudcli.env"' "$FEATURE_CLOUDCLI" &&
+    grep -Fq 'devbox_cloudcli_persisted() {' "$FEATURE_CLOUDCLI" &&
+    grep -Fq 'CLOUDCLI_HOST=${CLOUDCLI_BIND_HOST}' "$FEATURE_CLOUDCLI" &&
+    grep -Fq 'CLOUDCLI_PORT=${CLOUDCLI_BIND_PORT}' "$FEATURE_CLOUDCLI" &&
+    grep -Fq 'CODE_SERVER_CONFIG_STATE="${ROOT_STATE_DIR}/code-server.env"' "$FEATURE_CODE_SERVER" &&
+    grep -Fq 'devbox_code_server_persisted() {' "$FEATURE_CODE_SERVER" &&
+    grep -Fq 'CODE_SERVER_HOST=${CODE_SERVER_BIND_HOST}' "$FEATURE_CODE_SERVER" &&
+    grep -Fq 'CODE_SERVER_PORT=${CODE_SERVER_BIND_PORT}' "$FEATURE_CODE_SERVER" &&
+    # The manager must derive its URLs from that file, not hardcode 3001.
+    grep -Fq 'CLOUDCLI_CONFIG_FILE="${ROOT_STATE_DIR}/cloudcli.env"' "$MANAGER" &&
+    grep -Fq 'cloudcli_bind_host() {' "$MANAGER" &&
+    grep -Fq 'cloudcli_url() {' "$MANAGER" &&
+    ! grep -Fq 'CLOUDCLI_URL="http' "$MANAGER"
 }
 
 # No REMOTE_PROVIDER_FILE means the box predates #43, when Happy was
@@ -2979,6 +3063,8 @@ run_test "install gates OpenChamber installation on the remote provider" install
 run_test "install gates CloudCLI installation on the remote provider" install_gates_cloudcli_installation_on_remote_provider
 run_test "CloudCLI runs as a DevBox-owned loopback service" cloudcli_runs_as_a_devbox_owned_loopback_service
 run_test "code-server is an optional, checksum-verified feature" code_server_is_an_optional_checksum_verified_feature
+run_test "feature selection survives a reinstall" feature_selection_survives_a_reinstall
+run_test "bind addresses survive a reinstall" bind_addresses_survive_a_reinstall
 run_test "OpenChamber installs pinned OpenCode and web packages" openchamber_installs_pinned_opencode_and_web_packages
 run_test "OpenChamber UI password is generated and protected" openchamber_ui_password_is_generated_and_protected
 run_test "OpenChamber boot service is enabled through its own CLI" openchamber_boot_service_is_enabled_through_its_own_cli

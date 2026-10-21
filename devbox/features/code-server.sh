@@ -21,14 +21,49 @@ set -Eeuo pipefail
 CODE_SERVER_CONFIG_DIR="${DEV_HOME}/.config/code-server"
 CODE_SERVER_CONFIG_FILE="${CODE_SERVER_CONFIG_DIR}/config.yaml"
 
-# Loopback only, reachable over an SSH tunnel or a reverse proxy.
+# Where this box's chosen bind address lives. devbox update re-runs the
+# installer without DEVBOX_CODE_SERVER_HOST/PORT and rewrites config.yaml,
+# so without persisting them an update would silently pull a deliberately
+# LAN-exposed code-server back onto loopback. Root-owned, the same
+# treatment the remote-provider selection gets.
+CODE_SERVER_CONFIG_STATE="${ROOT_STATE_DIR}/code-server.env"
+
+# Resolution order: explicit environment variable, then this box's
+# persisted choice, then the default.
+devbox_code_server_persisted() {
+  local key="$1"
+
+  [[ -r "$CODE_SERVER_CONFIG_STATE" ]] || return 1
+
+  awk \
+    -F= \
+    -v key="$key" \
+    '$1 == key { print substr($0, index($0, "=") + 1) }' \
+    "$CODE_SERVER_CONFIG_STATE" \
+    | grep .
+}
+
+# Loopback by default: code-server ships a built-in terminal, so it is
+# shell access as the dev user over plain HTTP. Publishing it onto the
+# container network is an explicit decision, not something the installer
+# does on its own.
 #
-# 8080 is code-server's own default, but Multica's self-hosted backend
+# 8080 is code-server's own default port, but Multica's self-hosted backend
 # already binds 127.0.0.1:8080, and the two have to be able to coexist on
 # one box (code-server is a feature, Multica a remote provider). DevBox
-# therefore defaults code-server to 8888 and leaves the port overridable.
-CODE_SERVER_BIND_HOST="${DEVBOX_CODE_SERVER_HOST:-127.0.0.1}"
-CODE_SERVER_BIND_PORT="${DEVBOX_CODE_SERVER_PORT:-8888}"
+# therefore defaults to 8888 and leaves the port overridable.
+CODE_SERVER_BIND_HOST="${DEVBOX_CODE_SERVER_HOST:-$(devbox_code_server_persisted CODE_SERVER_HOST || printf '127.0.0.1')}"
+CODE_SERVER_BIND_PORT="${DEVBOX_CODE_SERVER_PORT:-$(devbox_code_server_persisted CODE_SERVER_PORT || printf '8888')}"
+
+[[ "$CODE_SERVER_BIND_PORT" =~ ^[0-9]{1,5}$ ]] || {
+  msg_error "Invalid code-server port: ${CODE_SERVER_BIND_PORT}"
+  exit 1
+}
+
+[[ "$CODE_SERVER_BIND_HOST" =~ ^[0-9a-zA-Z.:_-]+$ ]] || {
+  msg_error "Invalid code-server bind address: ${CODE_SERVER_BIND_HOST}"
+  exit 1
+}
 
 install_code_server_package() {
   local arch package checksum url tmp_dir
@@ -81,6 +116,16 @@ configure_code_server() {
 
   msg_info "Configuring code-server access"
 
+  # Recorded before the config is written, so the next devbox update finds
+  # it instead of falling back to the loopback default.
+  cat <<EOF >"$CODE_SERVER_CONFIG_STATE"
+# Managed by the DevBox installer; read back on every re-run.
+CODE_SERVER_HOST=${CODE_SERVER_BIND_HOST}
+CODE_SERVER_PORT=${CODE_SERVER_BIND_PORT}
+EOF
+
+  chmod 0644 "$CODE_SERVER_CONFIG_STATE"
+
   reject_symlink "$CODE_SERVER_CONFIG_DIR"
 
   install \
@@ -130,7 +175,8 @@ configure_code_server() {
 
   local config_content
   config_content="$(cat <<EOF
-# Managed by the DevBox installer. Reported by 'devbox code-server status'.
+# Managed by the DevBox installer; rewritten on every install/update.
+# The bind address comes from /var/lib/devbox/code-server.env.
 bind-addr: ${CODE_SERVER_BIND_HOST}:${CODE_SERVER_BIND_PORT}
 auth: password
 password: ${password}

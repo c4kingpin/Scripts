@@ -362,8 +362,29 @@ DEVBOX_ALL_OPTIONAL_FEATURES="elixir postgres redis code-server"
 # override, or update_devbox() re-running this script with the box's
 # persisted selection) is respected as-is and never second-guessed with a
 # prompt.
+# The optional features a box was installed with are recorded in
+# ROOT_STATE_DIR/installed-features. devbox update re-runs this installer
+# *without* DEVBOX_FEATURES, so without reading that back an update would
+# silently fall back to the default profile: every opt-in feature (redis,
+# code-server) would be dropped while its service stayed behind, and
+# elixir/postgres would appear on a box that never asked for them. This
+# mirrors how the remote provider is already carried over.
+devbox_persisted_features=""
+devbox_has_persisted_features=0
+
+if [[ -r "${ROOT_STATE_DIR}/installed-features" ]]; then
+  devbox_persisted_features="$(<"${ROOT_STATE_DIR}/installed-features")"
+  devbox_has_persisted_features=1
+fi
+
 select_features() {
   if [[ -n "${DEVBOX_PROFILE+set}" || -n "${DEVBOX_FEATURES+set}" ]]; then
+    return
+  fi
+
+  # An already-installed box has its answer on disk; re-asking on every
+  # update would be noise, and ignoring the answer would be a regression.
+  if (( devbox_has_persisted_features )); then
     return
   fi
 
@@ -416,6 +437,12 @@ EOF
 
 select_features
 
+# Captured before the default below turns "unset" into "default": only an
+# explicit profile (env var, or the interactive prompt above) may override
+# the persisted selection.
+devbox_profile_explicit=0
+[[ -n "${DEVBOX_PROFILE+set}" ]] && devbox_profile_explicit=1
+
 DEVBOX_PROFILE="${DEVBOX_PROFILE:-default}"
 
 case "$DEVBOX_PROFILE" in
@@ -432,6 +459,24 @@ esac
 # falling back on emptiness.
 if [[ -n "${DEVBOX_FEATURES+set}" ]]; then
   devbox_selected_features="${DEVBOX_FEATURES//,/ }"
+
+elif (( devbox_has_persisted_features && ! devbox_profile_explicit )); then
+  # A plain re-run (devbox update) on an installed box: keep what it has.
+  # Unknown names are dropped with a warning rather than aborting - a
+  # feature that existed when the box was installed but no longer does
+  # must not make the box un-updatable.
+  devbox_selected_features=""
+
+  for devbox_feature in $devbox_persisted_features; do
+    if [[ " $DEVBOX_ALL_OPTIONAL_FEATURES " == *" $devbox_feature "* ]]; then
+      devbox_selected_features+="${devbox_selected_features:+ }${devbox_feature}"
+    else
+      msg_error "Dropping unknown persisted feature: ${devbox_feature}"
+    fi
+  done
+
+  msg_ok "Reusing this box's feature selection: ${devbox_selected_features:-none}"
+
 else
   devbox_selected_features="$devbox_profile_features"
 fi
