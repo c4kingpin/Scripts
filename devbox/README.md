@@ -727,6 +727,15 @@ weiteren Lauf des Installers zurückgelesen — ein `devbox update` zieht eine
 bewusst geöffnete Box also **nicht** wieder auf Loopback zurück. Der Port
 lässt sich mit `DEVBOX_CLOUDCLI_PORT` ändern.
 
+#### Task Master
+
+CloudCLI bietet eine Integration für
+[Task Master](https://www.npmjs.com/package/task-master-ai) (PRD-Analyse,
+Aufgabenzerlegung, Workflow-Automatisierung), liefert das Werkzeug selbst
+aber nicht mit. Der Installer zieht es deshalb gepinnt nach — Paket
+`task-master-ai`, Binaries `task-master`, `task-master-mcp` und
+`task-master-ai`. Die Version steht in `devbox version`.
+
 #### Browser Use
 
 CloudCLIs „Browser Use" steuert ein von Playwright verwaltetes Chromium. Sein

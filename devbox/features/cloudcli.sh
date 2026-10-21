@@ -151,6 +151,34 @@ EOF
   msg_ok "Configured CloudCLI service"
 }
 
+# Task Master is the task-planning integration CloudCLI offers (PRD parsing,
+# task breakdown); CloudCLI drives it but does not ship it. Installed here
+# so the integration is usable without the operator having to find the
+# package name. It is a plain npm install, unlike the browser runtime
+# below, which needs root for its apt dependencies.
+#
+# The package is task-master-ai; the binaries it provides are task-master,
+# task-master-mcp and task-master-ai.
+install_cloudcli_taskmaster() {
+  msg_info "Installing Task Master ${TASKMASTER_VERSION}"
+
+  silent npm install \
+    --global \
+    "task-master-ai@${TASKMASTER_VERSION}"
+
+  if ! npm list \
+    --global \
+    --depth=0 \
+    task-master-ai \
+    >/dev/null 2>&1; then
+
+    msg_error "Task Master npm package was not installed correctly."
+    exit 1
+  fi
+
+  msg_ok "Installed Task Master"
+}
+
 # CloudCLI's "Browser Use" feature drives a Playwright-managed Chromium. Its
 # own in-app installer cannot work on a DevBox: it runs
 # `playwright install-deps chromium`, which shells out to apt and therefore
@@ -198,6 +226,7 @@ install_cloudcli_browser_runtime() {
 # install_agent_limit_notify is deliberately not called here.
 remote_install_cloudcli() {
   install_cloudcli
+  install_cloudcli_taskmaster
   install_cloudcli_browser_runtime
   install_cloudcli_service
 }
@@ -217,6 +246,11 @@ remote_validate_cloudcli() {
     --global \
     --depth=0 \
     @cloudcli-ai/cloudcli
+
+  run_as_dev npm list \
+    --global \
+    --depth=0 \
+    task-master-ai
 
   # Remote access must survive a reboot without an interactive dev login.
   [[ -f "$CLOUDCLI_SERVICE_UNIT" ]]

@@ -104,6 +104,7 @@ readonly OPENCODE_VERSION="2.1.2"
 readonly OPENCHAMBER_VERSION="2.5.0"
 readonly CLOUDCLI_VERSION="1.37.5"
 readonly PLAYWRIGHT_VERSION="1.64.1"
+readonly TASKMASTER_VERSION="0.43.1"
 readonly CODE_SERVER_VERSION="4.141.0"
 
 readonly PACKAGE_NAME_PATTERN='^[a-z0-9][a-z0-9+.-]*$'
@@ -668,6 +669,7 @@ OpenCode:      ${OPENCODE_VERSION}
 OpenChamber:   ${OPENCHAMBER_VERSION}
 CloudCLI:      ${CLOUDCLI_VERSION}
 Playwright:    ${PLAYWRIGHT_VERSION}
+Task Master:   ${TASKMASTER_VERSION}
 code-server:   ${CODE_SERVER_VERSION}
 EOF
 }
@@ -690,6 +692,7 @@ show_version_json() {
     --arg openchamber "$OPENCHAMBER_VERSION" \
     --arg cloudcli "$CLOUDCLI_VERSION" \
     --arg playwright "$PLAYWRIGHT_VERSION" \
+    --arg taskmaster "$TASKMASTER_VERSION" \
     --arg code_server "$CODE_SERVER_VERSION" \
     '{
       devbox: $devbox,
@@ -707,6 +710,7 @@ show_version_json() {
       openchamber: $openchamber,
       cloudcli: $cloudcli,
       playwright: $playwright,
+      taskmaster: $taskmaster,
       code_server: $code_server
     }'
 }
@@ -2572,7 +2576,7 @@ doctor() {
   elif [[ "$remote_provider" == "openchamber" ]]; then
     commands+=(openchamber opencode)
   elif [[ "$remote_provider" == "cloudcli" ]]; then
-    commands+=(cloudcli)
+    commands+=(cloudcli task-master)
   fi
 
   if feature_was_installed elixir; then

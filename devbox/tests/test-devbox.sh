@@ -997,6 +997,7 @@ manager_expected = {
     "MULTICA_VERSION": manifest["MULTICA_VERSION"],
     "CLOUDCLI_VERSION": manifest["CLOUDCLI_VERSION"],
     "PLAYWRIGHT_VERSION": manifest["PLAYWRIGHT_VERSION"],
+    "TASKMASTER_VERSION": manifest["TASKMASTER_VERSION"],
     "CODE_SERVER_VERSION": manifest["CODE_SERVER_VERSION"],
     "OPENCODE_VERSION": manifest["OPENCODE_VERSION"],
     "OPENCHAMBER_VERSION": manifest["OPENCHAMBER_VERSION"],
@@ -1023,6 +1024,7 @@ devbox_version_command_reports_the_manifest() {
     grep -Fq 'OpenChamber:' <<<"$output" &&
     grep -Fq 'CloudCLI:' <<<"$output" &&
     grep -Fq 'Playwright:' <<<"$output" &&
+    grep -Fq 'Task Master:' <<<"$output" &&
     grep -Fq 'code-server:' <<<"$output" &&
     grep -Fq 'version:)' "$MANAGER" &&
     grep -Fq 'show_version' "$NORM_MANAGER"
@@ -1037,7 +1039,7 @@ devbox_version_json_reports_the_manifest() {
   json_output="$("$MANAGER" version --json)"
   expected_devbox_version="$(awk -F': +' '/^DevBox:/ { print $2 }' <<<"$text_output")"
 
-  jq -e '.devbox and .node and .erlang and .elixir and .phoenix and .codex_cli and .claude_code and .happy and .kisuke and .multica and .opencode and .openchamber and .cloudcli and .code_server and .playwright' \
+  jq -e '.devbox and .node and .erlang and .elixir and .phoenix and .codex_cli and .claude_code and .happy and .kisuke and .multica and .opencode and .openchamber and .cloudcli and .code_server and .playwright and .taskmaster' \
     <<<"$json_output" >/dev/null &&
     [[ "$(jq -r '.devbox' <<<"$json_output")" == "$expected_devbox_version" ]] &&
     grep -Fq 'version:--json)' "$MANAGER" &&
@@ -2244,7 +2246,12 @@ cloudcli_browser_runtime_is_installed_by_the_installer() {
     grep -Fq 'silent playwright install-deps chromium' "$NORM_FEATURE_CLOUDCLI" &&
     grep -Fq 'run_as_dev playwright install chromium' "$NORM_FEATURE_CLOUDCLI" &&
     grep -Fq 'DEVBOX_CLOUDCLI_BROWSER:-1' "$FEATURE_CLOUDCLI" &&
-    grep -Fq 'ms-playwright/chromium-' "$MANAGER"
+    grep -Fq 'ms-playwright/chromium-' "$MANAGER" &&
+    # Task Master is CloudCLI's task-planning integration; CloudCLI drives
+    # it but does not ship it, so the installer pins and installs it.
+    grep -Fq 'npm install --global "task-master-ai@${TASKMASTER_VERSION}"' "$NORM_FEATURE_CLOUDCLI" &&
+    grep -Fq 'run_as_dev npm list --global --depth=0 task-master-ai' "$NORM_FEATURE_CLOUDCLI" &&
+    grep -Fq 'commands+=(cloudcli task-master)' "$MANAGER"
 }
 
 # A failed or abandoned Codex/Claude sign-in must not abort devbox auth
