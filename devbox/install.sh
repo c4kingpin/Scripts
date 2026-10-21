@@ -512,8 +512,26 @@ feature_enabled() {
 # passes the box's persisted provider through, so a plain re-run of this
 # script (no DEVBOX_REMOTE set) only happens on a genuinely fresh install,
 # where "happy" is the correct default.
+# This box's configured provider, if it has one. Same reasoning as the
+# persisted feature selection above: install.sh records the choice but used
+# to never read it back, so re-running the installer directly (rather than
+# through devbox update, which passes DEVBOX_REMOTE explicitly) silently
+# fell through to the "happy" default - installing Happy and its service on
+# a box that had deliberately chosen another provider.
+devbox_persisted_remote=""
+
+if [[ -r "${ROOT_STATE_DIR}/remote-provider" ]]; then
+  devbox_persisted_remote="$(<"${ROOT_STATE_DIR}/remote-provider")"
+fi
+
 select_remote() {
   if [[ -n "${DEVBOX_REMOTE+set}" ]]; then
+    return
+  fi
+
+  # An already-installed box has its answer on disk; re-asking would be
+  # noise and ignoring it would be a regression.
+  if [[ -n "$devbox_persisted_remote" ]]; then
     return
   fi
 
@@ -553,6 +571,13 @@ EOF
 }
 
 select_remote
+
+# Precedence: explicit environment variable, then this box's persisted
+# choice, then the default for a genuinely fresh install.
+if [[ -z "${DEVBOX_REMOTE+set}" && -n "$devbox_persisted_remote" ]]; then
+  DEVBOX_REMOTE="$devbox_persisted_remote"
+  msg_ok "Reusing this box's remote provider: ${DEVBOX_REMOTE}"
+fi
 
 DEVBOX_REMOTE="${DEVBOX_REMOTE:-happy}"
 

@@ -2262,6 +2262,60 @@ agent_sign_in_failures_do_not_abort_the_provider_setup() {
     grep -Fq '"${remote_provider}_auth_login"' <<<"$login_fn"
 }
 
+# install.sh records the remote provider but used to never read it back.
+# devbox update passes DEVBOX_REMOTE explicitly, so the gap only showed on
+# a direct re-run of the installer - which then fell through to the "happy"
+# default and installed Happy plus its boot service on a box that had
+# deliberately chosen another provider. Same bug class as the feature
+# selection above; both are exercised against the real resolution code.
+remote_provider_survives_a_direct_reinstall() {
+  local block state result
+  block="$(
+    awk '
+      /^# This box.s configured provider, if it has one/ { capture = 1 }
+      /^select_multica_reverse_proxy\(\)/ { capture = 0 }
+      capture { print }
+    ' "$INSTALL_SCRIPT"
+  )"
+
+  [[ -n "$block" ]] || return 1
+
+  state="${TEST_TMP}/remote-persistence"
+  mkdir -p "$state"
+
+  run_remote_resolution() {
+    env -u DEVBOX_REMOTE "$@" bash -c '
+      msg_error() { echo "ERROR: $*" >&2; }
+      msg_ok() { :; }
+      msg_info() { :; }
+      ROOT_STATE_DIR="'"$state"'"
+      DEVBOX_REMOTE_PROVIDERS="happy kisuke multica openchamber cloudcli"
+      '"$block"'
+      printf "%s" "$DEVBOX_REMOTE"
+    ' </dev/null
+  }
+
+  # A fresh box still defaults to happy ...
+  rm -f "${state}/remote-provider"
+  result="$(run_remote_resolution)" || return 1
+  [[ "$result" == "happy" ]] || return 1
+
+  # ... a configured box keeps its provider on a plain re-run ...
+  printf 'cloudcli\n' >"${state}/remote-provider"
+  result="$(run_remote_resolution)" || return 1
+  [[ "$result" == "cloudcli" ]] || return 1
+
+  # ... including "none", which must not silently become happy ...
+  printf 'none\n' >"${state}/remote-provider"
+  result="$(run_remote_resolution)" || return 1
+  [[ "$result" == "none" ]] || return 1
+
+  # ... and an explicit value still switches providers.
+  printf 'cloudcli\n' >"${state}/remote-provider"
+  result="$(run_remote_resolution DEVBOX_REMOTE=happy)" || return 1
+  [[ "$result" == "happy" ]]
+}
+
 # No REMOTE_PROVIDER_FILE means the box predates #43, when Happy was
 # unconditionally installed - migrating it as "happy" (not "unknown" or
 # erroring) is the whole backward-compatibility point.
@@ -3100,6 +3154,7 @@ run_test "install gates CloudCLI installation on the remote provider" install_ga
 run_test "CloudCLI runs as a DevBox-owned loopback service" cloudcli_runs_as_a_devbox_owned_loopback_service
 run_test "code-server is an optional, checksum-verified feature" code_server_is_an_optional_checksum_verified_feature
 run_test "feature selection survives a reinstall" feature_selection_survives_a_reinstall
+run_test "remote provider survives a direct reinstall" remote_provider_survives_a_direct_reinstall
 run_test "bind addresses survive a reinstall" bind_addresses_survive_a_reinstall
 run_test "CloudCLI browser runtime is installed by the installer" cloudcli_browser_runtime_is_installed_by_the_installer
 run_test "agent sign-in failures do not abort provider setup" agent_sign_in_failures_do_not_abort_the_provider_setup

@@ -559,8 +559,13 @@ angemeldet.
 
 Die getroffene Auswahl landet in `/var/lib/devbox/remote-provider`,
 erscheint in `devbox status` und `devbox doctor --json`
-(`remote_provider`), und `devbox update` übernimmt sie automatisch —
-ein Update ändert den konfigurierten Provider nicht. Bestehende
+(`remote_provider`), und wird bei **jedem** weiteren Lauf des Installers
+zurückgelesen — sowohl über `devbox update` als auch bei einem direkten
+Aufruf von `install.sh` ohne `DEVBOX_REMOTE`. Ohne diese Rückkopplung
+fiele ein direkter Re-Install stillschweigend auf den Standard `happy`
+zurück und richtete Happy samt Boot-Dienst auf einer Box ein, die sich
+bewusst für einen anderen Provider entschieden hat. Ein explizit gesetztes
+`DEVBOX_REMOTE` wechselt den Provider weiterhin. Bestehende
 Installationen ohne gespeicherte Auswahl (vor diesem Feature) werden beim
 nächsten Update automatisch als `happy` interpretiert; Happy-Pairing,
 -Credentials und -Dienst bleiben dabei unverändert erhalten.
