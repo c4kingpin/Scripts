@@ -2213,7 +2213,11 @@ feature_selection_survives_a_reinstall() {
 # deliberately opened to the LAN would be pulled back onto loopback by the
 # next update unless the choice is recorded in root state and read back.
 bind_addresses_survive_a_reinstall() {
-  grep -Fq 'CLOUDCLI_CONFIG_FILE="${ROOT_STATE_DIR}/cloudcli.env"' "$FEATURE_CLOUDCLI" &&
+  # The root state directory must exist before a feature module writes
+  # into it: the provider install runs long before the "Recording DevBox
+  # state" phase that used to be the only place creating it.
+  grep -Fq 'install -d -m 0755 "$ROOT_STATE_DIR"' "$NORM_INSTALL" &&
+    grep -Fq 'CLOUDCLI_CONFIG_FILE="${ROOT_STATE_DIR}/cloudcli.env"' "$FEATURE_CLOUDCLI" &&
     grep -Fq 'devbox_cloudcli_persisted() {' "$FEATURE_CLOUDCLI" &&
     grep -Fq 'CLOUDCLI_HOST=${CLOUDCLI_BIND_HOST}' "$FEATURE_CLOUDCLI" &&
     grep -Fq 'CLOUDCLI_PORT=${CLOUDCLI_BIND_PORT}' "$FEATURE_CLOUDCLI" &&

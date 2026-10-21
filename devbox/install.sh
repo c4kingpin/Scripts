@@ -214,6 +214,16 @@ readonly DEV_HOME="/home/${DEV_USER}"
 # ${DEV_HOME}/.config/devbox (onboarding marker, OpenRouter config, etc.).
 readonly ROOT_STATE_DIR="/var/lib/devbox"
 
+# Created here, not only in the "Recording DevBox state" phase much further
+# down: feature modules write their own state into it during installation
+# (features/cloudcli.sh, features/code-server.sh record the bind address
+# they were installed with), and those run long before that phase. The
+# later `install -d` is idempotent, so both can stay.
+install \
+  -d \
+  -m 0755 \
+  "$ROOT_STATE_DIR"
+
 # Central version manifest (mirrors devbox/versions.env; see header
 # comment). DEVBOX_VERSION itself is defined and shown at the very top of
 # this file, before the root/OS checks.
