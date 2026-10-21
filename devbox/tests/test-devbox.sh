@@ -18,6 +18,8 @@ readonly FEATURE_HAPPY="${PROJECT_ROOT}/features/happy.sh"
 readonly FEATURE_KISUKE="${PROJECT_ROOT}/features/kisuke.sh"
 readonly FEATURE_MULTICA="${PROJECT_ROOT}/features/multica.sh"
 readonly FEATURE_OPENCHAMBER="${PROJECT_ROOT}/features/openchamber.sh"
+readonly FEATURE_CLOUDCLI="${PROJECT_ROOT}/features/cloudcli.sh"
+readonly FEATURE_CODE_SERVER="${PROJECT_ROOT}/features/code-server.sh"
 readonly FEATURE_AGENT_NOTIFY="${PROJECT_ROOT}/features/agent-notify.sh"
 readonly FEATURE_TOOLING="${PROJECT_ROOT}/features/tooling.sh"
 readonly FEATURE_ELIXIR="${PROJECT_ROOT}/features/elixir.sh"
@@ -83,6 +85,8 @@ readonly NORM_FEATURE_POSTGRES="${TEST_TMP}/feature_postgres.normalized"
 readonly NORM_FEATURE_HAPPY="${TEST_TMP}/feature_happy.normalized"
 readonly NORM_FEATURE_KISUKE="${TEST_TMP}/feature_kisuke.normalized"
 readonly NORM_FEATURE_OPENCHAMBER="${TEST_TMP}/feature_openchamber.normalized"
+readonly NORM_FEATURE_CLOUDCLI="${TEST_TMP}/feature_cloudcli.normalized"
+readonly NORM_FEATURE_CODE_SERVER="${TEST_TMP}/feature_code_server.normalized"
 readonly NORM_FEATURE_AGENT_NOTIFY="${TEST_TMP}/feature_agent_notify.normalized"
 readonly NORM_FEATURE_TOOLING="${TEST_TMP}/feature_tooling.normalized"
 readonly NORM_FEATURE_ELIXIR="${TEST_TMP}/feature_elixir.normalized"
@@ -101,6 +105,8 @@ scripts_have_valid_syntax() {
     "$FEATURE_KISUKE" \
     "$FEATURE_MULTICA" \
     "$FEATURE_OPENCHAMBER" \
+    "$FEATURE_CLOUDCLI" \
+    "$FEATURE_CODE_SERVER" \
     "$FEATURE_AGENT_NOTIFY" \
     "$FEATURE_TOOLING" \
     "$FEATURE_ELIXIR" \
@@ -165,7 +171,7 @@ install_script_loads_all_modules_after_bootstrap() {
     grep -Fq "$module" "$NORM_INSTALL" || return 1
   done
 
-  grep -Fq 'readonly DEVBOX_REMOTE_PROVIDERS="happy kisuke multica openchamber"' "$INSTALL_SCRIPT" &&
+  grep -Fq 'readonly DEVBOX_REMOTE_PROVIDERS="happy kisuke multica openchamber cloudcli"' "$INSTALL_SCRIPT" &&
     grep -Fq 'devbox_modules+=("features/${devbox_remote_provider}.sh")' "$NORM_INSTALL" &&
     grep -Fq 'for devbox_remote_provider in $DEVBOX_REMOTE_PROVIDERS; do' "$INSTALL_SCRIPT" &&
     grep -Fq 'fetch_devbox_module "$devbox_module" "$devbox_module_tmp"' "$INSTALL_SCRIPT" &&
@@ -989,6 +995,8 @@ manager_expected = {
     "HAPPY_VERSION": manifest["HAPPY_VERSION"],
     "KISUKE_VERSION": manifest["KISUKE_VERSION"],
     "MULTICA_VERSION": manifest["MULTICA_VERSION"],
+    "CLOUDCLI_VERSION": manifest["CLOUDCLI_VERSION"],
+    "CODE_SERVER_VERSION": manifest["CODE_SERVER_VERSION"],
     "OPENCODE_VERSION": manifest["OPENCODE_VERSION"],
     "OPENCHAMBER_VERSION": manifest["OPENCHAMBER_VERSION"],
 }
@@ -1012,6 +1020,8 @@ devbox_version_command_reports_the_manifest() {
     grep -Fq 'Multica:' <<<"$output" &&
     grep -Fq 'OpenCode:' <<<"$output" &&
     grep -Fq 'OpenChamber:' <<<"$output" &&
+    grep -Fq 'CloudCLI:' <<<"$output" &&
+    grep -Fq 'code-server:' <<<"$output" &&
     grep -Fq 'version:)' "$MANAGER" &&
     grep -Fq 'show_version' "$NORM_MANAGER"
 }
@@ -1025,7 +1035,7 @@ devbox_version_json_reports_the_manifest() {
   json_output="$("$MANAGER" version --json)"
   expected_devbox_version="$(awk -F': +' '/^DevBox:/ { print $2 }' <<<"$text_output")"
 
-  jq -e '.devbox and .node and .erlang and .elixir and .phoenix and .codex_cli and .claude_code and .happy and .kisuke and .multica and .opencode and .openchamber' \
+  jq -e '.devbox and .node and .erlang and .elixir and .phoenix and .codex_cli and .claude_code and .happy and .kisuke and .multica and .opencode and .openchamber and .cloudcli and .code_server' \
     <<<"$json_output" >/dev/null &&
     [[ "$(jq -r '.devbox' <<<"$json_output")" == "$expected_devbox_version" ]] &&
     grep -Fq 'version:--json)' "$MANAGER" &&
@@ -1936,7 +1946,7 @@ shellcheck_exceptions_are_not_globally_disabled() {
 # feature_enabled/feature_was_installed, never on by default in either
 # built-in profile (opt in explicitly via DEVBOX_FEATURES).
 redis_is_a_separate_optional_feature_disabled_by_default() {
-  grep -Fq 'DEVBOX_ALL_OPTIONAL_FEATURES="elixir postgres redis"' "$INSTALL_SCRIPT" &&
+  grep -Fq 'DEVBOX_ALL_OPTIONAL_FEATURES="elixir postgres redis code-server"' "$INSTALL_SCRIPT" &&
     grep -Fq 'default) devbox_profile_features="elixir postgres" ;;' "$INSTALL_SCRIPT" &&
     grep -Fq 'minimal) devbox_profile_features="" ;;' "$INSTALL_SCRIPT" &&
     grep -Fq 'features/redis.sh' "$INSTALL_SCRIPT" &&
@@ -1967,7 +1977,7 @@ redis_validation_and_doctor_are_feature_aware() {
 # pattern install.sh already used for DEVBOX_ALL_OPTIONAL_FEATURES.
 devbox_remote_defaults_to_happy_and_validates_input() {
   grep -Fq 'DEVBOX_REMOTE="${DEVBOX_REMOTE:-happy}"' "$INSTALL_SCRIPT" &&
-    grep -Fq 'readonly DEVBOX_REMOTE_PROVIDERS="happy kisuke multica openchamber"' "$INSTALL_SCRIPT" &&
+    grep -Fq 'readonly DEVBOX_REMOTE_PROVIDERS="happy kisuke multica openchamber cloudcli"' "$INSTALL_SCRIPT" &&
     grep -Fq '" $DEVBOX_REMOTE_PROVIDERS " != *" $DEVBOX_REMOTE "*' "$NORM_INSTALL" &&
     grep -Fq 'Invalid DEVBOX_REMOTE' "$INSTALL_SCRIPT"
 }
@@ -2078,6 +2088,58 @@ openchamber_boot_service_is_enabled_through_its_own_cli() {
     grep -Fq 'openchamber_auth_logout() {' "$MANAGER" &&
     grep -Fq 'openchamber_remote_info() {' "$MANAGER" &&
     grep -Fq 'elif [[ "$remote_provider" == "openchamber" ]]; then' "$NORM_MANAGER"
+}
+
+install_gates_cloudcli_installation_on_remote_provider() {
+  grep -Fq 'if [[ "$DEVBOX_REMOTE" != "none" ]]; then' "$NORM_INSTALL" &&
+    grep -Fq '"remote_install_${DEVBOX_REMOTE}"' "$INSTALL_SCRIPT" &&
+    grep -Fq 'remote_install_cloudcli() {' "$FEATURE_CLOUDCLI" &&
+    grep -Fq 'remote_bashrc_cloudcli() {' "$FEATURE_CLOUDCLI" &&
+    grep -Fq 'remote_validate_cloudcli() {' "$FEATURE_CLOUDCLI" &&
+    grep -Fq 'remote_banner_cloudcli() {' "$FEATURE_CLOUDCLI" &&
+    grep -Fq 'install_cloudcli' "$NORM_FEATURE_CLOUDCLI" &&
+    grep -Fq 'install_cloudcli_service' "$NORM_FEATURE_CLOUDCLI"
+}
+
+# CloudCLI drives the Codex and Claude CLIs DevBox already installs, so it
+# pulls in no agent runtime of its own. It is pinned, bound to loopback,
+# and - unlike Kisuke and OpenChamber - its boot unit is written by DevBox,
+# because CloudCLI has no service manager of its own. The installer itself
+# must never run the binary (that would start a server); the unit's own
+# ExecStart line is the one legitimate mention, so it is excluded below.
+cloudcli_runs_as_a_devbox_owned_loopback_service() {
+  grep -Fq 'npm install --global "@cloudcli-ai/cloudcli@${CLOUDCLI_VERSION}"' "$NORM_FEATURE_CLOUDCLI" &&
+    grep -Fq 'CLOUDCLI_BIND_HOST="${DEVBOX_CLOUDCLI_HOST:-127.0.0.1}"' "$FEATURE_CLOUDCLI" &&
+    grep -Fq 'CLOUDCLI_BIND_PORT="${DEVBOX_CLOUDCLI_PORT:-3001}"' "$FEATURE_CLOUDCLI" &&
+    grep -Fq 'CLOUDCLI_SERVICE="devbox-cloudcli.service"' "$FEATURE_CLOUDCLI" &&
+    grep -Fq 'systemctl enable --now "$CLOUDCLI_SERVICE"' "$NORM_FEATURE_CLOUDCLI" &&
+    grep -Fq 'run_as_dev npm list --global --depth=0 @cloudcli-ai/cloudcli' "$NORM_FEATURE_CLOUDCLI" &&
+    ! grep -vE '^ExecStart=' "$NORM_FEATURE_CLOUDCLI" |
+      grep -Eq '^[^#]*\bcloudcli[[:space:]]+[a-z-]' &&
+    grep -Fq 'cloudcli_auth_status() {' "$MANAGER" &&
+    grep -Fq 'cloudcli_auth_login() {' "$MANAGER" &&
+    grep -Fq 'cloudcli_auth_logout() {' "$MANAGER" &&
+    grep -Fq 'cloudcli_remote_info() {' "$MANAGER" &&
+    grep -Fq '.needsSetup == false' "$MANAGER"
+}
+
+# code-server is an editor, not an agent session layer, so it is an opt-in
+# feature that coexists with any DEVBOX_REMOTE - never a remote provider.
+# Its .deb is pinned and checksum-verified like every other binary
+# artifact, and its port avoids Multica's 8080.
+code_server_is_an_optional_checksum_verified_feature() {
+  grep -Fq 'DEVBOX_ALL_OPTIONAL_FEATURES="elixir postgres redis code-server"' "$INSTALL_SCRIPT" &&
+    ! grep -Fq 'code-server' <<<"$(grep -F 'DEVBOX_REMOTE_PROVIDERS=' "$INSTALL_SCRIPT")" &&
+    grep -Fq 'features/code-server.sh' "$INSTALL_SCRIPT" &&
+    grep -Fq 'if feature_enabled code-server; then' "$INSTALL_SCRIPT" &&
+    grep -Fq 'default) devbox_profile_features="elixir postgres" ;;' "$INSTALL_SCRIPT" &&
+    grep -Fq '["code-server:4.141.0:amd64"]=' "$INSTALL_SCRIPT" &&
+    grep -Fq '["code-server:4.141.0:arm64"]=' "$INSTALL_SCRIPT" &&
+    grep -Fq 'verify_checksum "${tmp_dir}/${package}"' "$NORM_FEATURE_CODE_SERVER" &&
+    grep -Fq 'CODE_SERVER_BIND_PORT="${DEVBOX_CODE_SERVER_PORT:-8888}"' "$FEATURE_CODE_SERVER" &&
+    grep -Fq 'openssl rand -hex 24' "$FEATURE_CODE_SERVER" &&
+    grep -Fq 'write_root_owned_file "$CODE_SERVER_CONFIG_FILE" 0600' "$NORM_FEATURE_CODE_SERVER" &&
+    grep -Fq 'feature_was_installed code-server' "$MANAGER"
 }
 
 # No REMOTE_PROVIDER_FILE means the box predates #43, when Happy was
@@ -2783,6 +2845,8 @@ normalize_continuations "$FEATURE_POSTGRES" >"$NORM_FEATURE_POSTGRES"
 normalize_continuations "$FEATURE_HAPPY" >"$NORM_FEATURE_HAPPY"
 normalize_continuations "$FEATURE_KISUKE" >"$NORM_FEATURE_KISUKE"
 normalize_continuations "$FEATURE_OPENCHAMBER" >"$NORM_FEATURE_OPENCHAMBER"
+normalize_continuations "$FEATURE_CLOUDCLI" >"$NORM_FEATURE_CLOUDCLI"
+normalize_continuations "$FEATURE_CODE_SERVER" >"$NORM_FEATURE_CODE_SERVER"
 normalize_continuations "$FEATURE_AGENT_NOTIFY" >"$NORM_FEATURE_AGENT_NOTIFY"
 normalize_continuations "$FEATURE_TOOLING" >"$NORM_FEATURE_TOOLING"
 normalize_continuations "$FEATURE_ELIXIR" >"$NORM_FEATURE_ELIXIR"
@@ -2863,6 +2927,24 @@ run_test "update and rollback round trip restores the active ref" update_and_rol
 # it, so make sure it keeps doing all of that - starting the real server
 # through OpenChamber's own systemd --user unit, confirming the managed
 # OpenCode came up, and surviving a reboot on the lingering session.
+# Phase 3 is the only place that proves a remote provider and an unrelated
+# optional feature can share one box: CloudCLI's server and code-server
+# both have to come up, answer, and survive a reboot together. The port
+# assertion matters because code-server's upstream default (8080) collides
+# with Multica's API port.
+lxc_integration_test_covers_cloudcli_and_code_server() {
+  grep -Fq 'DEVBOX_E2E_REMOTE="cloudcli"' "$LXC_INTEGRATION_TEST" &&
+    grep -Fq 'DEVBOX_E2E_FEATURES="code-server"' "$LXC_INTEGRATION_TEST" &&
+    grep -Fq 'export DEVBOX_FEATURES=' "$LXC_INTEGRATION_TEST" &&
+    grep -Fq 'npm list --global --depth=0 @cloudcli-ai/cloudcli' "$LXC_INTEGRATION_TEST" &&
+    grep -Fq 'systemctl is-active --quiet devbox-cloudcli.service' "$LXC_INTEGRATION_TEST" &&
+    grep -Fq '.needsSetup == true' "$LXC_INTEGRATION_TEST" &&
+    grep -Fq 'code-server --version' "$LXC_INTEGRATION_TEST" &&
+    grep -Fq 'systemctl is-active --quiet "code-server@dev"' "$LXC_INTEGRATION_TEST" &&
+    grep -Fq '^bind-addr: 127.0.0.1:8888$' "$LXC_INTEGRATION_TEST" &&
+    grep -Fq 'The code-server password changed across a re-install' "$LXC_INTEGRATION_TEST"
+}
+
 lxc_integration_test_covers_the_openchamber_provider() {
   grep -Fq 'DEVBOX_E2E_REMOTE="openchamber"' "$LXC_INTEGRATION_TEST" &&
     grep -Fq 'export DEVBOX_REMOTE=' "$LXC_INTEGRATION_TEST" &&
@@ -2879,6 +2961,7 @@ lxc_integration_test_covers_the_openchamber_provider() {
 
 run_test "LXC integration test exercises the curl | bash path" lxc_integration_test_exercises_the_curl_pipe_path
 run_test "LXC integration test covers the OpenChamber provider" lxc_integration_test_covers_the_openchamber_provider
+run_test "LXC integration test covers CloudCLI and code-server" lxc_integration_test_covers_cloudcli_and_code_server
 run_test "install pins module fetches to a resolved commit" install_pins_module_fetches_to_a_resolved_commit
 run_test "install falls back to the ref when resolution fails" install_falls_back_to_the_ref_when_resolution_fails
 run_test "temp artifact downloads use unpredictable paths" temp_artifact_downloads_use_unpredictable_paths
@@ -2893,6 +2976,9 @@ run_test "redis validation and doctor are feature-aware" redis_validation_and_do
 run_test "DEVBOX_REMOTE defaults to happy and validates input" devbox_remote_defaults_to_happy_and_validates_input
 run_test "interactive Multica setup can collect reverse-proxy configuration" interactive_multica_setup_can_collect_reverse_proxy_configuration
 run_test "install gates OpenChamber installation on the remote provider" install_gates_openchamber_installation_on_remote_provider
+run_test "install gates CloudCLI installation on the remote provider" install_gates_cloudcli_installation_on_remote_provider
+run_test "CloudCLI runs as a DevBox-owned loopback service" cloudcli_runs_as_a_devbox_owned_loopback_service
+run_test "code-server is an optional, checksum-verified feature" code_server_is_an_optional_checksum_verified_feature
 run_test "OpenChamber installs pinned OpenCode and web packages" openchamber_installs_pinned_opencode_and_web_packages
 run_test "OpenChamber UI password is generated and protected" openchamber_ui_password_is_generated_and_protected
 run_test "OpenChamber boot service is enabled through its own CLI" openchamber_boot_service_is_enabled_through_its_own_cli

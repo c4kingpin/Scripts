@@ -229,6 +229,8 @@ KISUKE_VERSION="${KISUKE_VERSION:-1.2.20}"
 MULTICA_VERSION="${MULTICA_VERSION:-0.4.32}"
 OPENCODE_VERSION="${OPENCODE_VERSION:-2.1.2}"
 OPENCHAMBER_VERSION="${OPENCHAMBER_VERSION:-2.5.0}"
+CLOUDCLI_VERSION="${CLOUDCLI_VERSION:-1.37.5}"
+CODE_SERVER_VERSION="${CODE_SERVER_VERSION:-4.141.0}"
 
 # Single source of truth for which remote/session providers exist. Each name
 # here must have a devbox/features/<name>.sh module that defines the four
@@ -237,7 +239,7 @@ OPENCHAMBER_VERSION="${OPENCHAMBER_VERSION:-2.5.0}"
 # devbox/README.md, "Neuen Remote-Provider hinzufügen"). "none" is always a
 # valid DEVBOX_REMOTE value but deliberately not listed here - it has no
 # module and no hooks to call.
-readonly DEVBOX_REMOTE_PROVIDERS="happy kisuke multica openchamber"
+readonly DEVBOX_REMOTE_PROVIDERS="happy kisuke multica openchamber cloudcli"
 DEVBOX_REMOTE_INTERACTIVE_SELECTION=0
 
 DEVBOX_REPO_URL="${DEVBOX_REPO_URL:-https://raw.githubusercontent.com/c4kingpin/Scripts}"
@@ -304,6 +306,8 @@ declare -A DEVBOX_CHECKSUMS=(
   ["elixir:1.20.3:29"]="51f799b78374d569a5df659bdedeb0dd9ef8251230bcdaef00c533019086e625"
   ["multica:0.4.32:amd64"]="c2c1c0ddcd6b1fb8fd5178b2037c19b781b1fd0c880c2df2ab2f3522f8eb889f"
   ["multica:0.4.32:arm64"]="44aa9debc7406feb08f0cc46e889e8a20079a9c853a7916c0721879c9678e459"
+  ["code-server:4.141.0:amd64"]="f384beb4f3ba207e0bca27d0dbd36dd825d5aa909d78c6d4baa8703eaf6b77ba"
+  ["code-server:4.141.0:arm64"]="0bca33a9b01180ad88f0b8969a8e34ae1c76417df471697e7cd65c20ef5dd60d"
 )
 # shellcheck disable=SC2034 # read by features/elixir.sh after it's sourced
 readonly DEVBOX_CHECKSUMS
@@ -319,6 +323,7 @@ devbox_modules=(
   features/node.sh
   features/postgres.sh
   features/redis.sh
+  features/code-server.sh
   features/agents.sh
 )
 
@@ -350,7 +355,7 @@ msg_ok "Loaded DevBox modules"
 # elixir and postgres are the heavy, project-specific runtimes a box may not
 # need; redis (#10 P3) is a fully optional extra never on by default in
 # either built-in profile - opt in explicitly via DEVBOX_FEATURES.
-DEVBOX_ALL_OPTIONAL_FEATURES="elixir postgres redis"
+DEVBOX_ALL_OPTIONAL_FEATURES="elixir postgres redis code-server"
 
 # Only prompt when the caller left both knobs untouched - a genuinely fresh
 # interactive install. Any explicit DEVBOX_PROFILE/DEVBOX_FEATURES (manual
@@ -400,6 +405,10 @@ EOF
       read -r -p "Install Redis? [y/N] " reply
       [[ "${reply,,}" =~ ^(y|yes)$ ]] &&
         DEVBOX_FEATURES="${DEVBOX_FEATURES:+$DEVBOX_FEATURES,}redis"
+
+      read -r -p "Install code-server (VS Code in the browser)? [y/N] " reply
+      [[ "${reply,,}" =~ ^(y|yes)$ ]] &&
+        DEVBOX_FEATURES="${DEVBOX_FEATURES:+$DEVBOX_FEATURES,}code-server"
       ;;
     *) DEVBOX_PROFILE="default" ;;
   esac
@@ -463,7 +472,8 @@ Which remote/session provider should this DevBox use?
   2) Kisuke - Kisuke Connect (kisuke.dev), phone/tablet terminal+editor+chat
   3) Multica - self-hostable agent workspace and daemon (multica.ai)
   4) OpenChamber - self-hosted OpenCode web/PWA workspace (openchamber.dev)
-  5) None   - host console/SSH only, no remote provider
+  5) CloudCLI - self-hosted web/mobile UI for Claude Code and Codex (cloudcli.ai)
+  6) None   - host console/SSH only, no remote provider
 
 EOF
 
@@ -477,7 +487,8 @@ EOF
     2) DEVBOX_REMOTE="kisuke" ;;
     3) DEVBOX_REMOTE="multica" ;;
     4) DEVBOX_REMOTE="openchamber" ;;
-    5) DEVBOX_REMOTE="none" ;;
+    5) DEVBOX_REMOTE="cloudcli" ;;
+    6) DEVBOX_REMOTE="none" ;;
     *) DEVBOX_REMOTE="happy" ;;
   esac
 
@@ -709,6 +720,12 @@ fi
 if feature_enabled redis; then
   install_redis_package
   enable_redis_service
+fi
+
+if feature_enabled code-server; then
+  install_code_server_package
+  configure_code_server
+  enable_code_server_service
 fi
 
 msg_info "Configuring Development Environment"
@@ -1322,6 +1339,19 @@ if feature_enabled redis; then
 
   redis-cli ping \
     >/dev/null
+fi
+
+if feature_enabled code-server; then
+  systemctl is-enabled \
+    --quiet \
+    "code-server@${DEV_USER}"
+
+  [[ "$(stat -c '%a' "$CODE_SERVER_CONFIG_FILE")" == "600" ]]
+
+  grep \
+    -q \
+    '^password: .' \
+    "$CODE_SERVER_CONFIG_FILE"
 fi
 
 # Validate both the installer and generated manager before success.

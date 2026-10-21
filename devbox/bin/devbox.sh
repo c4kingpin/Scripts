@@ -63,6 +63,23 @@ readonly OPENCHAMBER_HOME="${DEV_HOME}/.config/openchamber"
 readonly OPENCHAMBER_SERVICE="openchamber"
 readonly OPENCHAMBER_ENV_FILE="${STATE_DIR}/openchamber.env"
 
+# CloudCLI (DEVBOX_REMOTE=cloudcli): a self-hosted web/mobile UI that drives
+# the Codex and Claude CLIs installed here. It has no CLI login and no
+# service manager of its own - its single account is created in the browser,
+# and DevBox owns the boot-time unit (the Happy pattern, not Kisuke's).
+readonly CLOUDCLI_SERVICE="devbox-cloudcli.service"
+readonly CLOUDCLI_SERVICE_UNIT="/etc/systemd/system/${CLOUDCLI_SERVICE}"
+readonly CLOUDCLI_URL="http://127.0.0.1:3001"
+readonly CLOUDCLI_STATUS_URL="${CLOUDCLI_URL}/api/auth/status"
+
+# code-server: the optional "code-server" feature, not a remote provider.
+# The .deb ships the templated unit; DevBox only enables the dev instance
+# and owns the generated password in its config file.
+# The config file (~/.config/code-server/config.yaml, 0600, holding the
+# generated password) is checked inside a nested dev shell below, so it is
+# spelled there rather than kept as a constant here.
+readonly CODE_SERVER_SERVICE="code-server@${DEV_USER}"
+
 readonly OPENROUTER_ENV="${STATE_DIR}/openrouter.env"
 readonly OPENROUTER_PROFILE="${DEV_HOME}/.codex/openrouter.config.toml"
 readonly OPENROUTER_WRAPPER="${DEV_HOME}/.local/bin/codex-openrouter"
@@ -82,6 +99,8 @@ readonly KISUKE_VERSION="1.2.20"
 readonly MULTICA_VERSION="0.4.32"
 readonly OPENCODE_VERSION="2.1.2"
 readonly OPENCHAMBER_VERSION="2.5.0"
+readonly CLOUDCLI_VERSION="1.37.5"
+readonly CODE_SERVER_VERSION="4.141.0"
 
 readonly PACKAGE_NAME_PATTERN='^[a-z0-9][a-z0-9+.-]*$'
 
@@ -643,6 +662,8 @@ Kisuke:        ${KISUKE_VERSION}
 Multica:       ${MULTICA_VERSION}
 OpenCode:      ${OPENCODE_VERSION}
 OpenChamber:   ${OPENCHAMBER_VERSION}
+CloudCLI:      ${CLOUDCLI_VERSION}
+code-server:   ${CODE_SERVER_VERSION}
 EOF
 }
 
@@ -662,6 +683,8 @@ show_version_json() {
     --arg multica "$MULTICA_VERSION" \
     --arg opencode "$OPENCODE_VERSION" \
     --arg openchamber "$OPENCHAMBER_VERSION" \
+    --arg cloudcli "$CLOUDCLI_VERSION" \
+    --arg code_server "$CODE_SERVER_VERSION" \
     '{
       devbox: $devbox,
       commit: $commit,
@@ -675,7 +698,9 @@ show_version_json() {
       kisuke: $kisuke,
       multica: $multica,
       opencode: $opencode,
-      openchamber: $openchamber
+      openchamber: $openchamber,
+      cloudcli: $cloudcli,
+      code_server: $code_server
     }'
 }
 
@@ -1323,6 +1348,97 @@ openchamber_auth_logout() {
       || warn "OpenCode logout reported an error"
   else
     ok "OpenCode is already signed out"
+  fi
+}
+
+# Remote-provider hooks for CloudCLI. There is no CLI to sign in to: it is a
+# single-user system whose one account is created in the browser on first
+# visit, and its own status endpoint is the authority on whether that has
+# happened. DevBox never reads its database.
+cloudcli_service_is_installed() {
+  [[ -f "$CLOUDCLI_SERVICE_UNIT" ]]
+}
+
+cloudcli_service_is_enabled() {
+  systemctl is-enabled --quiet "$CLOUDCLI_SERVICE" 2>/dev/null
+}
+
+cloudcli_server_is_running() {
+  curl -fsS --max-time 5 "$CLOUDCLI_STATUS_URL" >/dev/null 2>&1
+}
+
+# `needsSetup` is true until the single account exists, so a false value is
+# exactly "someone has completed the browser sign-up".
+cloudcli_is_authenticated() {
+  local status
+
+  status="$(curl -fsS --max-time 5 "$CLOUDCLI_STATUS_URL" 2>/dev/null)" || return 1
+
+  printf '%s' "$status" \
+    | jq -e '.needsSetup == false' \
+      >/dev/null 2>&1
+}
+
+# Remote-provider hook (DEVBOX_REMOTE=cloudcli), dispatched generically by
+# agents_auth_status(). Returns non-zero only for "not registered yet",
+# matching the status semantics agents_auth_status() folds into its own
+# exit code; the service checks below are informational.
+cloudcli_auth_status() {
+  local status=0
+
+  if cloudcli_server_is_running; then
+    ok "CloudCLI server is running (${CLOUDCLI_URL})"
+  else
+    warn "CloudCLI server is not reachable at ${CLOUDCLI_URL}"
+  fi
+
+  if cloudcli_is_authenticated; then
+    ok "CloudCLI has its account configured"
+  else
+    warn "CloudCLI has no account yet; open ${CLOUDCLI_URL} and sign up"
+    status=1
+  fi
+
+  if cloudcli_service_is_installed && cloudcli_service_is_enabled; then
+    ok "CloudCLI starts automatically at boot (${CLOUDCLI_SERVICE})"
+  else
+    warn "CloudCLI service is not enabled; run 'devbox update' as root"
+  fi
+
+  return "$status"
+}
+
+# Remote-provider hook: CloudCLI's own sign-up happens in a browser, so all
+# `devbox auth login` can do here is make sure the server is up and point
+# at it. The Codex and Claude logins that agents_auth_login() has already
+# done by this point are the ones that actually matter - CloudCLI drives
+# those CLIs.
+cloudcli_auth_login() {
+  if ! cloudcli_server_is_running; then
+    info "Starting the CloudCLI service"
+
+    sudo -n systemctl start "$CLOUDCLI_SERVICE" 2>/dev/null ||
+      warn "CloudCLI could not be started; run: sudo systemctl start ${CLOUDCLI_SERVICE}"
+  fi
+
+  if cloudcli_is_authenticated; then
+    ok "CloudCLI already has its account configured"
+    return 0
+  fi
+
+  info "CloudCLI has no account yet. Tunnel the UI and create it in the browser:"
+  info "  ssh -L 3001:127.0.0.1:3001 ${DEV_USER}@<devbox-host>"
+  info "  then open ${CLOUDCLI_URL} - the first visit offers the sign-up form."
+}
+
+# Remote-provider hook: CloudCLI stores its single account in its own
+# database and offers no logout path from the outside, so this reports
+# rather than pretending to sign anything out.
+cloudcli_auth_logout() {
+  if cloudcli_is_authenticated; then
+    warn "CloudCLI's account lives in its own database; sign out in the web UI at ${CLOUDCLI_URL}"
+  else
+    ok "CloudCLI has no account configured"
   fi
 }
 
@@ -2062,6 +2178,64 @@ change root/admin SSH policy.
 EOF
 }
 
+cloudcli_remote_info() {
+  cat <<EOF
+CloudCLI web and mobile workspace
+
+  Browser / mobile app
+           |
+           v
+     CloudCLI server
+           |
+   +-------+-------+
+   |               |
+ Claude          Codex
+   |               |
+   +-------+-------+
+           |
+   /home/dev/workspace
+
+
+CloudCLI drives the Codex and Claude CLIs installed on this DevBox, so it
+uses whatever those are signed in to. Its server is bound to ${CLOUDCLI_URL};
+use an SSH tunnel or a reverse proxy to open it from another machine:
+
+  ssh -L 3001:127.0.0.1:3001 ${DEV_USER}@<devbox-host>
+
+CloudCLI is a single-user system. The first visit offers a sign-up form that
+creates the one account; it refuses any further registration afterwards.
+
+
+Authentication:
+
+  devbox auth status
+  devbox auth login
+  devbox auth logout
+
+\`devbox auth login\` signs Codex and Claude in - the accounts CloudCLI
+actually uses - and then makes sure the server is up. The CloudCLI account
+itself is created in the browser, not from the CLI.
+
+
+Boot behaviour:
+
+  systemctl status ${CLOUDCLI_SERVICE}
+
+The server runs as user "${DEV_USER}" and starts at boot. No interactive login
+is required after a reboot.
+
+
+SSH:
+
+  devbox ssh status
+  devbox ssh setup
+  devbox ssh disable
+
+DevBox SSH configuration applies only to user "${DEV_USER}" and does not intentionally
+change root/admin SSH policy.
+EOF
+}
+
 remote_info() {
   local remote_provider
   remote_provider="$(configured_remote_provider)"
@@ -2074,8 +2248,8 @@ remote_info() {
   cat <<'EOF'
 No remote provider configured (DEVBOX_REMOTE=none)
 
-This DevBox has no Happy, Kisuke, Multica or OpenChamber remote-access layer
-installed. Reach it
+This DevBox has no Happy, Kisuke, Multica, OpenChamber or CloudCLI
+remote-access layer installed. Reach it
 over SSH or the host console, and use Codex/Claude directly:
 
   claude
@@ -2215,7 +2389,7 @@ status() {
 
   printf 'Features:\n'
 
-  for feature in elixir postgres redis; do
+  for feature in elixir postgres redis code-server; do
     if feature_was_installed "$feature"; then
       printf '  %-18s enabled\n' "$feature"
     else
@@ -2245,6 +2419,7 @@ doctor() {
   local happy_version=""
   local kisuke_version=""
   local openchamber_version=""
+  local cloudcli_version=""
 
   # Captured alongside the checks below (unchanged) so --json can report a
   # structured summary without re-running or duplicating any of them.
@@ -2339,6 +2514,8 @@ doctor() {
     commands+=(multica)
   elif [[ "$remote_provider" == "openchamber" ]]; then
     commands+=(openchamber opencode)
+  elif [[ "$remote_provider" == "cloudcli" ]]; then
+    commands+=(cloudcli)
   fi
 
   if feature_was_installed elixir; then
@@ -2353,6 +2530,10 @@ doctor() {
 
   if feature_was_installed redis; then
     commands+=(redis-cli)
+  fi
+
+  if feature_was_installed code-server; then
+    commands+=(code-server)
   fi
 
   for command in "${commands[@]}"; do
@@ -2508,6 +2689,33 @@ doctor() {
         status=1
       fi
     done
+  fi
+
+  # Do not invoke `cloudcli` for the same reason as `happy` above - it
+  # would start a server. Validate the globally installed npm package.
+  if [[ "$remote_provider" == "cloudcli" ]]; then
+    if run_as_dev npm list \
+      --global \
+      --depth=0 \
+      @cloudcli-ai/cloudcli \
+      >/dev/null 2>&1; then
+
+      cloudcli_version="$(
+        run_as_dev npm list \
+          --global \
+          --depth=0 \
+          @cloudcli-ai/cloudcli \
+          2>/dev/null \
+        | grep -F '@cloudcli-ai/cloudcli@' \
+        | head -n1 \
+        || true
+      )"
+
+      ok "${cloudcli_version:-CloudCLI npm package}"
+    else
+      warn "CloudCLI npm package is missing"
+      status=1
+    fi
   fi
 
   if feature_was_installed elixir; then
@@ -2790,6 +2998,64 @@ doctor() {
     else
       # shellcheck disable=SC2088 # literal display text, not a path expansion
       warn "~/.config/openchamber should have mode 0700"
+      status=1
+    fi
+  elif [[ "$remote_provider" == "cloudcli" ]]; then
+    # Unlike Kisuke's and OpenChamber's, CloudCLI's unit is written and
+    # enabled by install.sh itself, so a missing or disabled one is a real
+    # defect. The account, by contrast, is created in a browser whenever
+    # the operator gets to it - that stays informational.
+    if cloudcli_service_is_installed && cloudcli_service_is_enabled; then
+      ok "CloudCLI service (${CLOUDCLI_SERVICE})"
+    else
+      warn "CloudCLI service is not enabled; run: devbox update as root"
+      status=1
+    fi
+
+    if cloudcli_server_is_running; then
+      ok "CloudCLI server (${CLOUDCLI_URL})"
+    else
+      warn "CloudCLI server is not reachable"
+      status=1
+    fi
+
+    if cloudcli_is_authenticated; then
+      ok "CloudCLI account is configured"
+    else
+      warn "CloudCLI has no account yet; open ${CLOUDCLI_URL} and sign up"
+    fi
+  fi
+
+  # code-server is a feature, not a provider, so it is checked
+  # independently of whichever remote provider is configured.
+  if feature_was_installed code-server; then
+    if systemctl is-enabled --quiet "$CODE_SERVER_SERVICE" 2>/dev/null; then
+      ok "code-server service (${CODE_SERVER_SERVICE})"
+    else
+      warn "code-server service is not enabled; run: devbox update as root"
+      status=1
+    fi
+
+    if systemctl is-active --quiet "$CODE_SERVER_SERVICE" 2>/dev/null; then
+      ok "code-server is running"
+    else
+      warn "code-server is not running"
+      status=1
+    fi
+
+    # shellcheck disable=SC2016 # single-quoted on purpose: expands inside the nested `bash -lc` shell, not here
+    if run_as_dev \
+      bash \
+      -lc \
+      '
+        [[ ! -e "$HOME/.config/code-server/config.yaml" ]] ||
+        [[ "$(stat -c "%a" "$HOME/.config/code-server/config.yaml")" == "600" ]]
+      '; then
+
+      ok "code-server config permissions"
+    else
+      # shellcheck disable=SC2088 # literal display text, not a path expansion
+      warn "~/.config/code-server/config.yaml should have mode 0600"
       status=1
     fi
   fi
@@ -3265,6 +3531,7 @@ onboard() {
     kisuke) remote_step="Authenticate Codex, Claude and Kisuke Connect" ;;
     multica) remote_step="Authenticate Codex, Claude and Multica" ;;
     openchamber) remote_step="Authenticate Codex, Claude and OpenCode, and enable OpenChamber" ;;
+    cloudcli) remote_step="Authenticate Codex and Claude for CloudCLI" ;;
   esac
 
   cat <<EOF
@@ -3334,6 +3601,19 @@ OpenChamber serves its own OpenCode-based web workspace once
 
 EOF
       ;;
+    cloudcli)
+      cat <<'EOF'
+Agent commands after onboarding:
+
+  claude
+  codex
+
+CloudCLI drives those same CLIs from its web and mobile UI. It is already
+running; tunnel port 3001 and create its single account in the browser.
+See 'devbox remote-info' for details.
+
+EOF
+      ;;
     *)
       cat <<'EOF'
 Agent commands after onboarding:
@@ -3365,6 +3645,7 @@ EOF
     kisuke) login_prompt="Sign in to Codex, Claude and Kisuke Connect now?" ;;
     multica) login_prompt="Sign in to Codex, Claude and Multica now?" ;;
     openchamber) login_prompt="Sign in to Codex, Claude and OpenCode, and enable OpenChamber now?" ;;
+    cloudcli) login_prompt="Sign in to Codex and Claude for CloudCLI now?" ;;
   esac
 
   if prompt_yes_no \

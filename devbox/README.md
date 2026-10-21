@@ -13,7 +13,8 @@ Installation aus demselben Branch/Commit heruntergeladen und unverändert nach
 `/usr/local/bin/devbox` geschrieben — so bleiben Installer und Manager immer
 versionsgleich. Am dokumentierten Curl-Einzeiler ändert das nichts: `install.sh`
 lädt ohnehin schon während der Installation weitere Artefakte (Pakete, Node.js,
-Erlang/Elixir, Codex/Claude/Happy, Kisuke, Multica oder OpenChamber) nach.
+Erlang/Elixir, Codex/Claude/Happy, Kisuke, Multica, OpenChamber oder
+CloudCLI) nach.
 
 Betriebslogik, die `install.sh` erst nach seiner Bootstrap-Phase (Root-/OS-/
 Netzwerk-Check) braucht, wandert schrittweise in eigene, ebenfalls
@@ -22,8 +23,9 @@ nachgeladene Module unter [`lib/`](lib) und [`features/`](features):
 und [`lib/user.sh`](lib/user.sh) (Dev-User-Anlage) sind quer genutzte
 Bausteine; [`features/`](features) enthält je eine Datei pro
 Installationsphase (`base.sh`, `node.sh`, `postgres.sh`, `agents.sh`,
-`happy.sh`, `kisuke.sh`, `multica.sh`, `openchamber.sh`, `agent-notify.sh`,
-`tooling.sh`, `elixir.sh`). Jede Datei definiert nur Funktionen —
+`happy.sh`, `kisuke.sh`, `multica.sh`, `openchamber.sh`, `cloudcli.sh`,
+`code-server.sh`, `agent-notify.sh`, `tooling.sh`, `elixir.sh`). Jede Datei
+definiert nur Funktionen —
 `install.sh` ruft sie in derselben Reihenfolge auf, in der die Phasen früher
 inline standen. Die Bootstrap-Kette selbst bleibt bewusst in `install.sh`, da
 sie gebraucht wird, um diese Module überhaupt herunterzuladen. `bin/devbox.sh`
@@ -73,6 +75,7 @@ Die beiden schweren, projektspezifischen Laufzeiten lassen sich abwählen,
 | `elixir` | Erlang/OTP, Elixir, Phoenix | im `default`-Profil |
 | `postgres` | PostgreSQL-Paket, -Dienst, Dev-Rolle/-Datenbank | im `default`-Profil |
 | `redis` | Redis-Server, systemd-Dienst | nie — nur per `DEVBOX_FEATURES` |
+| `code-server` | VS Code im Browser, systemd-Dienst | nie — nur per `DEVBOX_FEATURES` |
 
 In einem echten Terminal (nicht `curl | bash`) fragt der Installer diese
 Auswahl interaktiv ab, sofern weder `DEVBOX_PROFILE` noch `DEVBOX_FEATURES`
@@ -221,7 +224,7 @@ das Skript die zugehörige Frage:
    Custom-Auswahl einzelner Features.
 2. **Remote-Provider** (`DEVBOX_REMOTE`, siehe
    [Remote-Provider](#remote-provider)) — Happy, Kisuke Connect, Multica,
-   OpenChamber oder kein Remote-Zugriff.
+   OpenChamber, CloudCLI oder kein Remote-Zugriff.
 3. **Agenten-Autonomie** (`DEVBOX_AUTONOMY`, siehe unten).
 
 Die Auswahl bei der Autonomie-Frage gilt für Codex und Claude gemeinsam —
@@ -412,8 +415,8 @@ curl -fsSL https://raw.githubusercontent.com/c4kingpin/Scripts/master/devbox/ins
   env DEVBOX_REMOTE=kisuke bash
 ```
 
-Ohne Remote-Provider installiert der Installer weder Happy, Kisuke, Multica
-noch OpenChamber und richtet auch keinen zugehörigen Dienst ein; erreichbar bleibt die Box dann
+Ohne Remote-Provider installiert der Installer weder Happy, Kisuke, Multica,
+OpenChamber noch CloudCLI und richtet auch keinen zugehörigen Dienst ein; erreichbar bleibt die Box dann
 über die Host-Konsole (`pct enter`, `lxc exec`, `incus exec`) und optional
 SSH:
 
@@ -641,13 +644,64 @@ führt für OpenChamber zwei Schritte aus:
 bleibt dabei bestehen — es ist von DevBox verwaltete Infrastruktur, keine
 Benutzersitzung.
 
+### CloudCLI
+
+[CloudCLI](https://cloudcli.ai) (Open Source als „Claude Code UI",
+[siteboon/claudecodeui](https://github.com/siteboon/claudecodeui), AGPL-3.0)
+ist eine selbst gehostete Web- und Mobile-Oberfläche, die **genau die
+Agenten-CLIs steuert, die DevBox ohnehin installiert** — Claude Code, Codex
+und Cursor CLI. Anders als OpenChamber bringt es also keine eigene
+Agenten-Laufzeit mit und nutzt die Anmeldungen, die `devbox auth login`
+bereits erledigt hat.
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/c4kingpin/Scripts/master/devbox/install.sh |
+  env DEVBOX_REMOTE=cloudcli bash
+```
+
+Installiert wird das npm-Paket `@cloudcli-ai/cloudcli` (Binary `cloudcli`),
+auf die in `devbox version` angezeigte Version gepinnt. Der gehostete Dienst
+auf cloudcli.ai ist bewusst nicht Teil davon — dort gibt es nichts zu
+installieren.
+
+CloudCLI bringt keine eigene Dienstverwaltung mit, deshalb schreibt DevBox
+die systemd-Unit selbst (wie bei Happy, nicht wie bei Kisuke):
+
+```bash
+systemctl status devbox-cloudcli.service
+```
+
+Der Server lauscht nur auf `127.0.0.1:3001`; Zugriff von außen über einen
+SSH-Tunnel oder einen Reverse Proxy:
+
+```bash
+ssh -L 3001:127.0.0.1:3001 dev@<devbox-host>
+# Danach lokal im Browser: http://localhost:3001
+```
+
+Bind-Adresse und Port lassen sich beim Installieren über
+`DEVBOX_CLOUDCLI_HOST` und `DEVBOX_CLOUDCLI_PORT` vorgeben.
+
+#### Anmeldung
+
+CloudCLI ist ein **Single-User-System**: Beim ersten Aufruf der Oberfläche
+erscheint ein Registrierungsformular, das das eine Konto anlegt; jede
+weitere Registrierung wird abgelehnt. Es gibt dafür keinen CLI-Weg, und
+DevBox liest die CloudCLI-Datenbank nicht an.
+
+`devbox auth login` meldet deshalb Codex und Claude an — die Konten, die
+CloudCLI tatsächlich benutzt — und stellt anschließend sicher, dass der
+Server läuft. `devbox auth status` und `devbox doctor` fragen CloudCLIs
+eigenen Endpunkt `/api/auth/status` ab und melden, ob das Konto schon
+existiert (`needsSetup`).
+
 ### Neuen Remote-Provider hinzufügen
 
-Happy, Kisuke, Multica und OpenChamber sind als Provider-Module
+Happy, Kisuke, Multica, OpenChamber und CloudCLI sind als Provider-Module
 implementiert, nicht als fest verdrahtete Sonderfälle. Welche Provider-Namen gültig sind, steht an einer
 einzigen Stelle: der Konstante `DEVBOX_REMOTE_PROVIDERS` (in `install.sh`,
-aktuell `"happy kisuke multica openchamber"`). Ein neuer Provider `<name>`
-braucht:
+aktuell `"happy kisuke multica openchamber cloudcli"`). Ein neuer Provider
+`<name>` braucht:
 
 1. Ein Eintrag in `DEVBOX_REMOTE_PROVIDERS` — das reicht, damit
    `devbox/features/<name>.sh` beim Installieren automatisch heruntergeladen
@@ -679,6 +733,56 @@ Providern (z. B. sind Happys Prüfungen fatal, Kisukes informativ, weil
 `kisuke connect` sein Setup selbst über mehrere Schritte verteilt) und sein
 JSON-Schema (`doctor --json`) hat pro Provider eigene, flache Feldnamen. Ein
 neuer Provider braucht dort weiterhin einen expliziten `if`/`elif`-Block.
+
+## code-server
+
+[code-server](https://github.com/coder/code-server) bringt VS Code in den
+Browser. Es ist **kein Remote-Provider**, sondern ein optionales Feature:
+ein Editor, keine Agenten-Sitzungsschicht. Es läuft deshalb neben jedem
+`DEVBOX_REMOTE` (auch `none`) statt an dessen Stelle, und ist wie `redis`
+in keinem Profil voreingestellt:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/c4kingpin/Scripts/master/devbox/install.sh |
+  env DEVBOX_FEATURES=elixir,postgres,code-server bash
+```
+
+Installiert wird das offizielle Release-`.deb`, auf die in `devbox version`
+angezeigte Version gepinnt und vor `dpkg` gegen
+[`checksums.env`](checksums.env) geprüft — dieselbe Behandlung wie
+Erlang/OTP, Elixir und Multica. Der Dienst ist die mitgelieferte
+Template-Unit:
+
+```bash
+systemctl status code-server@dev
+```
+
+### Port und Passwort
+
+Der Standardport ist **8888**, nicht code-servers eigene 8080: Multicas
+Backend belegt bereits `127.0.0.1:8080`, und beide müssen auf einer Box
+nebeneinander laufen können. Überschreibbar mit
+`DEVBOX_CODE_SERVER_PORT`, die Bind-Adresse mit `DEVBOX_CODE_SERVER_HOST`
+(Standard `127.0.0.1`).
+
+code-server würde sich beim ersten Start selbst ein Zufallspasswort
+schreiben. DevBox erzeugt es stattdessen vorab (`openssl rand -hex 24`), so
+dass es existiert, bevor der Dienst je erreichbar ist, und eine
+Neuinstallation es nicht stillschweigend austauscht — derselbe Vertrag wie
+beim PostgreSQL- und beim OpenChamber-Passwort. Es steht in
+`~/.config/code-server/config.yaml` (Besitzer `dev`, Modus `0600`):
+
+```bash
+sed -n 's/^password: //p' ~/.config/code-server/config.yaml
+```
+
+Ein eigenes Passwort lässt sich beim Installieren über
+`DEVBOX_CODE_SERVER_PASSWORD` vorgeben (mindestens 12 Zeichen, keine
+Leer- oder Steuerzeichen). Zugriff wieder über einen SSH-Tunnel:
+
+```bash
+ssh -L 8888:127.0.0.1:8888 dev@<devbox-host>
+```
 
 ## Happy-Daemon nach dem Booten
 
@@ -1052,7 +1156,7 @@ Root-State zur laufenden Manager-Version passt.
 Alle aktiv verwalteten Tool-Versionen sind zentral in
 [`versions.env`](versions.env) definiert (DevBox selbst, Node.js,
 Erlang/OTP, Elixir, Phoenix, Codex CLI, Claude Code, Happy, Kisuke, Multica,
-OpenCode, OpenChamber).
+OpenCode, OpenChamber, CloudCLI, code-server).
 `install.sh`
 bleibt ein einzelnes, per `curl | bash` ausführbares Skript und trägt dieselben
 Werte als eingebettete Defaults; ein Regressionstest stellt sicher, dass beide
@@ -1144,6 +1248,16 @@ lingernde User-Session ist aktiv, und OpenChamber kommt nach einem Reboot
 ohne interaktives Login von selbst wieder hoch. Elixir und PostgreSQL
 bleiben hier außen vor — die deckt Phase 1 bereits ab.
 
+**Phase 3 (`DEVBOX_REMOTE=cloudcli` plus Feature `code-server`)** ist die
+einzige Stelle, die belegt, dass ein Remote-Provider und ein davon
+unabhängiges Feature sich eine Box teilen können: CloudCLIs Server und
+code-server müssen beide hochkommen, antworten und einen Reboot überleben,
+ohne sich um einen Port zu streiten. Geprüft werden außerdem CloudCLIs
+eigener Statusendpunkt (`needsSetup: true` auf einer frischen Box — das
+Konto entsteht im Browser, was CI nicht kann), die generierte
+code-server-Konfiguration samt Modus `0600` und Bind-Adresse, und dass das
+code-server-Passwort eine Neuinstallation unverändert übersteht.
+
 Braucht ein funktionierendes LXD auf dem ausführenden Host (`lxc launch`
 muss funktionieren) und Root. Läuft nicht bei jedem Push/PR mit (dauert
 durch echte Downloads/Installationen deutlich länger), sondern über
@@ -1163,6 +1277,8 @@ gh workflow run lxc-integration.yml
 - [Claude Code: settings.json](https://code.claude.com/docs/en/settings)
 - [ChatGPT Remote connections](https://learn.chatgpt.com/docs/remote-connections)
 - [OpenChamber](https://docs.openchamber.dev/install/)
+- [CloudCLI / Claude Code UI](https://github.com/siteboon/claudecodeui)
+- [code-server](https://coder.com/docs/code-server)
 - [OpenCode CLI](https://opencode.ai/docs/cli/)
 - [Erlang/OTP Builds (hex.pm)](https://builds.hex.pm/)
 - [Phoenix installation](https://hexdocs.pm/phoenix/installation.html)
