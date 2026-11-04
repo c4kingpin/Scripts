@@ -1204,6 +1204,19 @@ install_script_records_devbox_state() {
     grep -Fq '"${ROOT_STATE_DIR}/active-ref"' "$INSTALL_SCRIPT"
 }
 
+# Security updates run daily through apt's native timers. The DevBox timer is
+# deliberately separate and weekly because it also replaces managed CLI and
+# runtime versions by re-running the installer.
+install_script_enables_weekly_devbox_updates() {
+  grep -Fq '>/etc/systemd/system/devbox-update.service' "$INSTALL_SCRIPT" &&
+    grep -Fq 'ExecStart=/usr/local/bin/devbox update' "$INSTALL_SCRIPT" &&
+    grep -Fq '>/etc/systemd/system/devbox-update.timer' "$INSTALL_SCRIPT" &&
+    grep -Fq 'OnCalendar=Sun *-*-* 04:00:00' "$INSTALL_SCRIPT" &&
+    grep -Fq 'RandomizedDelaySec=1h' "$INSTALL_SCRIPT" &&
+    grep -Fq 'Persistent=true' "$INSTALL_SCRIPT" &&
+    grep -Fq 'systemctl enable --now devbox-update.timer' "$INSTALL_SCRIPT"
+}
+
 # P1.1: install.sh seeds active-ref with a best-effort release/branch
 # classification of DEVBOX_REF, so the first `devbox update` after a fresh
 # install has something real to snapshot as "previous" before overwriting
@@ -3115,6 +3128,7 @@ run_test "complete stack validation" installer_validates_complete_stack
 run_test "postgres package is a separate optional feature" postgres_package_is_a_separate_optional_feature
 run_test "validation skips checks for disabled features" validation_skips_checks_for_disabled_features
 run_test "install.sh records DevBox state" install_script_records_devbox_state
+run_test "install.sh enables weekly DevBox updates" install_script_enables_weekly_devbox_updates
 run_test "install.sh classifies active-ref mode" install_script_classifies_active_ref_mode
 run_test "install.sh migrates legacy user-state features" install_script_migrates_legacy_user_state_features
 run_test "doctor is feature-aware" doctor_is_feature_aware

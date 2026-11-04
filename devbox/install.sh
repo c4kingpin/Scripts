@@ -1382,6 +1382,37 @@ systemctl enable \
 
 msg_ok "Enabled Security Updates"
 
+msg_info "Enabling Weekly DevBox Updates"
+
+cat <<'EOF' >/etc/systemd/system/devbox-update.service
+[Unit]
+Description=Update DevBox and its managed software
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/devbox update
+EOF
+
+cat <<'EOF' >/etc/systemd/system/devbox-update.timer
+[Unit]
+Description=Run the DevBox update weekly
+
+[Timer]
+OnCalendar=Sun *-*-* 04:00:00
+RandomizedDelaySec=1h
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+EOF
+
+systemctl daemon-reload
+systemctl enable --now devbox-update.timer
+
+msg_ok "Enabled weekly DevBox updates"
+
 msg_info "Validating Installation"
 
 node --version
