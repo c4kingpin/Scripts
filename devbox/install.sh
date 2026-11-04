@@ -52,7 +52,7 @@ msg_error() { printf '%b\n' "${RD}✗ $*${CL}" >&2; }
 # installer version that produced it. The rest of the version manifest
 # (Node.js, Erlang, agent CLIs, ...) is defined further down, where it's
 # actually used.
-readonly DEVBOX_VERSION="${DEVBOX_VERSION:-1.6.3}"
+readonly DEVBOX_VERSION="${DEVBOX_VERSION:-1.6.4}"
 
 msg_info "DevBox installer v${DEVBOX_VERSION}"
 
@@ -239,7 +239,7 @@ KISUKE_VERSION="${KISUKE_VERSION:-1.2.20}"
 MULTICA_VERSION="${MULTICA_VERSION:-0.4.32}"
 OPENCODE_VERSION="${OPENCODE_VERSION:-2.1.2}"
 OPENCHAMBER_VERSION="${OPENCHAMBER_VERSION:-2.5.0}"
-CLOUDCLI_VERSION="${CLOUDCLI_VERSION:-1.37.5}"
+CLOUDCLI_VERSION="${CLOUDCLI_VERSION:-1.37.7}"
 PLAYWRIGHT_VERSION="${PLAYWRIGHT_VERSION:-1.64.1}"
 TASKMASTER_VERSION="${TASKMASTER_VERSION:-0.43.1}"
 CODE_SERVER_VERSION="${CODE_SERVER_VERSION:-4.141.0}"
