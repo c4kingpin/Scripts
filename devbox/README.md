@@ -1320,6 +1320,12 @@ Stellen nicht auseinanderlaufen. Keine der verwalteten npm-Komponenten nutzt
 `@latest`. Jeder Wert lässt sich für einen einzelnen Lauf per Umgebungsvariable
 überschreiben, zum Beispiel `ERLANG_VERSION=28.4 bash install.sh`.
 
+Renovate überwacht die CloudCLI-Pins und erstellt bei neuen npm-Releases einen
+prüfbaren Pull Request. Es führt weder ein automatisches Merge noch ein
+Release aus: Nach dem Merge muss `DEVBOX_VERSION` für das nächste DevBox-Release
+gezielt erhöht werden. Erst dieses Release wird durch `devbox update` und den
+wöchentlichen Timer auf die Boxen verteilt.
+
 ```bash
 devbox version
 ```

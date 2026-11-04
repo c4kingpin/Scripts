@@ -1,0 +1,41 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": ["config:recommended"],
+  "labels": ["dependencies"],
+  "dependencyDashboard": true,
+  "prConcurrentLimit": 3,
+  "packageRules": [
+    {
+      "description": "Keep DevBox's CloudCLI pin reproducible and require review before release.",
+      "matchDepNames": ["@cloudcli-ai/cloudcli"],
+      "groupName": "DevBox managed tools",
+      "automerge": false
+    }
+  ],
+  "customManagers": [
+    {
+      "customType": "regex",
+      "managerFilePatterns": ["/^devbox\\/versions\\.env$/"],
+      "matchStrings": ["(?:^|\\n)CLOUDCLI_VERSION=\\\"(?<currentValue>[^\\\"]+)\\\""],
+      "depNameTemplate": "@cloudcli-ai/cloudcli",
+      "datasourceTemplate": "npm",
+      "versioningTemplate": "semver"
+    },
+    {
+      "customType": "regex",
+      "managerFilePatterns": ["/^devbox\\/install\\.sh$/"],
+      "matchStrings": ["CLOUDCLI_VERSION=\\\"\\$\\{CLOUDCLI_VERSION:-(?<currentValue>[^}]+)\\}\\\""],
+      "depNameTemplate": "@cloudcli-ai/cloudcli",
+      "datasourceTemplate": "npm",
+      "versioningTemplate": "semver"
+    },
+    {
+      "customType": "regex",
+      "managerFilePatterns": ["/^devbox\\/bin\\/devbox\\.sh$/"],
+      "matchStrings": ["readonly CLOUDCLI_VERSION=\\\"(?<currentValue>[^\\\"]+)\\\""],
+      "depNameTemplate": "@cloudcli-ai/cloudcli",
+      "datasourceTemplate": "npm",
+      "versioningTemplate": "semver"
+    }
+  ]
+}
