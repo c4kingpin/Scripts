@@ -6,10 +6,10 @@
   "prConcurrentLimit": 3,
   "packageRules": [
     {
-      "description": "Keep DevBox's CloudCLI pin reproducible and require review before release.",
+      "description": "Keep DevBox's CloudCLI pin reproducible and merge it after CI succeeds.",
       "matchDepNames": ["@cloudcli-ai/cloudcli"],
       "groupName": "DevBox managed tools",
-      "automerge": false
+      "automerge": true
     }
   ],
   "customManagers": [
