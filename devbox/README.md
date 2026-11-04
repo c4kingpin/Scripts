@@ -1272,6 +1272,24 @@ DEVBOX_GITHUB_REPO="<fork>/Scripts" \
 
 Automatische Sicherheitsupdates sind zusätzlich aktiviert, sodass
 Betriebssystem-Patches auch ohne manuelles `devbox update` einlaufen.
+Zusätzlich startet `devbox-update.timer` jeden Sonntag gegen 04:00 Uhr
+(mit bis zu einer Stunde zufälliger Verzögerung) ein `devbox update`. Damit
+werden auch die von DevBox verwalteten Tool-Versionen sowie reguläre
+OS-Paketaktualisierungen wöchentlich eingespielt. Verpasste Läufe werden beim
+nächsten Start des Containers nachgeholt.
+
+Den Zeitplan und das letzte Ausführungsergebnis prüfen:
+
+```bash
+systemctl list-timers devbox-update.timer
+systemctl status devbox-update.service
+```
+
+Ein Update bei Bedarf unmittelbar ausführen:
+
+```bash
+devbox update
+```
 
 ## State-Modell
 
